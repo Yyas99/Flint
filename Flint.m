@@ -216,6 +216,13 @@ static void FacetView(NSView *v, CGFloat c, NSColor *edge) {
 static void DrawImage(NSImage *im, NSRect r) {
     [im drawInRect:r fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1 respectFlipped:YES hints:nil];
 }
+// Fill r with the image at its own proportions, centred; the overflow is cropped by the caller's clip (like CSS object-fit: cover).
+static void DrawImageFill(NSImage *im, NSRect r) {
+    NSSize s = im.size; if (s.width <= 0 || s.height <= 0) return;
+    CGFloat k = MAX(NSWidth(r) / s.width, NSHeight(r) / s.height);
+    NSRect d = NSMakeRect(NSMidX(r) - s.width * k / 2, NSMidY(r) - s.height * k / 2, s.width * k, s.height * k);
+    [im drawInRect:d fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1 respectFlipped:YES hints:@{NSImageHintInterpolation: @(NSImageInterpolationHigh)}];
+}
 static NSRect CenterIn(NSSize s, NSRect r) {
     return NSMakeRect(round(NSMidX(r) - s.width / 2), round(NSMidY(r) - s.height / 2), s.width, s.height);
 }
@@ -7271,6 +7278,32 @@ static NSString *MediaQueryJS(void) {
             "if(!m&&!v)return null;const art=m&&m.artwork&&m.artwork.length?m.artwork[m.artwork.length-1].src:'';"
             "return{title:(m&&m.title)||document.title||'',artist:(m&&m.artist)||'',art:art,playing:v?!v.paused:(ms&&ms.playbackState==='playing'),pos:v?v.currentTime:0,dur:v&&isFinite(v.duration)?v.duration:0}})()";
 }
+// Video thumbnails often come letterboxed (black bands above and below, or at the sides); cut those off so the
+// artwork fills its square with the picture itself.
+static NSImage *TrimLetterbox(NSImage *im) {
+    NSBitmapImageRep *rep = nil;
+    for (NSImageRep *r in im.representations) if ([r isKindOfClass:NSBitmapImageRep.class]) { rep = (NSBitmapImageRep *)r; break; }
+    if (!rep) { CGImageRef cg = [im CGImageForProposedRect:NULL context:nil hints:nil]; if (cg) rep = [[NSBitmapImageRep alloc] initWithCGImage:cg]; }
+    NSInteger w = rep.pixelsWide, h = rep.pixelsHigh; if (w < 16 || h < 16) return im;
+    BOOL (^dark)(NSInteger, NSInteger, BOOL) = ^BOOL(NSInteger i, NSInteger n, BOOL row) {   // every sampled pixel of row/column i is near black
+        for (NSInteger k = 0; k < n; k += MAX(1, n / 48)) {
+            NSColor *c = [[rep colorAtX:row ? k : i y:row ? i : k] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            if (MAX(c.redComponent, MAX(c.greenComponent, c.blueComponent)) > 0.09) return NO;
+        }
+        return YES;
+    };
+    NSInteger top = 0, bot = 0, left = 0, right = 0;
+    while (top < h / 3 && dark(top, w, YES)) top++;
+    while (bot < h / 3 && dark(h - 1 - bot, w, YES)) bot++;
+    while (left < w / 3 && dark(left, h, NO)) left++;
+    while (right < w / 3 && dark(w - 1 - right, h, NO)) right++;
+    if (top + bot < h * 0.04 && left + right < w * 0.04) return im;
+    CGImageRef cg = [rep CGImage]; if (!cg) return im;
+    CGImageRef cut = CGImageCreateWithImageInRect(cg, CGRectMake(left, top, w - left - right, h - top - bot)); if (!cut) return im;
+    NSImage *out = [[NSImage alloc] initWithCGImage:cut size:NSMakeSize(w - left - right, h - top - bot)];
+    CGImageRelease(cut);
+    return out;
+}
 static NSString *MediaControlJS(void) {
     return @"const q=s=>document.querySelector(s),click=(...ss)=>{for(const s of ss){const b=q(s);if(b){b.click();return true}}return false};"
             "const ytm=location.hostname.includes('music.youtube');const v=[...document.querySelectorAll('video,audio')].find(x=>x.currentSrc)||null;"
@@ -7313,7 +7346,7 @@ static NSString *MediaControlJS(void) {
     if (self.compact) {
         NSRect artR = NSMakeRect(round((NSWidth(self.bounds) - 40) / 2), 6, 40, 40);
         NSBezierPath *clip = [NSBezierPath bezierPathWithRoundedRect:artR xRadius:8 yRadius:8];
-        if (self.art) { [NSGraphicsContext saveGraphicsState]; [clip addClip]; DrawImage(self.art, artR); [[NSColor colorWithWhite:0 alpha:0.35] setFill]; NSRectFillUsingOperation(artR, NSCompositingOperationSourceOver); [NSGraphicsContext restoreGraphicsState]; }
+        if (self.art) { [NSGraphicsContext saveGraphicsState]; [clip addClip]; DrawImageFill(self.art, artR); [[NSColor colorWithWhite:0 alpha:0.35] setFill]; NSRectFillUsingOperation(artR, NSCompositingOperationSourceOver); [NSGraphicsContext restoreGraphicsState]; }
         else RoundRect(artR, 8, vPill);
         return;   // the play/pause button sits on top of the artwork
     }
@@ -7321,7 +7354,7 @@ static NSString *MediaControlJS(void) {
     RoundRect(card, 10, vPill);
     NSRect artR = NSMakeRect(NSMinX(card) + 8, NSMinY(card) + 8, 40, 40);
     NSBezierPath *clip = [NSBezierPath bezierPathWithRoundedRect:artR xRadius:6 yRadius:6];
-    if (self.art) { [NSGraphicsContext saveGraphicsState]; [clip addClip]; DrawImage(self.art, artR); [NSGraphicsContext restoreGraphicsState]; }
+    if (self.art) { [NSGraphicsContext saveGraphicsState]; [clip addClip]; DrawImageFill(self.art, artR); [NSGraphicsContext restoreGraphicsState]; }
     else { RoundRect(artR, 6, vActive); NSImage *n = Tinted(Symbol(@"music.note", 14, NSFontWeightMedium), vFaint); DrawImage(n, CenterIn(n.size, artR)); }
     CGFloat tx = NSMaxX(artR) + 10, tw = NSMinX(self.prev.frame) - tx - 4;
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -7387,7 +7420,7 @@ static NSString *MediaControlJS(void) {
         if (art.length && ![art isEqualToString:np.artURL] && [art hasPrefix:@"http"]) {
             np.artURL = art; np.art = nil;
             [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:art] completionHandler:^(NSData *d, NSURLResponse *resp, NSError *err) {
-                NSImage *im = d ? [[NSImage alloc] initWithData:d] : nil;
+                NSImage *im = d ? [[NSImage alloc] initWithData:d] : nil; if (im) im = TrimLetterbox(im);
                 dispatch_async(dispatch_get_main_queue(), ^{ if ([np.artURL isEqualToString:art]) { np.art = im; np.needsDisplay = YES; } });
             }] resume];
         } else if (!art.length) { np.artURL = nil; np.art = nil; }
