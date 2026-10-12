@@ -4460,6 +4460,22 @@ static NSString *ConsentScript(void) {
 }
 @end
 
+// Scrollbars: when macOS shows classic always-on scroll bars (a mouse is connected, or "Show scroll bars: Always"),
+// WebKit draws them as a white trough with a grey bar on every page, light or dark. Flint draws a thin rounded
+// thumb on a clear track instead, in a grey that sits on either. It goes in first, so a site's own scroll bar styling
+// still wins. With overlay scroll bars (trackpad only) macOS's own are already right and nothing is added.
+static NSString *ScrollbarScript(void) {
+    return @"(()=>{const css='::-webkit-scrollbar{width:11px;height:11px;background:transparent}'"
+    "+'::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}'"
+    "+'::-webkit-scrollbar-thumb{background-color:rgba(128,128,128,.38);border-radius:8px;border:3px solid transparent;background-clip:content-box;min-height:36px}'"
+    "+'::-webkit-scrollbar-thumb:hover{background-color:rgba(128,128,128,.62)}'"
+    "+'::-webkit-scrollbar-thumb:active{background-color:rgba(128,128,128,.75)}'"
+    "+'::-webkit-scrollbar-button{display:none;width:0;height:0}';"
+    "const put=()=>{if(document.getElementById('flint-scrollbar'))return;const st=document.createElement('style');st.id='flint-scrollbar';st.textContent=css;"
+    "const r=document.documentElement;if(!r)return;r.insertBefore(st,r.firstChild)};"
+    "put();document.addEventListener('DOMContentLoaded',put);})();";
+}
+
 static void FlintCosmeticInstall(WKUserContentController *ucc) {
     static NSHashTable *done; if (!done) done = [NSHashTable weakObjectsHashTable];
     if (!ucc || [done containsObject:ucc]) return;
@@ -4467,6 +4483,8 @@ static void FlintCosmeticInstall(WKUserContentController *ucc) {
     WKContentWorld *mine = [WKContentWorld worldWithName:@"flint"];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:CosmeticScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:ConsentScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
+    if (NSScroller.preferredScrollerStyle == NSScrollerStyleLegacy)
+        [ucc addUserScript:[[WKUserScript alloc] initWithSource:ScrollbarScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
     [ucc addScriptMessageHandlerWithReply:VCosmetic.shared contentWorld:mine name:@"flintCosmetic"];
 }
 
