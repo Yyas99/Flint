@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reader</title>
+<style>
+/*THEME*/
+:root{--rbg:var(--bg);--rtext:var(--text);--rdim:var(--dim);--rline:var(--line);--size:20px;--measure:680px;--font:'New York',ui-serif,Georgia,serif}
+html[data-look=light]{--rbg:#fbfbfc;--rtext:#1d1d20;--rdim:#6b6b73;--rline:rgba(0,0,0,.08);color-scheme:light}
+html[data-look=paper]{--rbg:#efeeec;--rtext:#2a2928;--rdim:#77746f;--rline:rgba(0,0,0,.08);color-scheme:light}
+html[data-look=night]{--rbg:#0b0b0c;--rtext:#d9d9de;--rdim:#85858d;--rline:rgba(255,255,255,.07);color-scheme:dark}
+html[data-font=sans]{--font:-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+*{box-sizing:border-box}
+html{background:var(--rbg);color:var(--rtext);font:16px/1.5 -apple-system,system-ui;-webkit-font-smoothing:antialiased;transition:background .2s,color .2s}
+body{margin:0}
+.bar{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 18px;background:color-mix(in srgb,var(--rbg) 88%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid transparent;transition:border-color .2s}
+.bar.scrolled{border-bottom-color:var(--rline)}
+.bar .l,.bar .r{display:flex;gap:6px;align-items:center}
+.bar button,.bar a{height:30px;min-width:30px;padding:0 11px;border-radius:999px;border:1px solid var(--rline);background:transparent;color:var(--rdim);font:500 12.5px -apple-system,system-ui;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.bar button:hover,.bar a:hover,.bar button.on{color:var(--rtext);background:var(--rline)}
+.prog{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:6}
+.pop{position:fixed;top:52px;right:18px;z-index:10;width:250px;padding:14px;border-radius:14px;background:var(--card);color:var(--text);border:1px solid var(--border);box-shadow:0 16px 40px rgba(0,0,0,.35);display:none}
+.pop.on{display:block}
+.pop .grp{display:flex;gap:6px;margin-bottom:10px}
+.pop .grp:last-child{margin-bottom:0}
+.pop button{flex:1;height:34px;border-radius:9px;border:1px solid var(--border);background:var(--pill);color:var(--text);cursor:pointer;font:500 13px -apple-system,system-ui}
+.pop button.on{outline:2px solid var(--accent);outline-offset:-1px}
+.sw{width:100%;height:100%;border-radius:7px;display:block}
+main{max-width:var(--measure);margin:0 auto;padding:44px 26px 120px}
+.site{color:var(--rdim);font:600 12px -apple-system,system-ui;letter-spacing:.06em;text-transform:uppercase}
+h1.t{font:700 calc(var(--size) * 1.75)/1.15 var(--font);letter-spacing:-.015em;margin:12px 0 14px}
+.meta{color:var(--rdim);font-size:14px;padding-bottom:26px;margin-bottom:30px;border-bottom:1px solid var(--rline)}
+article{font:var(--size)/1.65 var(--font);overflow-wrap:break-word}
+article p,article ul,article ol,article blockquote,article pre,article figure,article table{margin:0 0 1.05em}
+article h2,article h3,article h4,article h5,article h6{font-family:var(--font);line-height:1.25;margin:1.6em 0 .6em}
+article h2{font-size:1.35em}article h3{font-size:1.15em}article h4,article h5,article h6{font-size:1em}
+article a{color:var(--accent);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:2px}
+article img,article video{max-width:100%;height:auto;border-radius:8px;display:block;margin:1.4em auto}
+article figure{margin:1.6em 0}
+article figcaption{font:13.5px/1.45 -apple-system,system-ui;color:var(--rdim);text-align:center;margin-top:-.6em}
+article blockquote{border-left:3px solid var(--rline);padding-left:1em;color:var(--rdim);margin-left:0;font-style:italic}
+article pre,article code{font:.8em/1.5 ui-monospace,Menlo,monospace}
+article pre{background:var(--rline);padding:14px 16px;border-radius:10px;overflow:auto}
+article :not(pre)>code{background:var(--rline);padding:.1em .35em;border-radius:5px}
+article table{border-collapse:collapse;font:15px/1.4 -apple-system,system-ui;display:block;overflow:auto}
+article td,article th{border:1px solid var(--rline);padding:6px 10px;text-align:left}
+article hr{border:0;height:1px;background:var(--rline);margin:2em 0}
+.gone{text-align:center;color:var(--rdim);padding:22vh 20px}
+.gone b{display:block;color:var(--rtext);font-size:20px;margin-bottom:8px}
+.gone a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="prog" id="prog"></div>
+<div class="bar" id="bar">
+  <div class="l"><a id="orig" title="Leave Reader (⌃⌘R)">← Original page</a></div>
+  <div class="r"><button id="aa" title="Appearance">Aa</button></div>
+</div>
+<div class="pop" id="pop">
+  <div class="grp"><button data-act="smaller" title="Smaller text">A−</button><button data-act="bigger" title="Larger text" style="font-size:16px">A+</button></div>
+  <div class="grp"><button data-font="serif" style="font-family:ui-serif,Georgia,serif">Serif</button><button data-font="sans">Sans</button></div>
+  <div class="grp"><button data-measure="600">Narrow</button><button data-measure="680">Medium</button><button data-measure="800">Wide</button></div>
+  <div class="grp">
+    <button data-look="flint" title="Match Flint"><span class="sw" style="background:var(--bg);border:1px solid var(--border)"></span></button>
+    <button data-look="light" title="Light"><span class="sw" style="background:#fbfbfc;border:1px solid #ddd"></span></button>
+    <button data-look="paper" title="Paper"><span class="sw" style="background:#efeeec;border:1px solid #d8d6d2"></span></button>
+    <button data-look="night" title="Night"><span class="sw" style="background:#0b0b0c;border:1px solid #333"></span></button>
+  </div>
+</div>
+<main id="main"></main>
+<script nonce="{{NONCE}}">
+'use strict';
+const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
+const $ = s => document.querySelector(s);
+const params = new URLSearchParams(location.search);
+const original = params.get('u') || '';
+let prefs = {size: 20, font: 'serif', measure: 680, look: 'flint'};
+
+// Article markup comes from an arbitrary website: rebuild it from an allowlist of tags and attributes.
+const KEEP = new Set(['P','BR','HR','H1','H2','H3','H4','H5','H6','UL','OL','LI','DL','DT','DD','BLOCKQUOTE','PRE','CODE','EM','I','STRONG','B','U','S','SMALL','SUB','SUP','MARK','A','IMG','FIGURE','FIGCAPTION','PICTURE','TABLE','THEAD','TBODY','TFOOT','TR','TD','TH','CAPTION','ABBR','CITE','Q','TIME','KBD','VAR','DEL','INS','SPAN','DIV','SECTION','ARTICLE','HEADER','MAIN','DETAILS','SUMMARY']);
+const UNWRAP = new Set(['SPAN','DIV','SECTION','ARTICLE','HEADER','MAIN','PICTURE','FONT','CENTER','TBODY']);
+const safeURL = (u, img) => { try { const x = new URL(u, original || undefined); return (x.protocol === 'https:' || x.protocol === 'http:' || (img && x.protocol === 'data:' && /^data:image\/(png|jpe?g|gif|webp|avif)/i.test(u))) ? x.href : ''; } catch (e) { return ''; } };
+function clean(src, dst) {
+  for (const n of src.childNodes) {
+    if (n.nodeType === 3) { dst.appendChild(document.createTextNode(n.nodeValue)); continue; }
+    if (n.nodeType !== 1) continue;
+    const tag = n.tagName.toUpperCase();
+    if (!KEEP.has(tag) && !UNWRAP.has(tag)) { if (!/^(SCRIPT|STYLE|IFRAME|OBJECT|EMBED|svg|SVG|MATH|TEMPLATE|NOSCRIPT|FORM|BUTTON|INPUT|SELECT|TEXTAREA|LINK|META)$/.test(tag)) clean(n, dst); continue; }
+    if (UNWRAP.has(tag) && tag !== 'DIV' && tag !== 'SECTION') { clean(n, dst); continue; }
+    const el = document.createElement(tag === 'DIV' || tag === 'SECTION' ? 'div' : tag);
+    if (tag === 'A') { const h = safeURL(n.getAttribute('href') || ''); if (h) { el.href = h; el.rel = 'noreferrer'; } }
+    if (tag === 'IMG') { const s = safeURL(n.getAttribute('src') || '', true); if (!s) continue; el.src = s; el.alt = n.getAttribute('alt') || ''; el.loading = 'lazy'; el.referrerPolicy = 'no-referrer'; dst.appendChild(el); continue; }
+    if (tag === 'TD' || tag === 'TH') { for (const a of ['colspan', 'rowspan']) if (/^\d{1,2}$/.test(n.getAttribute(a) || '')) el.setAttribute(a, n.getAttribute(a)); }
+    if (tag === 'TIME' && n.getAttribute('datetime')) el.setAttribute('datetime', n.getAttribute('datetime').slice(0, 40));
+    clean(n, el);
+    if (tag === 'DIV' && !el.textContent.trim() && !el.querySelector('img')) continue;
+    dst.appendChild(el);
+  }
+}
+
+function apply() {
+  const r = document.documentElement;
+  r.style.setProperty('--size', prefs.size + 'px'); r.style.setProperty('--measure', prefs.measure + 'px');
+  r.dataset.font = prefs.font; if (prefs.look === 'flint') delete r.dataset.look; else r.dataset.look = prefs.look;
+  for (const b of document.querySelectorAll('.pop button')) {
+    b.classList.toggle('on', b.dataset.font === prefs.font || b.dataset.look === prefs.look || (b.dataset.measure && +b.dataset.measure === prefs.measure));
+  }
+}
+function save() { apply(); call('reader.prefs', {set: prefs}); }
+
+$('#pop').addEventListener('click', ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  if (b.dataset.act === 'smaller') prefs.size = Math.max(14, prefs.size - 1);
+  if (b.dataset.act === 'bigger') prefs.size = Math.min(32, prefs.size + 1);
+  if (b.dataset.font) prefs.font = b.dataset.font;
+  if (b.dataset.measure) prefs.measure = +b.dataset.measure;
+  if (b.dataset.look) prefs.look = b.dataset.look;
+  save();
+});
+$('#aa').onclick = ev => { ev.stopPropagation(); $('#pop').classList.toggle('on'); $('#aa').classList.toggle('on'); };
+document.addEventListener('click', ev => { if (!ev.target.closest('#pop')) { $('#pop').classList.remove('on'); $('#aa').classList.remove('on'); } });
+$('#orig').onclick = ev => { ev.preventDefault(); if (history.length > 1) history.back(); else if (original) location.href = original; };
+if (original) $('#orig').href = original;
+document.addEventListener('keydown', ev => {
+  if ((ev.metaKey || ev.ctrlKey) && (ev.key === '=' || ev.key === '+')) { /* page zoom handles this */ }
+  if (ev.key === 'Escape') $('#pop').classList.remove('on');
+});
+addEventListener('scroll', () => {
+  const h = document.documentElement.scrollHeight - innerHeight;
+  $('#prog').style.width = (h > 0 ? Math.min(100, scrollY / h * 100) : 0) + '%';
+  $('#bar').classList.toggle('scrolled', scrollY > 4);
+}, {passive: true});
+
+(async () => {
+  try { const p = await call('reader.prefs'); if (p && p.size) prefs = Object.assign(prefs, p); } catch (e) {}
+  apply();
+  let a = {};
+  try { a = await call('reader.get', {id: params.get('id') || ''}); } catch (e) {}
+  const main = $('#main');
+  if (!a || !a.html) {
+    main.innerHTML = '<div class="gone"><b>This Reader view has expired</b>Reader keeps articles only while Flint is open.</div>';
+    if (original) { const l = document.createElement('a'); l.href = original; l.textContent = 'Open the original page'; main.firstChild.appendChild(document.createElement('br')); main.firstChild.appendChild(l); }
+    return;
+  }
+  document.title = a.title || 'Reader';
+  if (a.lang) document.documentElement.lang = a.lang;
+  if (a.dir === 'rtl') document.documentElement.dir = 'rtl';
+  const site = document.createElement('div'); site.className = 'site'; site.textContent = a.site || '';
+  const h1 = document.createElement('h1'); h1.className = 't'; h1.textContent = a.title || '';
+  const meta = document.createElement('div'); meta.className = 'meta';
+  const mins = Math.max(1, Math.round((a.words || 0) / 230));
+  let when = '';
+  if (a.published) { const d = new Date(a.published); if (!isNaN(d)) when = d.toLocaleDateString(undefined, {day: 'numeric', month: 'long', year: 'numeric'}); }
+  meta.textContent = [a.byline, when, mins + ' min read'].filter(Boolean).join('  ·  ');
+  const art = document.createElement('article');
+  clean(new DOMParser().parseFromString(a.html, 'text/html').body, art);
+  main.append(site, h1, meta, art);
+})();
+</script>
+</body>
+</html>

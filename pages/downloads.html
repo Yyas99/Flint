@@ -1,0 +1,352 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Downloads</title>
+<style>
+/*THEME*/
+*{box-sizing:border-box}
+html,body{height:100%}
+html{background:var(--bg);color:var(--text);font:13px/1.35 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+body{margin:0;display:flex;flex-direction:column;overflow:hidden}
+button,input,select{font:inherit;color:inherit}
+header{display:flex;align-items:center;gap:10px;padding:22px 24px 14px;flex-wrap:wrap}
+h1{font-size:23px;margin:0}
+.speed{font-variant-numeric:tabular-nums;color:var(--dim);font-size:12.5px;padding:4px 10px;border-radius:999px;background:var(--pill);border:1px solid var(--border);margin-right:auto}
+.speed b{color:var(--text);font-weight:600}
+.search{position:relative;width:240px}
+.search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:13px;height:13px;stroke:var(--faint);fill:none;stroke-width:2}
+.search input{width:100%;height:32px;border:1px solid var(--border);background:var(--pill);padding:0 12px 0 30px;outline:none}
+.btn{height:32px;padding:0 12px;border:1px solid var(--border);background:var(--pill);cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.btn:hover{background:var(--hover)}
+.btn svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.btn.icon{width:32px;padding:0;justify-content:center}
+.wrapper{flex:1;display:flex;min-height:0;padding:0 24px 18px;gap:16px}
+aside{width:184px;flex:none;overflow:auto}
+aside .grp{margin-bottom:14px}
+aside .lbl{font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.03em;text-transform:uppercase;padding:0 10px 6px}
+aside a{display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:8px;color:var(--dim);text-decoration:none;cursor:pointer}
+aside a:hover{background:var(--hover);color:var(--text)}
+aside a.on{background:var(--active);color:var(--text)}
+aside a svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+aside a span{flex:1}
+aside a small{color:var(--faint);font-variant-numeric:tabular-nums}
+main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.thead,.row{display:grid;grid-template-columns:minmax(150px,1fr) 76px minmax(120px,170px) 86px 72px 78px 60px;align-items:center;gap:0 12px;padding:0 10px 0 14px}
+@media (max-width:1180px){.thead,.row{grid-template-columns:minmax(140px,1fr) 70px minmax(110px,160px) 84px 60px}.c-eta,.c-t{display:none}}
+@media (max-width:980px){.wrapper{flex-direction:column}aside{width:auto;display:flex;flex-wrap:wrap;gap:4px;overflow:visible}aside .grp{display:contents}aside .lbl{display:none}aside a{padding:5px 10px;border:1px solid var(--border)}}
+@media (max-width:720px){.thead,.row{grid-template-columns:minmax(120px,1fr) minmax(100px,150px) 60px}.c-size,.c-speed{display:none}.search{width:100%;order:9}}
+.thead{height:34px;border-bottom:1px solid var(--line);font-size:11.5px;color:var(--faint);font-weight:600;flex:none}
+.thead div{cursor:pointer;user-select:none;white-space:nowrap}
+.thead div:hover{color:var(--dim)}
+.thead .sort::after{content:" ↓";color:var(--dim)}.thead .sort.up::after{content:" ↑"}
+.list{flex:1;overflow:auto}
+.row{height:46px;border-bottom:1px solid var(--line);cursor:default;position:relative}
+.row:hover{background:var(--hover)}
+.row.sel{background:var(--active)}
+.name{display:flex;align-items:center;gap:10px;min-width:0}
+.name img{width:26px;height:26px;flex:none}
+.name .t{min-width:0}
+.name .t div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.name .t small{display:block;color:var(--faint);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.num{font-variant-numeric:tabular-nums;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pg{display:flex;flex-direction:column;gap:4px;min-width:0}
+.bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--text);border-radius:2px;transition:width .4s}
+.pg span{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st-failed .pg span,.err{color:#e5737a}
+.acts{display:flex;gap:2px;justify-content:flex-end;opacity:0}
+.row:hover .acts,.row.sel .acts{opacity:1}
+.acts button{width:26px;height:26px;border:0;background:transparent;border-radius:7px;cursor:pointer;display:grid;place-items:center;color:var(--dim)}
+.acts button:hover{background:var(--active);color:var(--text)}
+.acts svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.empty{padding:80px 20px;text-align:center;color:var(--dim)}
+.empty b{display:block;color:var(--text);font-size:16px;margin-bottom:6px}
+.details{flex:none;border-top:1px solid var(--line);padding:14px 16px 16px;display:none}
+.details.open{display:block}
+.dtop{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.dtop img{width:36px;height:36px}
+.dtop .t{flex:1;min-width:0}
+.dtop .t b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}
+.dtop .t small{color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.dbtns{display:flex;gap:6px;flex-wrap:wrap}
+.kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 18px;margin:10px 0 12px}
+.kv div{font-size:12px;color:var(--faint)}
+.kv b{display:block;color:var(--text);font-weight:500;font-variant-numeric:tabular-nums;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.map{position:relative;height:16px;border-radius:5px;background:var(--line);overflow:hidden}
+.map span{position:absolute;top:0;bottom:0;border-right:1px solid var(--card)}
+.map span i{display:block;height:100%;background:var(--text);opacity:.85}
+.map span.live i{background:var(--text);opacity:1;animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.6}}
+.maplbl{display:flex;justify-content:space-between;font-size:11px;color:var(--faint);margin-top:5px}
+.menu{position:fixed;z-index:20;min-width:210px;padding:5px;background:var(--card);border:1px solid var(--border);box-shadow:0 12px 32px rgba(0,0,0,.35)}
+.menu button{display:block;width:100%;text-align:left;border:0;background:none;padding:6px 10px;border-radius:6px;cursor:pointer}
+.menu hr{border:0;height:1px;background:var(--line);margin:4px 6px}
+dialog{border:1px solid var(--border);background:var(--card);color:var(--text);padding:20px;width:min(520px,90vw);box-shadow:0 20px 60px rgba(0,0,0,.45)}
+dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog h3{margin:0 0 12px;font-size:16px}
+.field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.field label{font-size:12px;color:var(--dim)}
+.field input,.field select{height:34px;border:1px solid var(--border);background:var(--pill);padding:0 10px;outline:none}
+.field .row2{display:flex;align-items:center;gap:10px}
+.field input[type=range]{flex:1;height:auto;padding:0;border:0;background:none}
+.field output{width:28px;text-align:right;font-variant-numeric:tabular-nums}
+.drow{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.toggle small{display:block;color:var(--faint);font-size:11.5px}
+.sw{appearance:none;-webkit-appearance:none;width:34px;height:20px;border-radius:999px;background:var(--line);position:relative;cursor:pointer;flex:none;margin:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--bg);transition:left .15s}
+.sw:checked{background:var(--text)}.sw:checked::after{left:16px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <h1>Downloads</h1>
+  <div class="speed" id="speed">Idle</div>
+  <div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><input id="q" placeholder="Search downloads" spellcheck="false"></div>
+  <button class="btn" id="add"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add URL</button>
+  <button class="btn" id="resumeAll"><svg viewBox="0 0 24 24"><path d="M7 5l11 7-11 7z"/></svg>Resume all</button>
+  <button class="btn" id="pauseAll"><svg viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></svg>Pause all</button>
+  <button class="btn icon" id="folder" title="Open the download folder"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></button>
+  <button class="btn icon" id="gear" title="Download settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg></button>
+</header>
+<div class="wrapper">
+  <aside id="nav"></aside>
+  <main>
+    <div class="thead" id="thead">
+      <div data-k="name">Name</div><div data-k="total" class="c-size">Size</div><div data-k="prog">Progress</div><div data-k="speed" class="c-speed">Speed</div><div data-k="eta" class="c-eta">Time left</div><div data-k="t" class="c-t sort">Added</div><div></div>
+    </div>
+    <div class="list" id="list"></div>
+    <div class="details" id="details"></div>
+  </main>
+</div>
+
+<dialog id="addDlg">
+  <h3>Download a file</h3>
+  <div class="field"><label for="addUrl">Address</label><input id="addUrl" placeholder="https://…" spellcheck="false"></div>
+  <div class="drow"><button class="btn" id="addCancel">Cancel</button><button class="btn primary" id="addGo">Download</button></div>
+</dialog>
+
+<dialog id="setDlg">
+  <h3>Download settings</h3>
+  <div class="toggle"><div>Accelerator<small>Fetch files over several connections at once, like Internet Download Manager.</small></div><input type="checkbox" class="sw" id="sAccel"></div>
+  <div class="field"><label>Connections per download</label><div class="row2"><input type="range" id="sConns" min="1" max="16" step="1"><output id="oConns"></output></div></div>
+  <div class="field"><label for="sActive">Downloads at the same time</label><select id="sActive"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></div>
+  <div class="field"><label for="sLimit">Speed limit</label><select id="sLimit"><option value="0">No limit</option><option value="256">256 KB/s</option><option value="512">512 KB/s</option><option value="1024">1 MB/s</option><option value="2048">2 MB/s</option><option value="5120">5 MB/s</option><option value="10240">10 MB/s</option></select></div>
+  <div class="toggle"><div>Ask where to save each file<small>Uses the standard save sheet (one connection).</small></div><input type="checkbox" class="sw" id="sAsk"></div>
+  <div class="field"><label>Saved to</label><div class="row2"><span id="sFolder" class="num" style="flex:1"></span><button class="btn" id="sChange">Change…</button></div></div>
+  <div class="drow"><button class="btn primary" id="setDone">Done</button></div>
+</dialog>
+
+<script nonce="{{NONCE}}">
+const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtB = b => { if (!(b > 0)) return '—'; const u = ['B','KB','MB','GB','TB']; let i = 0; while (b >= 1000 && i < 4) { b /= 1000; i++; } return (i ? b.toFixed(b < 10 ? 1 : 0) : b) + ' ' + u[i]; };
+const fmtS = s => s > 0 ? fmtB(s) + '/s' : '';
+const fmtT = s => { if (!(s > 0) || !isFinite(s)) return ''; s = Math.round(s); if (s < 60) return s + 's'; if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's'; return Math.floor(s/3600) + 'h ' + Math.floor(s%3600/60) + 'm'; };
+const fmtD = t => { if (!t) return ''; const d = new Date(t * 1000), n = new Date(); const same = d.toDateString() === n.toDateString(); return same ? d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : d.toLocaleDateString([], {day:'numeric', month:'short'}); };
+const svg = p => `<svg viewBox="0 0 24 24">${p}</svg>`;
+const I = {
+  pause: svg('<path d="M8 5v14M16 5v14"/>'), play: svg('<path d="M7 5l11 7-11 7z"/>'), x: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  folder: svg('<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>'), more: svg('<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>'),
+  retry: svg('<path d="M4 12a8 8 0 0113.7-5.7L20 8M20 4v4h-4M20 12a8 8 0 01-13.7 5.7L4 16M4 20v-4h4"/>'), open: svg('<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/>')
+};
+const CATS = [
+  ['all', 'All downloads', '<path d="M12 4v11M7 10l5 5 5-5M5 19h14"/>'],
+  ['active', 'Unfinished', '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>'],
+  ['done', 'Finished', '<path d="M5 12l4 4 10-10"/>'],
+  ['failed', 'Failed', '<circle cx="12" cy="12" r="8"/><path d="M12 8v5M12 16h.01"/>']
+];
+const TYPES = [
+  ['video', 'Video', '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/>'],
+  ['audio', 'Music', '<path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/>'],
+  ['archive', 'Compressed', '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M12 3v4M12 9v2M12 13v2"/>'],
+  ['doc', 'Documents', '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/>'],
+  ['program', 'Programs', '<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/>'],
+  ['image', 'Images', '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-8 8"/>'],
+  ['other', 'Other', '<circle cx="12" cy="12" r="8"/>']
+];
+let items = [], settings = {}, cat = 'all', q = '', sortK = 't', sortUp = false, sel = null, menuEl = null;
+const isActive = x => ['running','queued','paused'].includes(x.state);
+function matchCat(x, c) {
+  if (c === 'all') return true;
+  if (c === 'active') return isActive(x);
+  if (c === 'done') return x.state === 'done';
+  if (c === 'failed') return x.state === 'failed' || x.state === 'cancelled';
+  return x.cat === c;
+}
+function renderNav() {
+  const n = c => items.filter(x => matchCat(x, c)).length;
+  const link = ([k, label, p]) => `<a data-c="${k}" class="${cat === k ? 'on' : ''}">${svg(p)}<span>${label}</span><small>${n(k) || ''}</small></a>`;
+  $('#nav').innerHTML = `<div class="grp">${CATS.map(link).join('')}</div><div class="grp"><div class="lbl">Types</div>${TYPES.filter(t => n(t[0])).map(link).join('') || '<div class="lbl" style="text-transform:none;font-weight:400">Nothing yet</div>'}</div>`;
+}
+function progText(x) {
+  const pct = x.total > 0 ? Math.floor(x.got / x.total * 100) : 0;
+  if (x.state === 'done') return x.exists ? 'Done' : 'Moved or deleted';
+  if (x.state === 'failed') return 'Failed' + (x.err ? ' · ' + x.err : '');
+  if (x.state === 'cancelled') return 'Cancelled';
+  if (x.state === 'paused') return `Paused · ${x.total > 0 ? pct + '%' : fmtB(x.got)}`;
+  if (x.state === 'queued') return 'Waiting in line';
+  return x.total > 0 ? `${pct}% · ${fmtB(x.got)} of ${fmtB(x.total)}` : fmtB(x.got);
+}
+function rowHTML(x) {
+  const f = x.total > 0 ? Math.min(100, x.got / x.total * 100) : (x.state === 'done' ? 100 : 0);
+  const main = x.state === 'running' || x.state === 'queued' ? ['pause', I.pause, 'Pause'] : x.state === 'paused' ? ['resume', I.play, 'Resume'] : x.state === 'done' ? ['reveal', I.folder, 'Show in Finder'] : ['retry', I.retry, 'Try again'];
+  return `<div class="name"><img src="flint://dlicon/${encodeURIComponent(x.ext || 'bin')}" alt=""><div class="t"><div>${esc(x.name)}</div><small>${esc(x.host)}</small></div></div>`
+    + `<div class="num c-size">${x.total > 0 ? fmtB(x.total) : (x.state === 'running' ? fmtB(x.got) : '—')}</div>`
+    + `<div class="pg"><div class="bar"><i style="width:${f}%"></i></div><span>${esc(progText(x))}</span></div>`
+    + `<div class="num c-speed">${x.state === 'running' ? fmtS(x.speed) : ''}</div>`
+    + `<div class="num c-eta">${x.state === 'running' && x.total > 0 && x.speed > 0 ? fmtT((x.total - x.got) / x.speed) : ''}</div>`
+    + `<div class="num c-t">${fmtD(x.t)}</div>`
+    + `<div class="acts"><button data-a="${main[0]}" title="${main[2]}">${main[1]}</button><button data-a="menu" title="More">${I.more}</button></div>`;
+}
+function sorted(list) {
+  const key = { name: x => x.name.toLowerCase(), total: x => x.total, prog: x => x.total > 0 ? x.got / x.total : 0, speed: x => x.speed || 0, eta: x => x.speed > 0 ? (x.total - x.got) / x.speed : 1e12, t: x => x.t }[sortK];
+  return list.slice().sort((a, b) => { const A = key(a), B = key(b); return (A < B ? -1 : A > B ? 1 : 0) * (sortUp ? 1 : -1); });
+}
+function renderList() {
+  const list = sorted(items.filter(x => matchCat(x, cat) && (!q || (x.name + ' ' + x.url).toLowerCase().includes(q))));
+  const box = $('#list');
+  if (!list.length) { box.innerHTML = `<div class="empty"><b>${items.length ? 'Nothing here' : 'No downloads yet'}</b>${items.length ? 'Try another category or search.' : 'Files you download appear here, fetched over several connections at once.'}</div>`; return; }
+  const keep = new Map([...box.querySelectorAll('.row')].map(r => [r.dataset.id, r]));
+  box.querySelector('.empty')?.remove();
+  let prev = null;
+  for (const x of list) {
+    let r = keep.get(x.id);
+    const html = rowHTML(x);
+    if (!r) { r = document.createElement('div'); r.className = 'row'; r.dataset.id = x.id; }
+    keep.delete(x.id);
+    if (r._html !== html) { r.innerHTML = html; r._html = html; }
+    r.className = 'row st-' + x.state + (sel === x.id ? ' sel' : '');
+    const want = prev ? prev.nextSibling : box.firstChild;
+    if (want !== r) box.insertBefore(r, want);
+    prev = r;
+  }
+  for (const r of keep.values()) r.remove();
+}
+function renderDetails() {
+  const d = $('#details'), x = items.find(i => i.id === sel);
+  if (!x) { d.classList.remove('open'); d.innerHTML = ''; return; }
+  d.classList.add('open');
+  const pct = x.total > 0 ? (x.got / x.total * 100).toFixed(1) + '%' : '—';
+  let map = '';
+  if (x.segs && x.segs.length && x.total > 0) {
+    map = '<div class="map">' + x.segs.map(([s, e, g, live]) => { const len = Math.max(1, e - s + 1); return `<span class="${live ? 'live' : ''}" style="left:${s / x.total * 100}%;width:${len / x.total * 100}%"><i style="width:${Math.min(100, g / len * 100)}%"></i></span>`; }).join('') + '</div>'
+      + `<div class="maplbl"><span>${x.segs.length} slices · ${x.conns} connection${x.conns === 1 ? '' : 's'} open</span><span>${pct}</span></div>`;
+  } else if (x.total > 0) {
+    map = `<div class="map"><span style="left:0;width:100%"><i style="width:${Math.min(100, x.got / x.total * 100)}%"></i></span></div><div class="maplbl"><span>${x.kind === 'accel' ? 'One stream' : 'WebKit download'}</span><span>${pct}</span></div>`;
+  }
+  const btn = (a, label, icon) => `<button class="btn" data-a="${a}">${icon || ''}${label}</button>`;
+  const btns = x.state === 'done' ? btn('open', 'Open', I.open) + btn('reveal', 'Show in Finder', I.folder) + btn('copy', 'Copy link') + btn('redo', 'Download again')
+    : ['running', 'queued'].includes(x.state) ? btn('pause', 'Pause', I.pause) + btn('cancel', 'Cancel', I.x) + btn('copy', 'Copy link')
+    : x.state === 'paused' ? btn('resume', 'Resume', I.play) + btn('cancel', 'Cancel', I.x) + btn('copy', 'Copy link')
+    : btn('retry', 'Try again', I.retry) + btn('copy', 'Copy link');
+  d.innerHTML = `<div class="dtop"><img src="flint://dlicon/${encodeURIComponent(x.ext || 'bin')}" alt=""><div class="t"><b>${esc(x.name)}</b><small>${esc(x.url)}</small></div><div class="dbtns">${btns}</div></div>`
+    + `<div class="kv"><div>Status<b class="${x.state === 'failed' ? 'err' : ''}">${esc(progText(x))}</b></div><div>Size<b>${fmtB(x.total)}</b></div><div>Downloaded<b>${fmtB(x.got)}</b></div>`
+    + `<div>${x.state === 'done' ? 'Top speed' : 'Speed'}<b>${x.state === 'done' ? (fmtS(x.peak) || '—') : (fmtS(x.speed) || '—')}</b></div>`
+    + `<div>Resumable<b>${x.kind === 'accel' ? (x.res ? 'Yes' : (x.total > 0 || x.state === 'done' ? 'No' : '—')) : 'WebKit'}</b></div>`
+    + `<div>${x.state === 'done' ? 'Took' : 'Started'}<b>${x.state === 'done' && x.end > x.t ? fmtT(x.end - x.t) || '1s' : fmtD(x.t)}</b></div>`
+    + `<div style="grid-column:1/-1">Saved to<b>${esc(x.path)}</b></div></div>` + map;
+}
+function render() { renderNav(); renderList(); renderDetails(); }
+async function refresh() {
+  try {
+    const r = await call('dl.list');
+    items = r.items || []; settings = r.settings || {};
+    $('#speed').innerHTML = r.speed > 0 ? `<b>${fmtS(r.speed)}</b> · ${r.running} downloading` : (r.running ? `${r.running} downloading` : 'Idle');
+    if (sel && !items.some(x => x.id === sel)) sel = null;
+    render();
+  } catch (e) {}
+}
+function act(a, x) {
+  if (!x) return;
+  if (a === 'menu') return;
+  if (a === 'redo') { call('dl.add', {url: x.url}).then(refresh); return; }
+  call('dl.' + a, {id: x.id}).then(refresh);
+}
+function showMenu(x, px, py) {
+  closeMenu();
+  const m = document.createElement('div'); m.className = 'menu';
+  const opts = [];
+  if (x.state === 'done') opts.push(['open', 'Open'], ['reveal', 'Show in Finder']);
+  if (['running', 'queued'].includes(x.state)) opts.push(['pause', 'Pause']);
+  if (x.state === 'paused') opts.push(['resume', 'Resume']);
+  if (['failed', 'cancelled'].includes(x.state)) opts.push(['retry', 'Try again']);
+  opts.push(['-'], ['copy', 'Copy link'], ['redo', 'Download again'], ['-']);
+  if (isActive(x)) opts.push(['cancel', 'Cancel download']);
+  opts.push(['remove', 'Remove from list']);
+  if (x.state === 'done' && x.exists) opts.push(['trash', 'Move file to Trash']);
+  m.innerHTML = opts.map(([a, l]) => a === '-' ? '<hr>' : `<button data-a="${a}">${l}</button>`).join('');
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.min(px, innerWidth - r.width - 8) + 'px'; m.style.top = Math.min(py, innerHeight - r.height - 8) + 'px';
+  m.addEventListener('click', e => { const b = e.target.closest('button'); if (b) { act(b.dataset.a, x); closeMenu(); } });
+  menuEl = m;
+}
+function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
+addEventListener('mousedown', e => { if (menuEl && !menuEl.contains(e.target)) closeMenu(); }, true);
+
+$('#nav').addEventListener('click', e => { const a = e.target.closest('a[data-c]'); if (a) { cat = a.dataset.c; render(); } });
+$('#q').addEventListener('input', e => { q = e.target.value.trim().toLowerCase(); renderList(); });
+$('#thead').addEventListener('click', e => {
+  const h = e.target.closest('[data-k]'); if (!h) return;
+  if (sortK === h.dataset.k) sortUp = !sortUp; else { sortK = h.dataset.k; sortUp = h.dataset.k === 'name'; }
+  document.querySelectorAll('#thead [data-k]').forEach(d => { d.classList.toggle('sort', d.dataset.k === sortK); d.classList.toggle('up', d.dataset.k === sortK && sortUp); });
+  renderList();
+});
+$('#list').addEventListener('click', e => {
+  const r = e.target.closest('.row'); if (!r) return;
+  const x = items.find(i => i.id === r.dataset.id);
+  const b = e.target.closest('button[data-a]');
+  if (b) { if (b.dataset.a === 'menu') { const bb = b.getBoundingClientRect(); showMenu(x, bb.right - 210, bb.bottom + 4); } else act(b.dataset.a, x); return; }
+  sel = sel === x.id ? null : x.id; render();
+});
+$('#list').addEventListener('dblclick', e => {
+  const r = e.target.closest('.row'); if (!r || e.target.closest('button')) return;
+  const x = items.find(i => i.id === r.dataset.id);
+  if (x.state === 'done') act('open', x); else if (x.state === 'paused') act('resume', x); else if (['running', 'queued'].includes(x.state)) act('pause', x); else act('retry', x);
+});
+$('#list').addEventListener('contextmenu', e => {
+  const r = e.target.closest('.row'); if (!r) return;
+  e.preventDefault(); const x = items.find(i => i.id === r.dataset.id); sel = x.id; render(); showMenu(x, e.clientX, e.clientY);
+});
+$('#details').addEventListener('click', e => { const b = e.target.closest('button[data-a]'); if (b) act(b.dataset.a, items.find(i => i.id === sel)); });
+addEventListener('keydown', e => {
+  if (e.target.closest('input,select,dialog')) return;
+  const x = items.find(i => i.id === sel); if (!x) return;
+  if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); act('remove', x); sel = null; }
+  else if (e.key === ' ') { e.preventDefault(); act(x.state === 'paused' ? 'resume' : ['running','queued'].includes(x.state) ? 'pause' : 'retry', x); }
+  else if (e.key === 'Enter' && x.state === 'done') act('open', x);
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault(); const rows = [...document.querySelectorAll('#list .row')]; const i = rows.findIndex(r => r.dataset.id === sel);
+    const n = rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; if (n) { sel = n.dataset.id; render(); n.scrollIntoView({block: 'nearest'}); }
+  }
+});
+$('#add').onclick = () => { $('#addUrl').value = ''; $('#addDlg').showModal(); $('#addUrl').focus(); };
+$('#addCancel').onclick = () => $('#addDlg').close();
+const addGo = () => { const u = $('#addUrl').value.trim(); if (!u) return; call('dl.add', {url: u}).then(ok => { if (ok) { $('#addDlg').close(); refresh(); } else call('toast', {text: 'That doesn’t look like a web address'}); }); };
+$('#addGo').onclick = addGo; $('#addUrl').addEventListener('keydown', e => { if (e.key === 'Enter') addGo(); });
+$('#resumeAll').onclick = () => call('dl.resumeAll').then(refresh);
+$('#pauseAll').onclick = () => call('dl.pauseAll').then(refresh);
+$('#folder').onclick = () => call('dl.openFolder');
+$('#gear').onclick = () => {
+  $('#sAccel').checked = !!settings.accel; $('#sConns').value = settings.conns || 8; $('#oConns').value = settings.conns || 8;
+  $('#sActive').value = String(settings.active || 3); $('#sLimit').value = String(settings.limit || 0); $('#sAsk').checked = !!settings.ask;
+  $('#sFolder').textContent = settings.folder || ''; $('#setDlg').showModal();
+};
+const set = (key, value) => call('dl.set', {key, value}).then(refresh);
+$('#sAccel').onchange = e => set('accel', e.target.checked);
+$('#sConns').oninput = e => { $('#oConns').value = e.target.value; };
+$('#sConns').onchange = e => set('conns', +e.target.value);
+$('#sActive').onchange = e => set('active', +e.target.value);
+$('#sLimit').onchange = e => set('limit', +e.target.value);
+$('#sAsk').onchange = e => set('ask', e.target.checked);
+$('#sChange').onclick = () => { $('#setDlg').close(); call('dl.chooseFolder'); };
+$('#setDone').onclick = () => $('#setDlg').close();
+refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 600);
+</script>
+</body>
+</html>

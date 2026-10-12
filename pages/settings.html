@@ -1,0 +1,184 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Settings</title>
+<style>
+/*THEME*/
+*{box-sizing:border-box}
+html,body{height:100%}
+html{background:var(--bg);color:var(--text);font:13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+body{margin:0;display:flex;overflow:hidden}
+button,input,select{font:inherit;color:inherit}
+nav{width:236px;flex:none;padding:26px 14px;overflow:auto;border-right:1px solid var(--line)}
+nav .search{position:relative;margin:0 4px 16px}
+nav .search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:13px;height:13px;stroke:var(--faint);fill:none;stroke-width:2}
+nav .search input{width:100%;height:32px;border:1px solid var(--border);background:var(--pill);padding:0 10px 0 30px;outline:none;border-radius:8px}
+nav a{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;color:var(--dim);text-decoration:none;cursor:pointer;margin-bottom:1px}
+nav a:hover{background:var(--hover);color:var(--text)}
+nav a.on{background:var(--active);color:var(--text);font-weight:500}
+nav svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+main{flex:1;overflow:auto;padding:30px 36px 80px}
+.inner{max-width:720px}
+h1{font-size:26px;margin:0 0 4px}
+.sub{color:var(--dim);margin:0 0 22px}
+.grp{margin-bottom:22px}
+.grp h2{font-size:12px;font-weight:600;color:var(--dim);margin:0 0 7px 4px;text-transform:none;letter-spacing:0}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.row{display:flex;align-items:center;gap:16px;padding:12px 16px;min-height:50px}
+.row+.row{border-top:1px solid var(--line)}
+.row .txt{flex:1;min-width:0}
+.row .t{font-size:13px}
+.row .d{color:var(--faint);font-size:11.8px;margin-top:2px;line-height:1.35}
+.row img.ic{width:28px;height:28px;flex:none;border-radius:6px}
+.val{color:var(--dim);white-space:nowrap;font-variant-numeric:tabular-nums}
+.btn{height:28px;padding:0 12px;border:1px solid var(--border);background:var(--pill);cursor:pointer;border-radius:8px;white-space:nowrap}
+.btn:hover{background:var(--hover)}
+.btn.danger{color:#e5737a}
+select{height:28px;border:1px solid var(--border);background:var(--pill);padding:0 26px 0 10px;border-radius:8px;outline:none;max-width:260px;-webkit-appearance:none;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23999' stroke-width='1.4' fill='none'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 9px center;background-size:9px}
+.sw{appearance:none;-webkit-appearance:none;width:36px;height:21px;border-radius:999px;background:var(--line);position:relative;cursor:pointer;flex:none;margin:0;transition:background .15s}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:var(--bg);box-shadow:0 1px 2px rgba(0,0,0,.25);transition:left .15s}
+.sw:checked{background:var(--text)}.sw:checked::after{left:17px}
+.sws{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.sws button{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
+.sws button.on{border-color:var(--text)}
+.ctl{display:flex;align-items:center;gap:8px;flex:none}
+.hit{background:color-mix(in srgb,var(--text) 6%,transparent)}
+.sec-lbl{font-size:11.5px;color:var(--faint);margin:0 0 4px 4px}
+dialog{border:1px solid var(--border);background:var(--card);color:var(--text);padding:20px;width:min(480px,92vw);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog h3{margin:0 0 6px;font-size:15px}
+dialog p{margin:0 0 14px;color:var(--dim)}
+dialog input{width:100%;height:32px;border:1px solid var(--border);background:var(--pill);padding:0 10px;outline:none;margin-bottom:10px;border-radius:8px}
+.drow{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+.drow .left{margin-right:auto}
+.data{max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:8px;margin-bottom:10px}
+.data label{display:flex;gap:10px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--line);cursor:pointer}
+.data label:last-child{border-bottom:0}
+.data input{width:auto;height:auto;margin:0}
+.empty{color:var(--dim);padding:40px 0;text-align:center}
+@media (max-width:760px){nav{width:64px;padding:20px 8px}nav a span,nav .search{display:none}nav a{justify-content:center}main{padding:24px 20px 60px}}
+</style>
+</head>
+<body>
+<nav id="nav"><div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><input id="q" placeholder="Search settings" spellcheck="false"></div><div id="links"></div></nav>
+<main id="main"><div class="inner" id="inner"></div></main>
+
+<dialog id="dlg"><h3 id="dTitle"></h3><p id="dText"></p><div id="dFields"></div><div class="drow"><button class="btn left danger" id="dExtra" hidden></button><button class="btn" id="dCancel">Cancel</button><button class="btn primary" id="dOk"></button></div></dialog>
+<dialog id="dataDlg"><h3>Cookies and website data</h3><p id="dataInfo">Loading…</p><div class="data" id="dataList"></div>
+  <div class="drow"><button class="btn left danger" id="dataAll">Remove All</button><button class="btn" id="dataDone">Done</button><button class="btn primary" id="dataRm">Remove Selected</button></div></dialog>
+
+<script nonce="{{NONCE}}">
+const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ICON = {
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>',
+  brush: '<path d="M18 3l3 3-9 9-3-3z"/><path d="M9 12c-3 0-5 2-5 5 0 1-1 2-2 2 2 2 7 2 9-1 1-1.5 1-3 1-3"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
+  hand: '<path d="M7 11V6a1.5 1.5 0 013 0v4M10 10V4.5a1.5 1.5 0 013 0V10M13 10V5.5a1.5 1.5 0 013 0V12M16 9.5a1.5 1.5 0 013 0V15a7 7 0 01-7 7h-1a6 6 0 01-5-3l-2.5-4a1.5 1.5 0 012.5-1.6L7 15"/>',
+  sliders: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  gauge: '<path d="M4 16a8 8 0 1116 0"/><path d="M12 16l4-5"/>',
+  puzzle: '<path d="M10 4a2 2 0 114 0v2h4v4h-2a2 2 0 100 4h2v4h-4v-2a2 2 0 10-4 0v2H6v-4h2a2 2 0 100-4H6V6h4z"/>',
+  download: '<path d="M12 4v11M7 10l5 5 5-5M5 19h14"/>',
+  bookmark: '<path d="M6 3h12v18l-6-4-6 4z"/>',
+  command: '<path d="M9 6a3 3 0 10-3 3h12a3 3 0 10-3-3v12a3 3 0 103-3H6a3 3 0 103 3z"/>',
+  wrench: '<path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>'
+};
+let S = [], cur = (location.hash || '#general').slice(1), q = '';
+const svg = k => `<svg viewBox="0 0 24 24">${ICON[k] || ''}</svg>`;
+
+function control(r) {
+  if (r.type === 'switch' || r.type === 'extension') {
+    let extra = '';
+    if (r.type === 'extension') extra = (r.options ? `<button class="btn" data-act="extopt.${esc(r.id.slice(4))}">Options</button>` : '') + `<button class="btn" data-act="extrm.${esc(r.id.slice(4))}" data-confirm="Remove this extension?|Its files go to the Trash. Its saved data is kept in case you install it again.|Remove">Remove</button>`;
+    return `<div class="ctl">${extra}<input type="checkbox" class="sw" data-set="${esc(r.id)}" ${r.value ? 'checked' : ''}></div>`;
+  }
+  if (r.type === 'select') return `<select data-set="${esc(r.id)}">${r.options.map((o, i) => `<option value="${i}" ${i === r.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+  if (r.type === 'swatches') return `<div class="sws">${r.options.map((o, i) => `<button title="${esc(o.label)}" data-swatch="${esc(r.id)}" data-i="${i}" class="${i === r.value ? 'on' : ''}" style="background:${esc(o.color)}"></button>`).join('')}</div>`;
+  if (r.type === 'button') return `<button class="btn ${r.confirm && r.confirm.danger ? 'danger' : ''}" data-act="${esc(r.id)}">${esc(r.label)}</button>`;
+  if (r.type === 'value') return `<span class="val">${esc(r.value)}</span>`;
+  return '';
+}
+function rowHTML(r) {
+  return `<div class="row" data-row="${esc(r.id)}">${r.icon ? `<img class="ic" src="${r.icon}" alt="">` : ''}<div class="txt"><div class="t">${esc(r.title)}</div>${r.detail ? `<div class="d">${esc(r.detail)}</div>` : ''}</div>${control(r)}</div>`;
+}
+function render() {
+  $('#links').innerHTML = S.map(s => `<a href="#${s.id}" class="${s.id === cur && !q ? 'on' : ''}">${svg(s.icon)}<span>${esc(s.title)}</span></a>`).join('');
+  const inner = $('#inner');
+  if (q) {
+    const hits = [];
+    for (const s of S) for (const g of s.groups) for (const r of g.rows) {
+      const hay = (r.title + ' ' + (r.detail || '') + ' ' + (g.title || '') + ' ' + s.title).toLowerCase();
+      if (q.split(/\s+/).every(w => hay.includes(w))) hits.push([s, r]);
+    }
+    inner.innerHTML = `<h1>Search</h1><p class="sub">${hits.length} setting${hits.length === 1 ? '' : 's'} matching “${esc(q)}”</p>` +
+      (hits.length ? hits.map(([s, r]) => `<div class="grp"><div class="sec-lbl">${esc(s.title)}</div><div class="card">${rowHTML(r)}</div></div>`).join('') : '<div class="empty">No settings match.</div>');
+    return;
+  }
+  const s = S.find(x => x.id === cur) || S[0]; if (!s) return;
+  cur = s.id;
+  inner.innerHTML = `<h1>${esc(s.title)}</h1>${s.subtitle ? `<p class="sub">${esc(s.subtitle)}</p>` : '<p class="sub"></p>'}` +
+    s.groups.map(g => `<div class="grp">${g.title ? `<h2>${esc(g.title)}</h2>` : ''}<div class="card">${g.rows.map(rowHTML).join('')}</div></div>`).join('');
+}
+const findRow = id => { for (const s of S) for (const g of s.groups) for (const r of g.rows) if (r.id === id) return r; return null; };
+async function apply(p) { const r = await p; if (r && r.sections) { S = r.sections; const top = $('#main').scrollTop; render(); $('#main').scrollTop = top; } }
+
+document.addEventListener('change', e => {
+  const el = e.target.closest('[data-set]'); if (!el) return;
+  const value = el.type === 'checkbox' ? el.checked : +el.value;
+  apply(call('settings.set', {id: el.dataset.set, value}));
+});
+document.addEventListener('click', async e => {
+  const sw = e.target.closest('[data-swatch]');
+  if (sw) { apply(call('settings.set', {id: sw.dataset.swatch, value: +sw.dataset.i})); return; }
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const id = b.dataset.act, r = findRow(id) || {};
+  if (r.dataManager) { openData(); return; }
+  if (r.prompt) { const args = await ask(r.prompt); if (args) apply(call('settings.action', {id, args})); return; }
+  let conf = r.confirm;
+  if (!conf && b.dataset.confirm) { const [title, text, ok] = b.dataset.confirm.split('|'); conf = {title, text, ok, danger: true}; }
+  if (conf && !(await ask({title: conf.title, text: conf.text, ok: conf.ok, fields: []}))) return;
+  apply(call('settings.action', {id}));
+});
+function ask(p) {
+  return new Promise(resolve => {
+    const d = $('#dlg');
+    $('#dTitle').textContent = p.title || ''; $('#dText').textContent = p.text || '';
+    $('#dFields').innerHTML = (p.fields || []).map(f => `<input name="${esc(f.name)}" placeholder="${esc(f.placeholder || '')}" value="${esc(f.value || '')}" spellcheck="false">`).join('');
+    $('#dOk').textContent = p.ok || 'OK';
+    const ex = $('#dExtra'); ex.hidden = !p.remove; ex.textContent = p.remove || '';
+    const finish = v => { d.close(); $('#dOk').onclick = $('#dCancel').onclick = ex.onclick = null; resolve(v); };
+    const values = () => { const o = {}; d.querySelectorAll('#dFields input').forEach(i => o[i.name] = i.value); return o; };
+    $('#dOk').onclick = () => finish(values());
+    $('#dCancel').onclick = () => finish(null);
+    ex.onclick = () => finish({remove: true});
+    d.onkeydown = e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); finish(values()); } };
+    d.oncancel = () => finish(null);
+    d.showModal();
+    const first = d.querySelector('#dFields input'); (first || $('#dOk')).focus();
+  });
+}
+async function openData() {
+  const d = $('#dataDlg'); $('#dataInfo').textContent = 'Loading…'; $('#dataList').innerHTML = ''; d.showModal();
+  const r = await call('settings.data');
+  const sites = r.sites || [];
+  $('#dataInfo').textContent = sites.length ? `${sites.length} websites store data on this Mac.` : 'No websites store data on this Mac.';
+  $('#dataList').innerHTML = sites.map(s => `<label><input type="checkbox" value="${esc(s)}">${esc(s)}</label>`).join('');
+}
+$('#dataRm').onclick = async () => { const names = [...document.querySelectorAll('#dataList input:checked')].map(i => i.value); if (!names.length) return; await call('settings.data', {remove: names}); openData(); };
+$('#dataAll').onclick = async () => { if (!(await ask({title: 'Remove all website data?', text: 'You’ll be signed out of every site.', ok: 'Remove All', fields: []}))) return; await call('settings.data', {all: true}); $('#dataDlg').showModal(); openData(); };
+$('#dataDone').onclick = () => $('#dataDlg').close();
+$('#q').addEventListener('input', e => { q = e.target.value.trim().toLowerCase(); render(); });
+addEventListener('hashchange', () => { cur = (location.hash || '#general').slice(1); q = ''; $('#q').value = ''; render(); $('#main').scrollTop = 0; });
+addEventListener('keydown', e => { if ((e.metaKey && e.key === 'f') || (e.key === '/' && !e.target.closest('input'))) { e.preventDefault(); $('#q').focus(); } });
+apply(call('settings.schema'));
+// values that change on their own (filter list status, extension installs) stay fresh
+setInterval(() => { if (!document.hidden && !document.querySelector('dialog[open]') && !q) call('settings.schema').then(r => { if (JSON.stringify(r.sections) !== JSON.stringify(S)) apply(Promise.resolve(r)); }); }, 4000);
+</script>
+</body>
+</html>
