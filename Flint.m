@@ -26,6 +26,7 @@
 static void FlintReloadBlocklists(void);
 static void FlintSetBlocking(BOOL on);
 static void CtlOut(NSString *s);
+static void RelayoutAll(void);
 static void FlintInternalInstall(WKWebViewConfiguration *c, WKUserContentController *ucc);
 static NSString *ThemeCSS(void);
 static void FlintCosmeticInstall(WKUserContentController *ucc);
@@ -7692,6 +7693,7 @@ static volatile BOOL gGovRunning;
 // Development aid. Write lines to control.txt beside Flint.app; each runs once, in order:
 //   open URL | tab URL | select N | close | back | forward | reload | scroll DY | top | find TEXT
 //   zoom Z | block on|off | wait SECONDS | shot NAME | source NAME | js EXPR | status | size W H
+//   window (a fresh window runs the rest) | win N | closewindow | bookmarksbar on|off | sidebar WIDTH
 // Results and status lines are appended to control.out.
 
 @interface VWindow (Control)
@@ -7763,6 +7765,20 @@ static void CtlOut(NSString *s) {
             [NSApp sendAction:NSSelectorFromString(arg) to:self from:nil];
             CtlOut([NSString stringWithFormat:@"act %@ split=%lu", arg, (unsigned long)self.splitPair.count]);
         }
+        else if ([cmd isEqualToString:@"window"]) {   // a fresh window; the rest of the commands run in it
+            VWindow *nw = [[VWindow alloc] initPrivate:NO state:@{}]; [nw showWindow:nil]; [nw windowDidResize:nil];
+            [nw.window makeKeyAndOrderFront:nil];
+            CtlOut(@"window opened");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [nw runControl:lines]; });
+            return;
+        }
+        else if ([cmd isEqualToString:@"closewindow"]) { if (gWindows.count > 1) { CtlOut(@"window closed"); [self.window performClose:nil]; CtlOut(@"done"); return; } }
+        else if ([cmd isEqualToString:@"win"]) {   // the rest of the commands run in window N (oldest first)
+            NSInteger i = arg.integerValue;
+            if (i >= 0 && i < (NSInteger)gWindows.count) { VWindow *x = gWindows[i]; CtlOut([NSString stringWithFormat:@"win %ld of %lu", (long)i, (unsigned long)gWindows.count]); [x runControl:lines]; return; }
+        }
+        else if ([cmd isEqualToString:@"sidebar"]) { CGFloat wdt = arg.doubleValue; if (wdt >= 40 && wdt <= 420) { [Defaults() setDouble:wdt forKey:kSidebarW]; RelayoutAll(); } CtlOut([NSString stringWithFormat:@"sidebar %.0f", SidebarWidth()]); }
+        else if ([cmd isEqualToString:@"bookmarksbar"]) { [Defaults() setBool:[arg isEqualToString:@"on"] forKey:kShowBookmarks]; RelayoutAll(); }
         else if ([cmd isEqualToString:@"media"]) {
             for (VTab *t in self.tabs) CtlOut([NSString stringWithFormat:@"media tab=%@ key=%@ time=%.0f saved=%.0f resume=%.0f web=%d", t.url ?: @"-", t.mediaKey ?: @"-", t.mediaTime, t.savedMedia, t.resumeAt, t.web != nil]);
             for (NSDictionary *d in [Defaults() dictionaryForKey:kTabsState][@"tabs"]) CtlOut([NSString stringWithFormat:@"media saved url=%@ key=%@ time=%@", d[@"url"], d[@"mediaKey"] ?: @"-", d[@"mediaTime"] ?: @"-"]);

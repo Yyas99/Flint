@@ -1,6 +1,24 @@
-# Flint
+<p align="center">
+  <img src="assets/icon.png" width="128" height="128" alt="Flint icon">
+</p>
 
-A calm, minimal web browser for macOS. Native AppKit interface, Safari's engine (WebKit) underneath, no Chromium.
+<h1 align="center">Flint</h1>
+
+<p align="center">
+  A calm, minimal web browser for macOS.<br>
+  Native AppKit interface, Safari's engine underneath, no Chromium.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-12.3%2B-111111?logo=apple&logoColor=white" alt="macOS 12.3+">
+  <img src="https://img.shields.io/badge/engine-WebKit-111111" alt="WebKit">
+  <img src="https://img.shields.io/badge/language-Objective--C-111111" alt="Objective-C">
+  <img src="https://img.shields.io/badge/Intel%20%26%20Apple%20silicon-111111" alt="Intel and Apple silicon">
+</p>
+
+<p align="center">
+  <img src="assets/hero.png" alt="Flint with vertical tabs" width="900">
+</p>
 
 ## Features
 
@@ -32,6 +50,19 @@ A calm, minimal web browser for macOS. Native AppKit interface, Safari's engine 
 - One rule: Flint and every process it starts average at most one CPU core over any 10 seconds. Short bursts run at full speed; audio, video and the tab you're using are never slowed.
 - Background tab throttling that adapts to battery or power
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/split.png" alt="Split view"><p align="center"><sub>Split view</sub></p></td>
+    <td width="50%"><img src="assets/reader.png" alt="Reader mode"><p align="center"><sub>Reader mode</sub></p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/settings.png" alt="Performance settings"><p align="center"><sub>Engine-level performance settings</sub></p></td>
+    <td width="50%"><img src="assets/extensions.png" alt="Extensions"><p align="center"><sub>Chrome extensions</sub></p></td>
+  </tr>
+</table>
+
 ## Requirements
 
 - macOS 12.3 or later (Intel or Apple silicon)
@@ -60,3 +91,4 @@ While Flint is open it watches its own source. A change is built in the backgrou
 | `pages/` | Built-in pages served at `flint://` |
 | `flint` | Build, sign and update script |
 | `Flint.icns` | App icon |
+| `assets/` | Images for this page |

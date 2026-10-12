@@ -13,7 +13,8 @@ watch.status
 build.log
 update-notes.txt
 
-# local logs and the test link (they hold browsing addresses)
+# local logs, test screenshots and the test link (they hold browsing addresses)
+shots/
 flint.log
 control.txt
 control.out
