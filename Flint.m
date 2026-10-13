@@ -7249,6 +7249,7 @@ static void ShelfIcon(VTab *t, NSRect r, CGFloat radius) {
 @property (strong) NSView *strip, *pinnedView;
 @property (strong) NSButton *addBtn;
 @property (strong) NSArray<VTab *> *items, *pinned;
+@property CGFloat wantHeight;   // just tall enough for what's in it (the time axis only when there's a timeline)
 - (instancetype)initWithOwner:(VWindow *)w;
 - (void)reload;
 - (void)scrollToNewest;
@@ -7258,21 +7259,23 @@ static void ShelfIcon(VTab *t, NSRect r, CGFloat radius) {
 @interface VShelfStrip : NSView
 @property (weak) VTabShelf *shelf;
 @property NSInteger hover;
+@property NSInteger pinnedCount;   // the first cards are your pinned tabs, set apart from the timeline
 @end
 static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 @implementation VShelfStrip
 - (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }   // one click works even while another app is in front
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];
     for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
-    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil]];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
 }
-- (NSRect)card:(NSInteger)i { return NSMakeRect(6 + i * (kCardW + kCardGap), kCardTop, kCardW, kCardH); }
+- (NSRect)card:(NSInteger)i { return NSMakeRect(6 + i * (kCardW + kCardGap) + (self.pinnedCount > 0 && i >= self.pinnedCount ? 22 : 0), kCardTop, kCardW, kCardH); }
 - (NSRect)closeRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 29, NSMinY(c) + 7, 22, 22); }
 - (NSRect)pinRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 55, NSMinY(c) + 7, 22, 22); }
-- (NSInteger)indexAt:(NSPoint)p {
-    for (NSInteger i = 0; i < (NSInteger)self.shelf.items.count; i++) { NSRect c = [self card:i]; c.size.height += 44; if (NSPointInRect(p, NSInsetRect(c, -4, -4))) return i; }
+- (NSInteger)indexAt:(NSPoint)p {   // items.count = the New tab card at the end
+    for (NSInteger i = 0; i <= (NSInteger)self.shelf.items.count; i++) { NSRect c = [self card:i]; c.size.height += 44; if (NSPointInRect(p, NSInsetRect(c, -4, -4))) return i; }
     return -1;
 }
 - (void)mouseMoved:(NSEvent *)e { NSInteger h = [self indexAt:[self convertPoint:e.locationInWindow fromView:nil]]; if (h != self.hover) { self.hover = h; self.needsDisplay = YES; } }
@@ -7281,11 +7284,17 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     NSArray<VTab *> *items = self.shelf.items;
     VWindow *w = self.shelf.owner;
     NSColor *accent = w.isPrivate ? vText : ProfileColor(w.profile);
-    if (!items.count) {
-        NSString *s = self.shelf.search.stringValue.length ? @"No tabs match" : @"No other tabs";
-        [s drawAtPoint:NSMakePoint(8, kCardTop + 30) withAttributes:@{NSFontAttributeName: UIFont(13, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint}];
-        return;
+    {   // the last card opens a new tab
+        NSRect c = [self card:(NSInteger)items.count]; BOOL hov = self.hover == (NSInteger)items.count;
+        RoundRect(c, 12, hov ? (ThemeIsLight() ? HexA(0x000000, 0.08) : Hex(0x24262b)) : (ThemeIsLight() ? HexA(0x000000, 0.04) : Hex(0x1a1c20)));
+        ShardStroke(c, 12, hov ? [vText colorWithAlphaComponent:0.3] : MGlassEdge(), 1);
+        NSImage *plus = Tinted(Symbol(@"plus", 11, NSFontWeightSemibold), vText);
+        NSDictionary *a = @{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium), NSForegroundColorAttributeName: vText};
+        NSSize sz = [@"New tab" sizeWithAttributes:a]; CGFloat w = plus.size.width + 6 + sz.width, x = round(NSMidX(c) - w / 2);
+        DrawImage(plus, NSMakeRect(x, round(NSMidY(c) - plus.size.height / 2), plus.size.width, plus.size.height));
+        [@"New tab" drawAtPoint:NSMakePoint(x + plus.size.width + 6, round(NSMidY(c) - sz.height / 2)) withAttributes:a];
     }
+    if (!items.count) return;
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
     for (NSInteger i = 0; i < (NSInteger)items.count; i++) {
         NSRect c = [self card:i];
@@ -7303,6 +7312,11 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
         if (cur) ShardStroke(NSInsetRect(c, -3, -3), 14, accent, 1.5);
         else if (hov) ShardStroke(NSInsetRect(c, -3, -3), 14, [vText colorWithAlphaComponent:0.35], 1);
         else ShardStroke(c, 12, MGlassEdge(), 1);
+        if (i < self.pinnedCount) {   // pinned: a small pin in the corner
+            NSRect pb = NSMakeRect(NSMinX(c) + 7, NSMinY(c) + 7, 20, 20);
+            [HexA(0x0a0b0d, 0.8) setFill]; [[NSBezierPath bezierPathWithOvalInRect:pb] fill];
+            NSImage *pn = Tinted(Symbol(@"pin.fill", 8.5, NSFontWeightSemibold), Hex(0xe7e8eb)); DrawImage(pn, CenterIn(pn.size, pb));
+        }
         if (t.audible && !t.muted) {   // playing: three small bars in the corner
             NSRect bg = NSMakeRect(NSMinX(c) + 8, NSMaxY(c) - 26, 26, 18);
             RoundRect(bg, 8, HexA(0x0a0b0d, 0.82));
@@ -7313,18 +7327,23 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
             NSRect cr = [self closeRect:i], pr = [self pinRect:i];
             for (NSValue *v in @[[NSValue valueWithRect:cr], [NSValue valueWithRect:pr]]) { [HexA(0x0a0b0d, 0.85) setFill]; [[NSBezierPath bezierPathWithOvalInRect:v.rectValue] fill]; }
             NSImage *x = Tinted(Symbol(@"xmark", 8, NSFontWeightBold), Hex(0xe7e8eb)); DrawImage(x, CenterIn(x.size, cr));
-            NSImage *pn = Tinted(Symbol(@"pin", 9, NSFontWeightSemibold), Hex(0xe7e8eb)); DrawImage(pn, CenterIn(pn.size, pr));
+            NSImage *pn = Tinted(Symbol(t.pinned ? @"pin.slash" : @"pin", 9, NSFontWeightSemibold), Hex(0xe7e8eb)); DrawImage(pn, CenterIn(pn.size, pr));
         }
         NSString *title = t.isHome ? @"New Tab" : (t.title.length ? t.title : t.url ?: @"");
         [title drawInRect:NSMakeRect(NSMinX(c) + 1, NSMaxY(c) + 7, kCardW - 2, 16) withAttributes:@{NSFontAttributeName: UIFont(12, cur ? NSFontWeightMedium : NSFontWeightRegular), NSForegroundColorAttributeName: cur ? vText : (asleep ? vFaint : vDim), NSParagraphStyleAttributeName: ps}];
-        [ShelfMeta(t, cur) drawInRect:NSMakeRect(NSMinX(c) + 1, NSMaxY(c) + 25, kCardW - 2, 14) withAttributes:@{NSFontAttributeName: MMono(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps}];
+        [(t.pinned && !cur ? @"pinned" : ShelfMeta(t, cur)) drawInRect:NSMakeRect(NSMinX(c) + 1, NSMaxY(c) + 25, kCardW - 2, 14) withAttributes:@{NSFontAttributeName: MMono(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps}];
     }
-    // the time axis under the cards: a tick under each, a time where there's room
+    if (self.pinnedCount > 0) {   // the pinned group: labelled, and a hairline before the timeline
+        [@"PINNED" drawAtPoint:NSMakePoint(NSMinX([self card:0]), kCardTop - 22) withAttributes:@{NSFontAttributeName: MMono(10, NSFontWeightMedium), NSForegroundColorAttributeName: vFaint, NSKernAttributeName: @1.2}];
+        if (self.pinnedCount < (NSInteger)items.count) { [[vText colorWithAlphaComponent:0.1] setFill]; Blend(NSMakeRect(NSMinX([self card:self.pinnedCount]) - 17, kCardTop, 1, kCardH + 40)); }
+    }
+    if (self.pinnedCount >= (NSInteger)items.count) return;
+    // the time axis under the timeline: a tick under each card, a time where there's room
     CGFloat ay = kCardTop + kCardH + 58;
-    CGFloat x0 = NSMidX([self card:0]), x1 = NSMidX([self card:(NSInteger)items.count - 1]);
+    CGFloat x0 = NSMidX([self card:self.pinnedCount]), x1 = NSMidX([self card:(NSInteger)items.count - 1]);
     [[vText colorWithAlphaComponent:0.14] setFill]; Blend(NSMakeRect(x0, ay + 6, MAX(1, x1 - x0), 1));
     CGFloat lastLabel = -1000;
-    for (NSInteger i = 0; i < (NSInteger)items.count; i++) {
+    for (NSInteger i = self.pinnedCount; i < (NSInteger)items.count; i++) {
         CGFloat x = NSMidX([self card:i]);
         [[vText colorWithAlphaComponent:0.22] setFill]; NSRectFillUsingOperation(NSMakeRect(x, ay, 1, 13), NSCompositingOperationSourceOver);
         VTab *t = items[(NSUInteger)i];
@@ -7340,20 +7359,23 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (void)mouseDown:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     NSInteger i = [self indexAt:p]; if (i < 0) return;
-    VTab *t = self.shelf.items[(NSUInteger)i]; VWindow *w = self.shelf.owner;
+    VWindow *w = self.shelf.owner;
+    if (i == (NSInteger)self.shelf.items.count) { [w showShelf:NO]; [w newTab:nil select:YES]; [NSApp activateIgnoringOtherApps:YES]; [w.window makeKeyAndOrderFront:nil]; return; }
+    VTab *t = self.shelf.items[(NSUInteger)i];
     if (NSPointInRect(p, NSInsetRect([self closeRect:i], -2, -2))) { [w closeTab:t]; [self.shelf reload]; return; }
     if (NSPointInRect(p, NSInsetRect([self pinRect:i], -2, -2))) { [w togglePin:t]; [self.shelf reload]; return; }
     [w showShelf:NO];
     [w selectTab:t];
+    [NSApp activateIgnoringOtherApps:YES]; [w.window makeKeyAndOrderFront:nil];
 }
 - (void)otherMouseDown:(NSEvent *)e {   // middle click closes
     NSInteger i = [self indexAt:[self convertPoint:e.locationInWindow fromView:nil]];
-    if (i >= 0) { [self.shelf.owner closeTab:self.shelf.items[(NSUInteger)i]]; [self.shelf reload]; }
+    if (i >= 0 && i < (NSInteger)self.shelf.items.count) { [self.shelf.owner closeTab:self.shelf.items[(NSUInteger)i]]; [self.shelf reload]; }
 }
 - (void)rightMouseDown:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     NSInteger i = [self indexAt:p];
-    if (i >= 0) [self.shelf.owner tabMenu:self.shelf.items[(NSUInteger)i] at:p inView:self];
+    if (i >= 0 && i < (NSInteger)self.shelf.items.count) [self.shelf.owner tabMenu:self.shelf.items[(NSUInteger)i] at:p inView:self];
 }
 - (void)scrollWheel:(NSEvent *)e {   // a plain wheel or two-finger swipe up and down moves along the timeline
     if (fabs(e.scrollingDeltaX) > fabs(e.scrollingDeltaY)) { [super scrollWheel:e]; return; }
@@ -7372,6 +7394,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 @end
 @implementation VShelfPinned
 - (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }   // one click works even while another app is in front
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 - (NSInteger)cols { return self.shelf.pinned.count > 6 ? 3 : 2; }
 - (NSRect)tile:(NSInteger)i {
@@ -7383,7 +7406,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];
     for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
-    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil]];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
 }
 - (NSInteger)indexAt:(NSPoint)p { for (NSInteger i = 0; i < (NSInteger)self.shelf.pinned.count; i++) if (NSPointInRect(p, [self tile:i])) return i; return -1; }
 - (void)mouseMoved:(NSEvent *)e { NSInteger h = [self indexAt:[self convertPoint:e.locationInWindow fromView:nil]]; if (h != self.hover) { self.hover = h; self.needsDisplay = YES; } }
@@ -7414,6 +7437,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     NSInteger i = [self indexAt:[self convertPoint:e.locationInWindow fromView:nil]]; if (i < 0) return;
     VWindow *w = self.shelf.owner; VTab *t = self.shelf.pinned[(NSUInteger)i];
     [w showShelf:NO]; [w selectTab:t];
+    [NSApp activateIgnoringOtherApps:YES]; [w.window makeKeyAndOrderFront:nil];
 }
 - (void)rightMouseDown:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
@@ -7425,6 +7449,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 @interface VShelfButton : NSButton
 @end
 @implementation VShelfButton
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 - (void)drawRect:(NSRect)r {
     RoundRect(self.bounds, NSHeight(self.bounds) / 2, self.isHighlighted ? [vText colorWithAlphaComponent:0.16] : (ThemeIsLight() ? HexA(0x000000, 0.07) : Hex(0x24262b)));
@@ -7439,6 +7464,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 
 @implementation VTabShelf
 - (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }   // one click works even while another app is in front
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 - (instancetype)initWithOwner:(VWindow *)w {
     if (!(self = [super initWithFrame:NSMakeRect(0, 0, 900, 300)])) return nil;
@@ -7465,10 +7491,11 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     return self;
 }
 - (void)newTab:(id)s { [self.owner showShelf:NO]; [self.owner newTab:nil select:YES]; }
+- (void)scrollWheel:(NSEvent *)e { [self.strip scrollWheel:e]; }   // scrolling anywhere on the strip moves the tabs, never the page behind
 - (void)controlTextDidChange:(NSNotification *)n { self.sticky = YES; [self reload]; }
 - (BOOL)control:(NSControl *)c textView:(NSTextView *)tv doCommandBySelector:(SEL)sel {
     if (sel == @selector(insertNewline:)) {   // Return opens the newest match
-        VTab *t = self.items.lastObject ?: self.pinned.firstObject;
+        VTab *t = self.items.lastObject;
         if (t) { [self.owner showShelf:NO]; [self.owner selectTab:t]; }
         return YES;
     }
@@ -7493,8 +7520,11 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
         if (kx != ky) return kx < ky ? NSOrderedAscending : NSOrderedDescending;
         return [a[1] compare:b[1]];
     }];
-    NSMutableArray *items = [NSMutableArray array]; for (NSArray *p in order) [items addObject:p[0]];
+    NSMutableArray *items = [NSMutableArray arrayWithArray:pins]; for (NSArray *p in order) [items addObject:p[0]];
     self.items = items; self.pinned = pins;
+    ((VShelfStrip *)self.strip).pinnedCount = (NSInteger)pins.count;
+    CGFloat want = 54 + (items.count > pins.count ? 212 : 170) + 8;
+    if (fabs(want - self.wantHeight) > 0.5) { self.wantHeight = want; if (self.shown) self.frame = [self.owner shelfFrame]; }
     [self layoutShelf];
     self.needsDisplay = YES; self.strip.needsDisplay = YES; self.pinnedView.needsDisplay = YES;
 }
@@ -7502,13 +7532,13 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     CGFloat W = NSWidth(self.bounds), H = NSHeight(self.bounds);
     CGFloat sx = 260;
     self.search.frame = NSMakeRect(84 + 12, 19, 214, 17);
-    self.addBtn.frame = NSMakeRect(W - 22 - 100, 13, 100, 30);
-    CGFloat pw = [VShelfPinned widthFor:self.pinned.count];
+    self.addBtn.hidden = YES;   // New tab is the last card in the strip
+    CGFloat pw = 0;   // pinned tabs are full cards at the start of the strip now
     self.pinnedView.hidden = pw == 0;
     self.pinnedView.frame = NSMakeRect(22, 54, pw, H - 62);
     sx = pw > 0 ? 22 + pw + 41 : 16;
-    self.scroll.frame = NSMakeRect(sx, 54, W - sx - 16, H - 62);
-    CGFloat docW = MAX(NSWidth(self.scroll.contentView.bounds), 12 + self.items.count * (kCardW + kCardGap));
+    self.scroll.frame = NSMakeRect(sx, 54, W - sx - 16, H - 62);   // H follows wantHeight
+    CGFloat docW = MAX(NSWidth(self.scroll.contentView.bounds), 12 + (self.items.count + 1) * (kCardW + kCardGap) + (self.pinned.count ? 22 : 0));
     [self.strip setFrameSize:NSMakeSize(docW, NSHeight(self.scroll.contentView.bounds))];
 }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self layoutShelf]; }
@@ -7519,15 +7549,15 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 }
 - (void)drawRect:(NSRect)dirty {
     NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
-    RoundRect(b, 22, MPanel()); ShardStroke(b, 22, ThemeIsLight() ? HexA(0x000000, 0.1) : HexA(0xffffff, 0.1), 1);
+    RoundRect(b, 22, ThemeIsLight() ? Hex(0xf6f6f4) : Hex(0x111215));   // solid: the page never shows through ShardStroke(b, 22, ThemeIsLight() ? HexA(0x000000, 0.1) : HexA(0xffffff, 0.1), 1);
     [@"TABS" drawAtPoint:NSMakePoint(24, 21) withAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSKernAttributeName: @1.3}];
     NSRect sr = NSMakeRect(84, 13, 240, 30);
     RoundRect(sr, 15, ThemeIsLight() ? HexA(0x000000, 0.05) : Hex(0x1a1c20));
     NSUInteger asleep = 0; for (VTab *t in self.owner.tabs) if (!t.web && !t.isHome) asleep++;
-    NSString *count = [NSString stringWithFormat:@"%@%lu open%@", self.pinned.count ? [NSString stringWithFormat:@"%lu pinned · ", (unsigned long)self.pinned.count] : @"", (unsigned long)self.items.count, asleep ? [NSString stringWithFormat:@" · %lu asleep", (unsigned long)asleep] : @""];
+    NSString *count = [NSString stringWithFormat:@"%@%lu open%@", self.pinned.count ? [NSString stringWithFormat:@"%lu pinned · ", (unsigned long)self.pinned.count] : @"", (unsigned long)(self.items.count - self.pinned.count), asleep ? [NSString stringWithFormat:@" · %lu asleep", (unsigned long)asleep] : @""];
     NSDictionary *a = @{NSFontAttributeName: MMono(11, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint};
     NSSize sz = [count sizeWithAttributes:a];
-    [count drawAtPoint:NSMakePoint(NSMinX(self.addBtn.frame) - 14 - sz.width, 21) withAttributes:a];
+    [count drawAtPoint:NSMakePoint(NSWidth(self.bounds) - 24 - sz.width, 21) withAttributes:a];
     if (!self.pinnedView.hidden) { [[vText colorWithAlphaComponent:0.08] setFill]; Blend(NSMakeRect(NSMaxX(self.pinnedView.frame) + 20, 72, 1, NSHeight(self.bounds) - 108)); }
 }
 @end
@@ -7538,11 +7568,12 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 @end
 @implementation VShelfHandle
 - (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }   // one click works even while another app is in front
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];
     for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
-    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil]];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
 }
 - (void)mouseEntered:(NSEvent *)e { self.hover = YES; self.needsDisplay = YES; if (![Defaults() boolForKey:kShelfNoHover]) [WinFor(self) showShelf:YES]; }
 - (void)mouseExited:(NSEvent *)e { self.hover = NO; self.needsDisplay = YES; }
@@ -7553,11 +7584,28 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (void)mouseDown:(NSEvent *)e { VWindow *w = WinFor(self); [w showShelf:YES]; ((VTabShelf *)w.shelf).sticky = YES; }
 @end
 
-// Hovering the bottom edge of the window brings the tabs up; moving well away puts them back. Esc closes them.
+// Hovering the bottom edge of a Flint window brings its tabs up, even while another app is in front
+// (as long as nothing covers that edge); moving well away puts them back. Esc closes them.
+static void ShelfTrack(NSPoint screen) {
+    NSInteger topNumber = [NSWindow windowNumberAtPoint:screen belowWindowWithWindowNumber:0];
+    for (VWindow *w in gWindows.copy) {
+        NSWindow *win = w.window; VTabShelf *s = (VTabShelf *)w.shelf;
+        if (!s || !win.isVisible || win.isMiniaturized) continue;
+        NSView *root = win.contentView;
+        NSPoint p = [root convertPoint:[win convertPointFromScreen:screen] fromView:nil];
+        CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds);
+        if (!s.shown) {
+            BOOL edge = p.y >= H - 6 && p.y <= H + 1 && p.x > 16 && p.x < W - 16;
+            if (edge && topNumber == win.windowNumber && ![Defaults() boolForKey:kShelfNoHover] && ![[w valueForKey:@"pageFull"] boolValue]) [w showShelf:YES];
+        } else if (!s.sticky && !NSPointInRect(p, NSInsetRect(s.frame, -30, -40))) [w showShelf:NO];
+    }
+}
 static void InstallShelfMonitor(void) {
-    static id mon;
+    static id mon, outside;
     if (mon) return;
+    outside = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskMouseMoved handler:^(NSEvent *e) { ShelfTrack(NSEvent.mouseLocation); }];
     mon = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskKeyDown | NSEventMaskLeftMouseDown handler:^NSEvent *(NSEvent *e) {
+        if (e.type == NSEventTypeMouseMoved) { ShelfTrack(NSEvent.mouseLocation); return e; }
         id c = e.window.windowController;
         if (![c isKindOfClass:VWindow.class]) return e;
         VWindow *w = c; VTabShelf *s = (VTabShelf *)w.shelf;
@@ -7570,15 +7618,8 @@ static void InstallShelfMonitor(void) {
         }
         NSView *root = w.window.contentView;
         NSPoint p = [root convertPoint:e.locationInWindow fromView:nil];
-        CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds);
-        if (e.type == NSEventTypeLeftMouseDown) {
-            if (s.shown && !NSPointInRect(p, s.frame)) [w showShelf:NO];
-            if ([w panelOpen] && ![w point:p inPanelOrBar:root]) [w closePanels];
-            return e;
-        }
-        if (!s.shown) {
-            if (p.y >= H - 6 && p.y <= H + 1 && p.x > 16 && p.x < W - 16 && w.window.isKeyWindow && ![Defaults() boolForKey:kShelfNoHover]) [w showShelf:YES];
-        } else if (!s.sticky && !NSPointInRect(p, NSInsetRect(s.frame, -30, -40))) [w showShelf:NO];
+        if (s.shown && !NSPointInRect(p, s.frame)) [w showShelf:NO];
+        if ([w panelOpen] && ![w point:p inPanelOrBar:root]) [w closePanels];
         return e;
     }];
 }
@@ -7587,7 +7628,8 @@ static void InstallShelfMonitor(void) {
 - (NSRect)shelfFrame {
     NSView *root = self.window.contentView;
     CGFloat W = NSWidth(root.bounds), H = NSHeight(root.bounds);
-    return NSMakeRect(14, H - 14 - 300, W - 28, 300);
+    CGFloat h = ((VTabShelf *)self.shelf).wantHeight ?: 274;
+    return NSMakeRect(14, H - 14 - h, W - 28, h);
 }
 - (void)showShelf:(BOOL)on {
     VTabShelf *s = (VTabShelf *)self.shelf;
@@ -7599,8 +7641,9 @@ static void InstallShelfMonitor(void) {
         if (s.superview) [s.superview addSubview:s positioned:NSWindowAbove relativeTo:nil];
         s.search.stringValue = @"";
         CaptureThumb(self.current);
+        [s reload]; f = [self shelfFrame];
         s.frame = NSOffsetRect(f, 0, 14); s.alphaValue = 0; s.hidden = NO;
-        [s reload]; [s scrollToNewest];
+        [s layoutShelf]; [s scrollToNewest];
         self.shelfHandle.hidden = YES;
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
             ctx.duration = 0.18; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
@@ -7671,6 +7714,7 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
 - (BOOL)isFlipped { return YES; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }
+- (void)scrollWheel:(NSEvent *)e {}   // the page behind a panel stays put
 - (instancetype)initWithFrame:(NSRect)r {
     if (!(self = [super initWithFrame:r])) return nil;
     self.items = [NSMutableArray array]; self.hover = -1; self.hidden = YES;
@@ -10343,7 +10387,7 @@ static void CtlOut(NSString *s) {
         else if ([cmd isEqualToString:@"reload"]) [w reload];
         else if ([cmd isEqualToString:@"scroll"]) [w runJS:[NSString stringWithFormat:@"window.scrollBy(0,%f)", arg.doubleValue]];
         else if ([cmd isEqualToString:@"top"]) [w runJS:@"window.scrollTo(0,0)"];
-        else if ([cmd isEqualToString:@"act"] && [@[@"toggleSplit:", @"swapSplit:", @"toggleReader:", @"showFind:", @"closePeek:"] containsObject:arg]) {
+        else if ([cmd isEqualToString:@"act"] && [@[@"toggleSplit:", @"swapSplit:", @"toggleReader:", @"showFind:", @"closePeek:", @"toggleSidebar:", @"toggleLens:", @"toggleShieldPanel:", @"toggleSitePanel:", @"closePanels"] containsObject:arg]) {
             [NSApp sendAction:NSSelectorFromString(arg) to:self from:nil];
             CtlOut([NSString stringWithFormat:@"act %@ split=%lu", arg, (unsigned long)self.splitPair.count]);
         }
@@ -10353,6 +10397,11 @@ static void CtlOut(NSString *s) {
             CtlOut(@"window opened");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [nw runControl:lines]; });
             return;
+        }
+        else if ([cmd isEqualToString:@"size"]) {   // dev: "size 1440 900" for screenshots of a known size
+            NSArray *wh = [arg componentsSeparatedByString:@" "];
+            if (wh.count == 2) { NSRect f = self.window.frame; CGFloat h = [wh[1] doubleValue]; [self.window setFrame:NSMakeRect(NSMinX(f), NSMaxY(f) - h, [wh[0] doubleValue], h) display:YES]; }
+            CtlOut([NSString stringWithFormat:@"size %@", NSStringFromSize(self.window.frame.size)]);
         }
         else if ([cmd isEqualToString:@"closewindow"]) { if (gWindows.count > 1) { CtlOut(@"window closed"); [self.window performClose:nil]; CtlOut(@"done"); return; } }
         else if ([cmd isEqualToString:@"win"]) {   // the rest of the commands run in window N (oldest first)
