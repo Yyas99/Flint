@@ -39,7 +39,7 @@ if ! xcode-select -p >/dev/null 2>&1; then fail_line "Tools" "Command Line Tools
 # one build at a time (Flint builds itself now; an old Terminal watcher may still be running)
 LOCK="$DIR/.buildlock"
 if ! mkdir "$LOCK" 2>/dev/null; then
-  if [ $(( $(date +%s) - $(stat -f %m "$LOCK") )) -lt 300 ]; then exit 0; fi
+  if [ $(( $(date +%s) - $(stat -f %m "$LOCK") )) -lt 300 ]; then exit 75; fi   # busy: Flint tries again shortly
   rm -rf "$LOCK"; mkdir "$LOCK"
 fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
@@ -97,7 +97,7 @@ done_line "Bundle" "Flint.app · extension layer"
 if [ "$1" = "build" ] || [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
   T=$(date +%s)
   clang -fobjc-arc -O2 -Wall -Wno-deprecated-declarations -Wno-nonnull -Wno-unused-function -mmacosx-version-min=12.3 "$SRC" -o "$BIN" \
-    -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework QuartzCore -framework Security -framework CoreServices -lsqlite3 >>"$LOG" 2>&1 & WP=$!
+    -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework QuartzCore -framework Security -framework CoreServices -framework CoreLocation -lsqlite3 >>"$LOG" 2>&1 & WP=$!
   while kill -0 $WP 2>/dev/null; do P=$(( 10 + ($(date +%s) - T) * 6 )); [ $P -gt 95 ] && P=95; live "Window" "$P" "compiling Flint.m · $(since $T)"; K=$((K+1)); sleep 0.25; done
   if ! wait $WP; then fail_line "Window" "build failed"; grep -m10 "error" "$LOG" | sed "s/^/   ${D}│${R} /"; exit 1; fi
   done_line "Window" "$(wc -l < "$SRC" | tr -d ' ') lines · $(grep -c warning: "$LOG" || true) warnings · $(since $T)"

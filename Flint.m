@@ -22,6 +22,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/message.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <CoreLocation/CoreLocation.h>
 
 static void FlintReloadBlocklists(void);
 static void FlintSetBlocking(BOOL on);
@@ -353,6 +354,8 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)download:(NSString *)url;
 - (void)source:(void (^)(NSString *))done;
 - (void)runJS:(NSString *)code;
+- (void)sampleHeaderColor;
+- (void)askPermission:(NSString *)key host:(NSString *)host noun:(NSString *)noun done:(void (^)(BOOL))done;   // a site wants location (or similar): ask once, remember per site
 - (void)hardReload;
 - (void)print;
 - (NSArray<NSString *> *)historyForSleep;
@@ -385,6 +388,7 @@ static NSURL *StripTracking(NSURL *u) {
 @property BOOL resuming;               // which video that time belongs to
 @property BOOL launchFront;               // the tab on screen at launch: paced like everything else even if it makes sound
 @property (strong) NSImage *thumb;          // a small picture of the page, taken when you leave it (the tab strip shows it)
+@property (strong) NSColor *headerColor;    // the colour at the top of the page; it bleeds into the band above
 @end
 
 @interface VHistory : NSObject
@@ -4572,6 +4576,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
         "for(const v of document.querySelectorAll('video,audio'))if(!v.paused)v.pause()})()" completionHandler:nil];
 }
 - (void)webView:(WKWebView *)w didFinishNavigation:(WKNavigation *)n {
+    [self sampleHeaderColor];
     if (!w.isLoading && self.loading) { self.loading = NO; self.progress = 1; [PW pageChanged:self]; }
     [self checkVideo];
     [self resumeMedia];
@@ -4886,10 +4891,32 @@ static NSString *MediaKey(NSURL *u) {
     }];
 }
 - (void)_webView:(WKWebView *)w requestGeolocationPermissionForOrigin:(WKSecurityOrigin *)o initiatedByFrame:(WKFrameInfo *)f decisionHandler:(void (^)(WKPermissionDecision))done API_AVAILABLE(macos(12.0)) {
+    DLog(@"location: %@ asks (origin form)", o.host);
     [self askPermission:@"location" host:o.host noun:@"location" done:^(BOOL ok) { done(ok ? WKPermissionDecisionGrant : WKPermissionDecisionDeny); }];
 }
 - (void)_webView:(WKWebView *)w requestGeolocationPermissionForFrame:(WKFrameInfo *)f decisionHandler:(void (^)(BOOL))done {
+    DLog(@"location: %@ asks (frame form)", f.securityOrigin.host);
     [self askPermission:@"location" host:f.securityOrigin.host noun:@"location" done:done];
+}
+
+// The colour at the top of the page (its theme colour, or whatever is painted behind its header),
+// so the band above the page can take a little of it.
+- (void)sampleHeaderColor {
+    __weak VPage *ws = self;
+    NSString *js = @"(()=>{const P=s=>{const x=s&&s.match(/rgba?\\(([^)]+)\\)/);if(!x)return null;const p=x[1].split(',').map(parseFloat);if(p.length>3&&p[3]<0.5)return null;return p.slice(0,3)};"
+                    "const m=document.querySelector('meta[name=theme-color]');if(m&&m.content&&document.body){const d=document.createElement('div');d.style.color=m.content;document.body.appendChild(d);const v=P(getComputedStyle(d).color);d.remove();if(v)return v.join(',')}"
+                    "let el=document.elementFromPoint(innerWidth/2,3);while(el){const v=P(getComputedStyle(el).backgroundColor);if(v)return v.join(',');el=el.parentElement}return ''})()";
+    void (^sample)(void) = ^{
+        VPage *p = ws; if (!p) return;
+        [p.web evaluateJavaScript:js completionHandler:^(id r, NSError *e) {
+            VPage *pp = ws; VTab *t = pp.tab; if (!t) return;
+            NSArray *c = [r isKindOfClass:NSString.class] && [r length] ? [r componentsSeparatedByString:@","] : nil;
+            t.headerColor = c.count == 3 ? [NSColor colorWithSRGBRed:[c[0] doubleValue] / 255 green:[c[1] doubleValue] / 255 blue:[c[2] doubleValue] / 255 alpha:1] : nil;
+            VWindow *w = t.owner; if (w.current == t) w.window.contentView.needsDisplay = YES;
+        }];
+    };
+    sample();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_main_queue(), sample);   // late headers
 }
 
 #pragma mark Downloads
@@ -5128,6 +5155,84 @@ static NSString *ScrollbarScript(void) {
     "put();document.addEventListener('DOMContentLoaded',put);})();";
 }
 
+// Location. WebKit inside an app doesn't get positions from macOS on its own, so Flint answers
+// navigator.geolocation itself: the page's request comes here, the site is asked about once (remembered
+// per site), and the position comes from macOS Location Services (which asks you the first time).
+static NSString *GeoScript(void) {
+    return @"(()=>{const g=navigator.geolocation,h=window.webkit&&webkit.messageHandlers&&webkit.messageHandlers.flintGeo;if(!g||!h||window.__flintGeo)return;window.__flintGeo=1;"
+            "const E=(c,m)=>({code:c,message:m,PERMISSION_DENIED:1,POSITION_UNAVAILABLE:2,TIMEOUT:3});"
+            "const P=r=>({coords:{latitude:r.lat,longitude:r.lon,accuracy:r.acc,altitude:r.alt??null,altitudeAccuracy:r.altAcc??null,heading:null,speed:null},timestamp:Date.now()});"
+            "const get=(ok,bad)=>h.postMessage({op:'get'}).then(r=>{if(r&&r.lat!=null){ok&&ok(P(r))}else if(bad)bad(E(r&&r.code||2,r&&r.msg||'Position unavailable'))},()=>bad&&bad(E(2,'Position unavailable')));"
+            "const W=new Map();let n=0;"
+            "g.getCurrentPosition=function(ok,bad){get(ok,bad)};"
+            "g.watchPosition=function(ok,bad){const id=++n;const t=()=>get(p=>{if(W.has(id))ok(p)},e=>{if(W.has(id)&&bad)bad(e)});W.set(id,setInterval(t,15000));t();return id};"
+            "g.clearWatch=function(id){clearInterval(W.get(id));W.delete(id)};"
+            "})()";
+}
+@interface VGeo : NSObject <WKScriptMessageHandlerWithReply, CLLocationManagerDelegate>
+@property (strong) CLLocationManager *lm;
+@property (strong) NSMutableArray *waiting;
+@property (strong) CLLocation *last;
++ (instancetype)shared;
+@end
+@implementation VGeo
++ (instancetype)shared { static VGeo *g; static dispatch_once_t once; dispatch_once(&once, ^{ g = [VGeo new]; }); return g; }
+- (void)userContentController:(WKUserContentController *)u didReceiveScriptMessage:(WKScriptMessage *)m replyHandler:(void (^)(id, NSString *))reply {
+    NSString *host = m.frameInfo.securityOrigin.host.length ? m.frameInfo.securityOrigin.host : m.webView.URL.host;
+    VPage *page = nil; for (VTab *t in AllTabs(YES)) if (t.web.web == m.webView) page = t.web;
+    if (!page || !host.length) { reply(@{@"code": @2, @"msg": @"Position unavailable"}, nil); return; }
+    DLog(@"location: %@ asks", host);
+    [page askPermission:@"location" host:host noun:@"location" done:^(BOOL ok) {
+        if (!ok) { reply(@{@"code": @1, @"msg": @"User denied Geolocation"}, nil); return; }
+        [self locate:reply];
+    }];
+}
+- (NSDictionary *)answer:(CLLocation *)l {
+    NSMutableDictionary *d = [@{@"lat": @(l.coordinate.latitude), @"lon": @(l.coordinate.longitude), @"acc": @(MAX(1, l.horizontalAccuracy))} mutableCopy];
+    if (l.verticalAccuracy > 0) { d[@"alt"] = @(l.altitude); d[@"altAcc"] = @(l.verticalAccuracy); }
+    return d;
+}
+- (void)locate:(void (^)(id, NSString *))reply {
+    if (self.last && -[self.last.timestamp timeIntervalSinceNow] < 60) { reply([self answer:self.last], nil); return; }
+    if (!self.waiting) self.waiting = [NSMutableArray array];
+    [self.waiting addObject:[reply copy]];
+    if (!self.lm) { self.lm = [CLLocationManager new]; self.lm.delegate = self; self.lm.desiredAccuracy = kCLLocationAccuracyHundredMeters; }
+    CLAuthorizationStatus st = self.lm.authorizationStatus;
+    if (st == kCLAuthorizationStatusDenied || st == kCLAuthorizationStatusRestricted) { [self denied]; return; }
+    if (st == kCLAuthorizationStatusNotDetermined) [self.lm requestWhenInUseAuthorization];
+    [self.lm startUpdatingLocation];
+    __weak VGeo *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ if (ws.waiting.count) [ws finish:@{@"code": @3, @"msg": @"Timeout expired"}]; });
+}
+- (void)denied {
+    [gWin showToast:@"Location is off for Flint: turn it on in System Settings ▸ Privacy & Security ▸ Location Services"];
+    [self finish:@{@"code": @1, @"msg": @"User denied Geolocation"}];
+}
+- (void)finish:(NSDictionary *)answer {
+    NSArray *w = self.waiting.copy; [self.waiting removeAllObjects];
+    [self.lm stopUpdatingLocation];
+    for (void (^r)(id, NSString *) in w) r(answer, nil);
+}
+- (void)locationManager:(CLLocationManager *)m didUpdateLocations:(NSArray<CLLocation *> *)locs {
+    CLLocation *l = locs.lastObject; if (!l) return;
+    self.last = l; DLog(@"location: fixed (±%.0f m)", l.horizontalAccuracy);
+    [self finish:[self answer:l]];
+}
+- (void)locationManager:(CLLocationManager *)m didFailWithError:(NSError *)e {
+    DLog(@"location: failed %@", e.localizedDescription);
+    if (e.code == kCLErrorLocationUnknown) return;   // still looking
+    if (e.code == kCLErrorDenied) { [self denied]; return; }
+    [self finish:@{@"code": @2, @"msg": @"Position unavailable"}];
+}
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager *)m {
+    CLAuthorizationStatus st = m.authorizationStatus;
+    DLog(@"location: macOS permission %d", (int)st);
+    if (!self.waiting.count) return;
+    if (st == kCLAuthorizationStatusDenied || st == kCLAuthorizationStatusRestricted) [self denied];
+    else if (st != kCLAuthorizationStatusNotDetermined) [m startUpdatingLocation];
+}
+@end
+
 static void FlintCosmeticInstall(WKUserContentController *ucc) {
     static NSHashTable *done; if (!done) done = [NSHashTable weakObjectsHashTable];
     if (!ucc || [done containsObject:ucc]) return;
@@ -5138,6 +5243,8 @@ static void FlintCosmeticInstall(WKUserContentController *ucc) {
     if (NSScroller.preferredScrollerStyle == NSScrollerStyleLegacy)
         [ucc addUserScript:[[WKUserScript alloc] initWithSource:ScrollbarScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
     [ucc addScriptMessageHandlerWithReply:VCosmetic.shared contentWorld:mine name:@"flintCosmetic"];
+    [ucc addUserScript:[[WKUserScript alloc] initWithSource:GeoScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
+    [ucc addScriptMessageHandlerWithReply:VGeo.shared contentWorld:WKContentWorld.pageWorld name:@"flintGeo"];
 }
 
 @implementation VWindow (Cosmetic)
@@ -8287,7 +8394,17 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
 @end
 @implementation VRoot
 - (BOOL)isFlipped { return YES; }
-- (void)drawRect:(NSRect)r { [vBg setFill]; NSRectFill(NSIntersectionRect(r, self.bounds)); }
+- (void)drawRect:(NSRect)r {
+    [vBg setFill]; NSRectFill(NSIntersectionRect(r, self.bounds));
+    // the page's header colour bleeds a little into the band above it; the band stays dark
+    NSColor *c = [WinFor(self).current.headerColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    if (!c || ThemeIsLight()) return;
+    CGFloat lum = 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent;
+    CGFloat a = lum > 0.6 ? 0.07 : lum > 0.35 ? 0.22 : 0.4;   // light headers only tint it; dark and coloured ones show through more
+    NSColor *bottom = [vBg blendedColorWithFraction:a ofColor:c], *top = [vBg blendedColorWithFraction:a * 0.45 ofColor:c];
+    NSGradient *g = [[NSGradient alloc] initWithStartingColor:top endingColor:bottom];
+    [g drawInRect:NSMakeRect(0, 0, NSWidth(self.bounds), 48) angle:90];   // flipped view: 90° runs top to bottom
+}
 - (void)resizeSubviewsWithOldSize:(NSSize)s { [WinFor(self) layout]; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 // Leaving the window (say, down through the tab strip) puts the strip away, unless you opened it on purpose.
@@ -8600,6 +8717,7 @@ static NSString *CreateProfile(NSString *name) {
     [self.suggest dismiss];
     [self refreshChrome];
     [self.sidebar reload];
+    self.window.contentView.needsDisplay = YES;   // the band takes this page's colour
     [self scheduleSave];
 }
 
@@ -8841,6 +8959,7 @@ static NSString *CreateProfile(NSString *name) {
     if (np) {
         [np setValue:@YES forKey:@"floating"];
         np.frame = NSMakeRect(10, H - 10 - 64, 300, 64);
+        [np setValue:@YES forKey:@"placeInCorner"];
         [root addSubview:np positioned:NSWindowAbove relativeTo:self.content];
     }
     self.findBar.frame = NSMakeRect(NSWidth(self.content.bounds) - 344, NSHeight(self.content.bounds) - 36 - 10, 330, 36);
@@ -9926,6 +10045,14 @@ static NSString *MediaControlJS(void) {
 @property BOOL floating;   // Monolith: a glass card over the bottom-left of the page
 @end
 
+// Where the player sits: the corner you last dropped it in (bottom-left to start), clear of the top band.
+static NSRect NowPlayingFrame(NSRect root, NSSize sz) {
+    NSInteger c = [Defaults() integerForKey:@"nowPlayingCorner"];
+    BOOL right = c & 1, top = c & 2;
+    CGFloat x = right ? NSWidth(root) - 10 - sz.width : 10;
+    CGFloat y = top ? 36 + 10 : NSHeight(root) - 10 - sz.height;
+    return NSMakeRect(x, y, sz.width, sz.height);
+}
 @implementation VNowPlaying
 - (BOOL)isFlipped { return YES; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
@@ -9974,8 +10101,30 @@ static NSString *MediaControlJS(void) {
         RoundRect(NSMakeRect(NSMinX(track), NSMinY(track), NSWidth(track) * MIN(1, pos / dur), 2), 1, vDim);
     }
 }
-- (void)mouseDown:(NSEvent *)e {   // clicking the card takes you to the music
-    VTab *t = self.owner.mediaTab; if (t) [self.owner selectTab:t];
+- (void)setPlaceInCorner:(BOOL)on { if (on && self.superview) self.frame = NowPlayingFrame(self.superview.bounds, self.frame.size); }   // the window lays it out this way
+// Click the card to go to the music; drag it and it settles in whichever corner of the page you drop it nearest.
+- (void)mouseDown:(NSEvent *)e {
+    NSView *root = self.superview;
+    NSPoint start = [root convertPoint:e.locationInWindow fromView:nil];
+    NSRect from = self.frame; BOOL dragged = NO;
+    while (YES) {
+        NSEvent *n = [self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp];
+        NSPoint p = [root convertPoint:n.locationInWindow fromView:nil];
+        if (n.type == NSEventTypeLeftMouseUp) break;
+        if (!dragged && hypot(p.x - start.x, p.y - start.y) < 4) continue;
+        dragged = YES;
+        NSRect f = NSOffsetRect(from, p.x - start.x, p.y - start.y);
+        f.origin.x = MAX(0, MIN(NSWidth(root.bounds) - NSWidth(f), NSMinX(f)));
+        f.origin.y = MAX(0, MIN(NSHeight(root.bounds) - NSHeight(f), NSMinY(f)));
+        self.frame = f;
+    }
+    if (!dragged) { VTab *t = self.owner.mediaTab; if (t) [self.owner selectTab:t]; return; }
+    BOOL right = NSMidX(self.frame) > NSMidX(root.bounds), top = NSMidY(self.frame) < NSMidY(root.bounds);   // root is flipped
+    [Defaults() setInteger:(right ? 1 : 0) + (top ? 2 : 0) forKey:@"nowPlayingCorner"];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+        ctx.duration = 0.2; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        self.animator.frame = NowPlayingFrame(root.bounds, self.frame.size);
+    }];
 }
 - (void)control:(VButton *)b {
     VTab *t = self.owner.mediaTab; if (!t.web) return;
@@ -10472,6 +10621,14 @@ static void CtlOut(NSString *s) {
             CtlOut([NSString stringWithFormat:@"handle screen x=%.0f..%.0f y=%.0f..%.0f (top-left origin, screen h=%.0f) superview=%@ hidden=%d", NSMinX(hr), NSMaxX(hr), NSScreen.mainScreen.frame.size.height - NSMaxY(hr), NSScreen.mainScreen.frame.size.height - NSMinY(hr), NSScreen.mainScreen.frame.size.height, NSStringFromClass(hd.superview.class), hd.hidden]);
         }
         else if ([cmd isEqualToString:@"js"]) [w runJS:arg];
+        else if ([cmd isEqualToString:@"geo"]) {   // dev: ask the page for a position and report what happens
+            Class cl = NSClassFromString(@"CLLocationManager");
+            int st = cl && [cl respondsToSelector:@selector(authorizationStatus)] ? ((int (*)(id, SEL))objc_msgSend)(cl, @selector(authorizationStatus)) : -1;
+            BOOL on = cl && [cl respondsToSelector:@selector(locationServicesEnabled)] ? ((BOOL (*)(id, SEL))objc_msgSend)(cl, @selector(locationServicesEnabled)) : NO;
+            CtlOut([NSString stringWithFormat:@"geo macOS status=%d services=%d", st, on]);
+            [w.web callAsyncJavaScript:@"return await new Promise(r=>{if(!navigator.geolocation)return r('no api');navigator.geolocation.getCurrentPosition(p=>r('ok '+p.coords.latitude.toFixed(2)+','+p.coords.longitude.toFixed(2)),e=>r('error '+e.code+' '+e.message),{timeout:15000})})"
+                             arguments:@{} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:^(id r, NSError *e) { CtlOut([NSString stringWithFormat:@"geo page: %@ %@", r ?: @"-", e.localizedDescription ?: @""]); }];
+        }
         else if ([cmd isEqualToString:@"extcopy"] && arg.length && ![arg containsString:@"/"] && ![arg hasPrefix:@"."]) {   // dev: copy an installed extension out for inspection
             NSString *src = [ExtRoot() stringByAppendingPathComponent:arg], *dst = [[CtlDir() stringByAppendingPathComponent:@"ext-debug"] stringByAppendingPathComponent:arg];
             [NSFileManager.defaultManager createDirectoryAtPath:dst.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
@@ -10611,7 +10768,7 @@ static void RunBuildScript(NSString *stamp) {
     [NSFileManager.defaultManager copyItemAtPath:script toPath:copy error:nil];
     NSTask *t = [NSTask new];
     t.executableURL = [NSURL fileURLWithPath:@"/bin/bash"];
-    t.arguments = @[copy];
+    t.arguments = stamp ? @[copy, @"build"] : @[copy];   // a source change always compiles (file times can't be trusted after copies)
     t.currentDirectoryURL = [NSURL fileURLWithPath:d];
     t.standardOutput = NSFileHandle.fileHandleWithNullDevice; t.standardError = NSFileHandle.fileHandleWithNullDevice;
     gBuilding = YES;
@@ -10619,7 +10776,7 @@ static void RunBuildScript(NSString *stamp) {
         int code = task.terminationStatus;
         dispatch_async(DevQueue(), ^{
             gBuilding = NO;
-            if (stamp) [stamp writeToFile:[d stringByAppendingPathComponent:@".built-stamp"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            if (stamp && code != 75) [stamp writeToFile:[d stringByAppendingPathComponent:@".built-stamp"] atomically:YES encoding:NSUTF8StringEncoding error:nil];   // 75: another build was running; try again
             NSString *st = [NSString stringWithContentsOfFile:[d stringByAppendingPathComponent:@"watch.status"] encoding:NSUTF8StringEncoding error:nil];
             NSInteger n = [[st componentsSeparatedByString:@" "].firstObject integerValue] + 1;
             [[NSString stringWithFormat:@"%ld %@ %.0f\n", (long)n, code == 0 ? @"ok" : @"failed", NSDate.date.timeIntervalSince1970]
