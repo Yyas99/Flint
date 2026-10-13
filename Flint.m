@@ -4863,6 +4863,35 @@ static NSString *MediaKey(NSURL *u) {
     }];
 }
 
+// Location: a site asks, you answer once for that site (change it later from the lock, or Settings ▸ Site Settings).
+// WebKit gets the position from macOS Location Services, which asks you the first time Flint uses it.
+- (void)askPermission:(NSString *)key host:(NSString *)host noun:(NSString *)noun done:(void (^)(BOOL))done {
+    host = host.lowercaseString ?: @"";
+    NSInteger v = [[Defaults() dictionaryForKey:kSitePerms][host][key] integerValue];
+    if (v == 1) { done(YES); return; }
+    if (v == 2 || !self.window) { done(NO); return; }
+    NSAlert *a = [NSAlert new];
+    a.messageText = [NSString stringWithFormat:@"%@ wants to use your %@", host, noun];
+    a.informativeText = @"You can change this later from the lock beside the address.";
+    [a addButtonWithTitle:@"Allow"]; [a addButtonWithTitle:@"Don't Allow"];
+    a.showsSuppressionButton = YES; a.suppressionButton.title = @"Remember for this site"; a.suppressionButton.state = NSControlStateValueOn;
+    [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+        BOOL allow = r == NSAlertFirstButtonReturn;
+        if (a.suppressionButton.state == NSControlStateValueOn) {
+            NSMutableDictionary *all = [[Defaults() dictionaryForKey:kSitePerms] ?: @{} mutableCopy];
+            NSMutableDictionary *mine = [all[host] ?: @{} mutableCopy];
+            mine[key] = @(allow ? 1 : 2); all[host] = mine; [Defaults() setObject:all forKey:kSitePerms];
+        }
+        done(allow);
+    }];
+}
+- (void)_webView:(WKWebView *)w requestGeolocationPermissionForOrigin:(WKSecurityOrigin *)o initiatedByFrame:(WKFrameInfo *)f decisionHandler:(void (^)(WKPermissionDecision))done API_AVAILABLE(macos(12.0)) {
+    [self askPermission:@"location" host:o.host noun:@"location" done:^(BOOL ok) { done(ok ? WKPermissionDecisionGrant : WKPermissionDecisionDeny); }];
+}
+- (void)_webView:(WKWebView *)w requestGeolocationPermissionForFrame:(WKFrameInfo *)f decisionHandler:(void (^)(BOOL))done {
+    [self askPermission:@"location" host:f.securityOrigin.host noun:@"location" done:done];
+}
+
 #pragma mark Downloads
 
 - (void)download:(WKDownload *)d decideDestinationUsingResponse:(NSURLResponse *)r suggestedFilename:(NSString *)name completionHandler:(void (^)(NSURL *))done {
@@ -7913,11 +7942,13 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
             [self add:VPLabel rect:NSMakeRect(x, y, cw, 14) title:@"PERMISSIONS"]; y += 20;
             NSDictionary *perms = [Defaults() dictionaryForKey:kSitePerms][host];
             CGFloat cx = x;
-            for (NSString *k in @[@"camera", @"microphone"]) {
+            for (NSString *k in @[@"location", @"camera", @"microphone"]) {
                 NSInteger v = [perms[k] integerValue];
                 NSString *state = v == 1 ? @"Allow" : v == 2 ? @"Block" : @"Ask";
-                NSString *t1 = [k isEqualToString:@"camera"] ? @"Camera" : @"Microphone";
-                VPItem *c = [self add:VPChip rect:NSMakeRect(cx, y, ChipWidth(t1, state), 30) title:t1]; c.meta = state;
+                NSString *t1 = k.capitalizedString;
+                CGFloat chipW = ChipWidth(t1, state);
+                if (cx + chipW > x + cw) { cx = x; y += 36; }   // wrap onto a second row
+                VPItem *c = [self add:VPChip rect:NSMakeRect(cx, y, chipW, 30) title:t1]; c.meta = state;
                 c.act = ^(NSEvent *e, NSRect r) { [ww setSitePermission:Carry(@[host, k, @((v + 1) % 3)])]; [ws rebuild]; };
                 cx += NSWidth(c.r) + 6;
             }
@@ -9339,7 +9370,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     NSMenuItem *js = [m addItemWithTitle:@"JavaScript on This Site" action:@selector(toggleSiteScripts:) keyEquivalent:@""]; js.target = self; js.representedObject = host;
     js.state = [Defaults() boolForKey:kScripts] && ![[Defaults() arrayForKey:kJSOff] containsObject:host] ? NSControlStateValueOn : NSControlStateValueOff;
     NSDictionary *perms = [Defaults() dictionaryForKey:kSitePerms][host];
-    for (NSString *k in @[@"camera", @"microphone"]) {
+    for (NSString *k in @[@"location", @"camera", @"microphone"]) {
         NSInteger v = [perms[k] integerValue];
         NSMenuItem *pi = [m addItemWithTitle:[NSString stringWithFormat:@"%@: %@", k.capitalizedString, v == 1 ? @"Allowed" : v == 2 ? @"Blocked" : @"Ask"] action:nil keyEquivalent:@""];
         NSMenu *sub = [[NSMenu alloc] initWithTitle:k];
@@ -11091,10 +11122,10 @@ static NSArray *SettingsSchema(VWindow *win) {
         NSMutableArray *l = [[Defaults() arrayForKey:kJSOff] ?: @[] mutableCopy]; [l removeObject:h]; [Defaults() setObject:l forKey:kJSOff]; done(nil); })];
     NSMutableArray *cam = [NSMutableArray array];
     NSDictionary *perms = [Defaults() dictionaryForKey:kSitePerms] ?: @{};
-    if (!perms.count) [cam addObject:SNote(@"No decisions yet", @"Sites ask the first time they want your camera or microphone.")];
+    if (!perms.count) [cam addObject:SNote(@"No decisions yet", @"Sites ask the first time they want your location, camera or microphone.")];
     for (NSString *h in [perms.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
         NSMutableArray *bits = [NSMutableArray array];
-        for (NSString *k in @[@"camera", @"microphone"]) { NSInteger v = [perms[h][k] integerValue]; if (v) [bits addObject:[NSString stringWithFormat:@"%@ %@", k.capitalizedString, v == 1 ? @"allowed" : @"blocked"]]; }
+        for (NSString *k in @[@"location", @"camera", @"microphone"]) { NSInteger v = [perms[h][k] integerValue]; if (v) [bits addObject:[NSString stringWithFormat:@"%@ %@", k.capitalizedString, v == 1 ? @"allowed" : @"blocked"]]; }
         [cam addObject:SButton([@"perm." stringByAppendingString:h], h, [bits componentsJoinedByString:@" · "], @"Reset", ^(NSDictionary *a, void (^done)(NSString *)) {
             NSMutableDictionary *d = [[Defaults() dictionaryForKey:kSitePerms] ?: @{} mutableCopy]; [d removeObjectForKey:h]; [Defaults() setObject:d forKey:kSitePerms]; done(nil); })];
     }
@@ -11104,7 +11135,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     for (NSString *h in allow) [allowRows addObject:SButton([@"allow." stringByAppendingString:h], h, @"Blocking turned off", @"Turn Back On", ^(NSDictionary *a, void (^done)(NSString *)) {
         NSMutableArray *l = [[Defaults() arrayForKey:kAllowlist] ?: @[] mutableCopy]; [l removeObject:h]; [Defaults() setObject:l forKey:kAllowlist]; FlintReloadBlocklists(); done(nil); })];
     [S addObject:SSection(@"sites", @"Site Settings", @"Choices you've made for individual sites. Change them from the lock icon in the address bar.", @"sliders", @[
-        SGroup(@"JavaScript", js), SGroup(@"Camera and microphone", cam), SGroup(@"Ad blocking", allowRows) ])];
+        SGroup(@"JavaScript", js), SGroup(@"Location, camera and microphone", cam), SGroup(@"Ad blocking", allowRows) ])];
 
     // ── Ad blocking
     NSMutableArray *lists = [NSMutableArray array]; NSSet *on = ListsOn();
