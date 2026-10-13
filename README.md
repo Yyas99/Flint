@@ -56,7 +56,7 @@ Iris gives the page the whole window. There is no tab bar and no sidebar: back, 
 - Installs Chrome Web Store extensions through its own extension layer, built against the Chrome APIs rather than any one extension: runtime messaging, storage, tabs, scripting (with frame targeting and registered content scripts), context menus, user scripts and declarativeNetRequest (translated to WebKit content rules). Proton Pass, SponsorBlock and Enhancer for YouTube run on it.
 
 **Performance**
-- One rule: Iris and every process it starts average at most one CPU core over any 10 seconds. Short bursts run at full speed; audio, video and the tab you're using are never slowed.
+- One rule: background pages share a quarter of the Mac's processor on battery and 40% plugged in, averaged over 10 seconds. Short bursts run at full speed; the page on screen, anything that played sound in the last 90 seconds and Picture in Picture are never slowed.
 - Background tab throttling that adapts to battery or power
 
 ## Screenshots

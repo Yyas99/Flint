@@ -72,6 +72,7 @@ static NSString *const kCustomEngine  = @"customSearchEngine"; // [name, url wit
 static NSString *const kDLAccel        = @"downloadAccelerator";   // Iris's multi-connection downloader for http(s) files
 static NSString *const kCodec          = @"videoCodec";          // 0 automatic, 1 avoid AV1, 2 H.264 only
 static NSString *const kCodec30       = @"videoMax30fps";
+static NSString *const kThrottleOn    = @"holdBackBackground";   // the master switch: off = background tabs use whatever they want
 static NSString *const kBgThrottle    = @"backgroundThrottle";   // 0 standard, 1 save power on battery, 2 always
 static NSString *const kSingleProcess = @"singleWebProcess";
 static NSString *const kRestorePaused = @"restoredVideoPaused";
@@ -151,17 +152,27 @@ static NSArray<NSArray *> *Accents(void) {
     return @[@[@"Silver", @0xdcdce2, @0x2c2c30], @[@"Crimson", @0xff3b55, @0xd70f35], @[@"Ember", @0xff6a3d, @0xe0461c],
              @[@"Blue", @0x5aa2ff, @0x1f6fe0], @[@"Violet", @0xb08cff, @0x7b4ee0], @[@"Green", @0x4fd18b, @0x14995a], @[@"Pink", @0xff7ab8, @0xe0408a]];
 }
-static BOOL ThemeIsLight(void) {
+// Light or dark is decided once, when the palette is built, and everything reads that answer: asking macOS again
+// while drawing could get a different reply mid-switch (Follow macOS at sunset), leaving dark capsules with dark text.
+static int gThemeLight = -1;
+static BOOL ThemeIsLightNow(void) {
     NSInteger t = [Defaults() integerForKey:kTheme];
     if (t == 3) return YES;
     if (t != 0) return NO;
-    NSAppearanceName n = [NSApp.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
-    return [n isEqualToString:NSAppearanceNameAqua];
+    // Follow macOS: ask the system setting itself (fresh from disk), not the app's appearance, which lags a switch
+    // and still says "dark" for a moment after leaving Carbon or Graphite
+    CFPreferencesAppSynchronize(kCFPreferencesAnyApplication);
+    CFStringRef s = (CFStringRef)CFPreferencesCopyAppValue(CFSTR("AppleInterfaceStyle"), kCFPreferencesAnyApplication);
+    BOOL dark = s && CFGetTypeID(s) == CFStringGetTypeID() && CFStringCompare(s, CFSTR("Dark"), kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+    if (s) CFRelease(s);
+    return !dark;
 }
+static BOOL ThemeIsLight(void) { if (gThemeLight < 0) gThemeLight = ThemeIsLightNow(); return gThemeLight == 1; }
 static NSAppearance *ThemeAppearance(void) { return [NSAppearance appearanceNamed:ThemeIsLight() ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua]; }
 static void InitPalette(void) {
     NSInteger t = [Defaults() integerForKey:kTheme];
-    BOOL light = ThemeIsLight(), carbon = (t == 2);
+    gThemeLight = ThemeIsLightNow() ? 1 : 0;
+    BOOL light = gThemeLight == 1, carbon = (t == 2);
     if (light) {
         vBg = Hex(0xe9e9ec); vPill = Hex(0xffffff); vPillFocus = Hex(0xffffff); vHover = Hex(0xdcdce1);
         vActive = Hex(0xd2d2d8); vLine = Hex(0xc4c4cb); vText = Hex(0x1b1b1e); vDim = Hex(0x55555c);
@@ -185,6 +196,9 @@ static void InitPalette(void) {
     vAccent = Hex((uint32_t)[a[light ? 2 : 1] unsignedIntValue]);
     vEmber = [Defaults() integerForKey:kAccent] == 0 ? [vText colorWithAlphaComponent:0.55] : vAccent;   // Silver: no colour at all
 }
+
+// Your accent where something is chosen, on, or current. With Silver (no accent) the active tab keeps its profile's colour.
+static BOOL AccentChosen(void) { return [Defaults() integerForKey:kAccent] != 0; }
 
 static NSFont *UIFont(CGFloat s, NSFontWeight w) { return [NSFont systemFontOfSize:s weight:w]; }
 // Headings: San Francisco at display sizes (the system face, tuned for large text), not a serif:
@@ -606,6 +620,7 @@ static NSColor *ProfileColor(NSString *pid) {
     NSArray *c = ProfileColors(); NSInteger i = ProfileColorIndex(pid);
     return Hex((uint32_t)[c[(NSUInteger)MAX(0, MIN((NSInteger)c.count - 1, i))][1] unsignedIntValue]);
 }
+static NSColor *PickColor(BOOL priv, NSString *profile) { return AccentChosen() ? vAccent : priv ? vText : ProfileColor(profile); }
 // The profile's avatar: its initial on its colour.
 static NSImage *ProfileAvatar(NSString *pid, NSString *name, CGFloat size) {
     NSColor *c = ProfileColor(pid);
@@ -1712,7 +1727,7 @@ static const CGFloat kMenuPad = 6, kMenuRow = 30, kMenuSep = 11, kMenuHead = 26,
 - (void)drawRect:(NSRect)dirty {
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
     BOOL light = ThemeIsLight();
-    NSColor *hotFill = [vText colorWithAlphaComponent:light ? 0.075 : 0.11];
+    NSColor *hotFill = AccentChosen() ? [vAccent colorWithAlphaComponent:light ? 0.14 : 0.2] : [vText colorWithAlphaComponent:light ? 0.075 : 0.11];
     // quick actions across the top: icon over a small label
     for (NSUInteger k = 0; k < self.iconItems.count; k++) {
         NSMenuItem *i = self.iconItems[k]; NSRect r = self.iconRects[k].rectValue;
@@ -1745,7 +1760,7 @@ static const CGFloat kMenuPad = 6, kMenuRow = 30, kMenuSep = 11, kMenuHead = 26,
             NSImage *ic = nil;
             if (checked && !icon) ic = Tinted(Symbol(@"checkmark", 11, NSFontWeightSemibold), on ? vText : vFaint);
             else if (i.image && !i.image.isTemplate) { DrawImage(i.image, CenterIn(NSMakeSize(16, 16), g)); }
-            else if (icon) ic = Tinted(icon, !on ? vFaint : hot ? vText : vDim);
+            else if (icon) ic = Tinted(icon, !on ? vFaint : hot ? (AccentChosen() ? vAccent : vText) : vDim);
             if (ic) DrawImage(ic, CenterIn(NSMakeSize(MIN(ic.size.width, 18), MIN(ic.size.height, 18)), g));
         }
         CGFloat right = NSMaxX(r) - 10;
@@ -2243,7 +2258,7 @@ static NSString *gUpdateNotes;
 @property NSRect privateBadge, profileRect;
 @property (strong) VBadgeButton *profileBtn;
 @property BOOL capsule;                    // Monolith: floating capsules over the page instead of a bar
-@property NSRect navRect, lensRect, avatarRect, dlRect, shieldRect;
+@property NSRect navRect, lensRect, avatarRect, dlRect, shieldRect, extRect;   // extRect: pinned extensions, their own capsule beside Lens
 - (void)layoutBar;
 - (NSView *)extensionButtonFor:(NSString *)ident;
 @end
@@ -2363,16 +2378,21 @@ static NSString *gUpdateNotes;
     self.privateBadge = NSZeroRect; self.profileRect = NSZeroRect;
     BOOL dl = VDownloads.shared.worthShowing || ToolbarShows(@"dlalways");
     self.dlBtn.hidden = !dl;
-    for (NSButton *b in self.extBtns) b.hidden = !ExtensionPinned(b.identifier);
+    NSMutableArray<NSButton *> *exts = [NSMutableArray array];
+    for (NSButton *b in self.extBtns) { b.hidden = !ExtensionPinned(b.identifier); if (!b.hidden) [exts addObject:b]; }
+    CGFloat extW = exts.count ? 6 + exts.count * 28 : 0;   // pinned extensions: their own capsule, left of Lens
+    self.extRect = extW ? NSMakeRect(W - 12 - 28 - 6 - extW, y, extW, 28) : NSZeroRect;
+    for (NSUInteger i = 0; i < exts.count; i++) exts[i].frame = NSMakeRect(NSMinX(self.extRect) + 3 + i * 28, y + 5, 28, 18);
     CGFloat upW = gUpdateReady ? (gUpdating ? 84 : 64) : 0;
     CGFloat navW = navBtns.count ? 6 + navBtns.count * 29 : 0;
     CGFloat fixed = (navW ? navW + 6 : 0) + (dl ? 34 : 0) + (upW > 0 ? upW + 6 : 0);
     NSInteger widthMode = [Defaults() integerForKey:kAddrWidth];   // Full, Medium, Compact
     CGFloat maxPill = widthMode == 2 ? 420 : widthMode == 1 ? 560 : 720;
-    CGFloat avail = W - self.leftInset - 8 - 44;   // Lens keeps the far right corner
+    CGFloat avail = W - self.leftInset - 8 - 44 - (extW ? extW + 6 : 0);   // Lens keeps the far right corner, extensions sit beside it
     CGFloat pillW = MAX(220, MIN(maxPill, avail - fixed));
     CGFloat total = fixed + pillW;
     CGFloat x = MAX(self.leftInset, round((W - total) / 2));
+    if (extW) x = MAX(self.leftInset, MIN(x, NSMinX(self.extRect) - 8 - total));   // never under the extensions
     self.navRect = navW ? NSMakeRect(x, y, navW, 28) : NSZeroRect;
     for (NSUInteger i = 0; i < navBtns.count; i++) ((NSView *)navBtns[i]).frame = NSMakeRect(x + 3 + i * 29, y, 29, 28);
     if (navW) x += navW + 6;
@@ -2399,7 +2419,7 @@ static NSString *gUpdateNotes;
     if (!self.capsule || self.hidden) return [super hitTest:p];
     NSPoint q = [self convertPoint:p fromView:self.superview];
     NSRect up = self.updateBtn.hidden ? NSZeroRect : self.updateBtn.frame;
-    for (NSValue *v in @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill], [NSValue valueWithRect:self.dlRect], [NSValue valueWithRect:self.lensRect], [NSValue valueWithRect:self.avatarRect], [NSValue valueWithRect:up]])
+    for (NSValue *v in @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill], [NSValue valueWithRect:self.dlRect], [NSValue valueWithRect:self.lensRect], [NSValue valueWithRect:self.avatarRect], [NSValue valueWithRect:self.extRect], [NSValue valueWithRect:up]])
         if (NSPointInRect(q, v.rectValue)) return [super hitTest:p];
     return nil;   // the page underneath gets it
 }
@@ -2479,7 +2499,6 @@ static NSString *gUpdateNotes;
         for (VButton *b in @[self.shareBtn, self.readerBtn]) if (!b.hidden) { b.frame = NSMakeRect(r - 24, y + 3, 24, 22); b.symbolSize = 11.5; r -= 25; }
         if (!self.pipBtn.hidden) { self.pipBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.pipBtn.symbolSize = 11.5; r -= 25; }
         if (!self.starBtn.hidden) { self.starBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.starBtn.symbolSize = 11.5; r -= 25; }
-        for (NSButton *b in self.extBtns.reverseObjectEnumerator) if (!b.hidden) { b.frame = NSMakeRect(r - 24, y + 5, 24, 18); r -= 25; }
         CGFloat fx = NSMaxX(self.infoBtn.frame) + 4;
         self.field.frame = NSMakeRect(fx, y + 6, MAX(60, r - fx - 6), 17);
         return;
@@ -2566,7 +2585,9 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
 - (void)drawRect:(NSRect)dirty {
     if (self.capsule) {
         VWindow *ow = WinFor(self);
-        NSArray *round = NSIsEmptyRect(self.navRect) ? @[[NSValue valueWithRect:self.pill]] : @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill]];
+        NSMutableArray *round = [NSMutableArray arrayWithObject:[NSValue valueWithRect:self.pill]];
+        if (!NSIsEmptyRect(self.navRect)) [round addObject:[NSValue valueWithRect:self.navRect]];
+        if (!NSIsEmptyRect(self.extRect)) [round addObject:[NSValue valueWithRect:self.extRect]];
         NSMutableArray *circles = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.lensRect], nil];
         if (!NSIsEmptyRect(self.avatarRect)) [circles addObject:[NSValue valueWithRect:self.avatarRect]];
         if (!NSIsEmptyRect(self.dlRect)) [circles addObject:[NSValue valueWithRect:self.dlRect]];
@@ -2576,7 +2597,7 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         });
         for (NSValue *v in round) ShardStroke(v.rectValue, 14, MGlassEdge(), 1);
         for (NSValue *v in circles) { NSBezierPath *o = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(v.rectValue, 0.5, 0.5)]; o.lineWidth = 1; [MGlassEdge() setStroke]; [o stroke]; }
-        if (self.editing) ShardStroke(self.pill, 14, [vText colorWithAlphaComponent:0.22], 1);
+        if (self.editing) ShardStroke(self.pill, 14, AccentChosen() ? [vAccent colorWithAlphaComponent:0.75] : [vText colorWithAlphaComponent:0.22], 1);
         if (!NSIsEmptyRect(self.shieldRect) && self.blocked > 0) {
             RoundRect(self.shieldRect, 11, MChip());
             NSString *n = self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked];
@@ -4455,10 +4476,11 @@ static BOOL OnBattery(void) {
 static BOOL ThrottleHard(void) { NSInteger m = [Defaults() integerForKey:kBgThrottle]; return m == 2 || (m == 1 && OnBattery()); }
 static void ApplyThrottle(WKWebView *w, BOOL hard) {
     WKPreferences *p = w.configuration.preferences;
+    BOOL on = [Defaults() boolForKey:kThrottleOn];   // off: hidden tabs keep full-speed timers and are never suspended
     SEL a = NSSelectorFromString(@"_setHiddenPageDOMTimerThrottlingAutoIncreases:"), en = NSSelectorFromString(@"_setHiddenPageDOMTimerThrottlingEnabled:"), sup = NSSelectorFromString(@"_setPageVisibilityBasedProcessSuppressionEnabled:");
-    if ([p respondsToSelector:en]) ((void (*)(id, SEL, BOOL))objc_msgSend)(p, en, YES);
-    if ([p respondsToSelector:sup]) ((void (*)(id, SEL, BOOL))objc_msgSend)(p, sup, YES);
-    if ([p respondsToSelector:a]) ((void (*)(id, SEL, BOOL))objc_msgSend)(p, a, hard);
+    if ([p respondsToSelector:en]) ((void (*)(id, SEL, BOOL))objc_msgSend)(p, en, on);
+    if ([p respondsToSelector:sup]) ((void (*)(id, SEL, BOOL))objc_msgSend)(p, sup, on);
+    if ([p respondsToSelector:a]) ((void (*)(id, SEL, BOOL))objc_msgSend)(p, a, on && hard);
 }
 
 static WKWebViewConfiguration *IrisConfig(void) {
@@ -7511,13 +7533,19 @@ static NSString *CSSColor(NSColor *c) {
 
 // Iris's own pages share the window's colours and its shape language: struck shards, the spark, compressed headings.
 static NSString *ThemeCSS(void) {
-    NSString *vars = [NSString stringWithFormat:@":root{color-scheme:%@;--bg:%@;--card:%@;--pill:%@;--text:%@;--dim:%@;--faint:%@;--line:%@;--hover:%@;--active:%@;--accent:%@;--border:%@;--toast:%@;--onaccent:%@;--ember:%@}",
+    NSString *vars = [NSString stringWithFormat:@":root{color-scheme:%@;--bg:%@;--card:%@;--pill:%@;--text:%@;--dim:%@;--faint:%@;--line:%@;--hover:%@;--active:%@;--accent:%@;--border:%@;--toast:%@;--onaccent:%@;--ember:%@;--pick:%@;--onpick:%@}",
             ThemeIsLight() ? @"light" : @"dark", CSSColor(vContentBg), CSSColor(vCard), CSSColor(vPill), CSSColor(vText), CSSColor(vDim), CSSColor(vFaint),
-            CSSColor(vSep), CSSColor(vHover), CSSColor(vActive), CSSColor(vAccent), CSSColor(vBorder), CSSColor(vToast), CSSColor(vBadgeText), CSSColor(vEmber)];
+            CSSColor(vSep), CSSColor(vHover), CSSColor(vActive), CSSColor(vAccent), CSSColor(vBorder), CSSColor(vToast), CSSColor(vBadgeText), CSSColor(vEmber),
+            CSSColor(AccentChosen() ? vAccent : vText), AccentChosen() ? @"#fff" : CSSColor(vContentBg)];
     return [vars stringByAppendingString:@" .btn,.search input,.field input,.field select,.acts a,.bar button,.bar a,.selbar{border-radius:8px!important}"
         ".list,.menu,dialog,.pop{border-radius:12px!important}"
-        ".search input:focus,.field input:focus,.field select:focus{box-shadow:0 0 0 3px color-mix(in srgb,var(--text) 10%,transparent)!important;border-color:var(--faint)!important}"
-        ".btn.primary,.btn.danger,.acts a.primary{background:var(--text)!important;color:var(--bg)!important;border-color:transparent!important}"
+        ".search input:focus,.field input:focus,.field select:focus{box-shadow:0 0 0 3px color-mix(in srgb,var(--pick) 18%,transparent)!important;border-color:color-mix(in srgb,var(--pick) 60%,transparent)!important}"
+        ".btn.primary,.acts a.primary{background:var(--pick)!important;color:var(--onpick)!important;border-color:transparent!important}"
+        ".btn.danger{background:var(--text)!important;color:var(--bg)!important;border-color:transparent!important}"
+        ".sw:checked{background:var(--pick)!important}.sws button.on{border-color:var(--pick)!important}"   // your accent: switches that are on, the chosen swatch
+        "nav a.on{box-shadow:inset 3px 0 0 var(--pick)}"                                              // the section you're in
+        "input[type=checkbox],input[type=radio],input[type=range],progress{accent-color:var(--pick)}"
+        "::selection{background:color-mix(in srgb,var(--pick) 30%,transparent)}"
         ".menu button:hover{background:var(--active)!important;color:var(--text)!important}"
         "mark{background:color-mix(in srgb,var(--text) 18%,transparent)!important;color:inherit!important}"
         "h1{font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;font-weight:650;letter-spacing:-.022em}"
@@ -8091,6 +8119,7 @@ static void ShelfIcon(VTab *t, NSRect r, CGFloat radius) {
 @property (weak) VTabShelf *shelf;
 @property NSInteger hover;
 @property NSInteger btnHover;   // over a card's close (1) or pin (2) button
+@property CGFloat glideTo; @property BOOL gliding;   // a mouse wheel's scroll, gliding to where it's headed
 @property NSInteger pinnedCount;   // the first cards are your pinned tabs, set apart from the timeline
 @end
 static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
@@ -8127,7 +8156,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (void)drawRect:(NSRect)dirty {
     NSArray<VTab *> *items = self.shelf.items;
     VWindow *w = self.shelf.owner;
-    NSColor *accent = w.isPrivate ? vText : ProfileColor(w.profile);
+    NSColor *accent = PickColor(w.isPrivate, w.profile);
     {   // the last card opens a new tab
         NSRect c = [self card:(NSInteger)items.count]; BOOL hov = self.hover == (NSInteger)items.count;
         RoundRect(c, 12, hov ? (ThemeIsLight() ? HexA(0x000000, 0.08) : Hex(0x24262b)) : (ThemeIsLight() ? HexA(0x000000, 0.04) : Hex(0x1a1c20)));
@@ -8229,13 +8258,33 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     NSInteger i = [self indexAt:p];
     if (i >= 0 && i < (NSInteger)self.shelf.items.count) [self.shelf.owner tabMenu:self.shelf.items[(NSUInteger)i] at:p inView:self];
 }
-- (void)scrollWheel:(NSEvent *)e {   // a plain wheel or two-finger swipe up and down moves along the timeline
-    if (fabs(e.scrollingDeltaX) > fabs(e.scrollingDeltaY)) { [super scrollWheel:e]; return; }
-    NSClipView *cv = self.enclosingScrollView.contentView;
-    NSPoint o = cv.bounds.origin;
-    CGFloat d = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY : e.scrollingDeltaY * 14;
-    o.x = MAX(0, MIN(NSWidth(self.frame) - NSWidth(cv.bounds), o.x - d));
-    [cv scrollToPoint:o]; [self.enclosingScrollView reflectScrolledClipView:cv];
+// One path for every kind of scroll, so nothing fights over the position: sideways or up-and-down both run along
+// the timeline. A trackpad follows your fingers exactly, momentum included (macOS sends the glide as events);
+// a mouse wheel's notches become a short eased glide instead of jumps.
+- (void)scrollWheel:(NSEvent *)e {
+    NSScrollView *sv = self.enclosingScrollView; NSClipView *cv = sv.contentView; if (!cv) return;
+    CGFloat dx = e.scrollingDeltaX, dy = e.scrollingDeltaY;
+    CGFloat d = fabs(dx) >= fabs(dy) ? dx : dy;
+    if (d == 0) return;
+    CGFloat maxX = MAX(0, NSWidth(self.frame) - NSWidth(cv.bounds));
+    if (e.hasPreciseScrollingDeltas) {
+        if (self.gliding) { self.gliding = NO; [cv.layer removeAllAnimations]; }
+        NSPoint o = cv.bounds.origin; o.x = round(MAX(0, MIN(maxX, o.x - d)));
+        [cv setBoundsOrigin:o]; [sv reflectScrolledClipView:cv];
+        return;
+    }
+    CGFloat from = self.gliding ? self.glideTo : cv.bounds.origin.x;
+    CGFloat to = round(MAX(0, MIN(maxX, from - d * 26)));
+    self.glideTo = to; self.gliding = YES;
+    __weak VShelfStrip *ws = self;
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) {
+        c.duration = 0.24; c.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.2 :0.7 :0.3 :1];
+        [cv.animator setBoundsOrigin:NSMakePoint(to, cv.bounds.origin.y)];
+    } completionHandler:^{
+        VShelfStrip *me = ws; if (!me) return;
+        [sv reflectScrolledClipView:cv];
+        if (me.glideTo == to) me.gliding = NO;
+    }];
 }
 @end
 
@@ -8337,7 +8386,8 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     self.strip = st;
     NSScrollView *sv = [[NSScrollView alloc] initWithFrame:NSZeroRect];
     sv.drawsBackground = NO; sv.hasHorizontalScroller = YES; sv.hasVerticalScroller = NO; sv.autohidesScrollers = YES;
-    sv.scrollerStyle = NSScrollerStyleOverlay; sv.borderType = NSNoBorder; sv.horizontalScrollElasticity = NSScrollElasticityAllowed;
+    sv.scrollerStyle = NSScrollerStyleOverlay; sv.borderType = NSNoBorder; sv.horizontalScrollElasticity = NSScrollElasticityNone;
+    sv.wantsLayer = YES;   // scrolled by moving layers, with the cards drawn in tiles, not redrawn whole every frame
     sv.documentView = st;
     self.scroll = sv; [self addSubview:sv];
     return self;
@@ -8673,7 +8723,7 @@ static void PanelShadow(NSView *v) {
     CGPathRef p = CGPathCreateWithRoundedRect(CGRectMake(0, 0, NSWidth(v.frame), NSHeight(v.frame)), 18, 18, NULL);
     v.layer.shadowPath = p; CGPathRelease(p);
 }
-static NSColor *PanelAccent(VWindow *w) { return w.isPrivate ? vText : ProfileColor(w.profile); }
+static NSColor *PanelAccent(VWindow *w) { return PickColor(w.isPrivate, w.profile); }
 static NSImage *PanelLetter(NSString *s, CGFloat size) {
     NSString *l = s.length ? [[s substringToIndex:[s rangeOfComposedCharacterSequenceAtIndex:0].length] uppercaseString] : @"•";
     return [NSImage imageWithSize:NSMakeSize(size, size) flipped:NO drawingHandler:^BOOL(NSRect r) {
@@ -11239,10 +11289,10 @@ static NSRect NowPlayingFrame(NSRect root, NSSize sz) {
 }
 @end
 
-#pragma mark - The CPU rule: Iris averages at most one core over any 10 seconds
+#pragma mark - The CPU rule: background pages share a budget, what you're watching never waits
 
 // One rule, always on: Iris plus every process it starts (page and extension engines, the network process)
-// average at most one processor core over any 10 seconds. Short bursts run at full speed (a page draws in a
+// average at most a quarter of the Mac's processor over any 10 seconds on battery, 40% plugged in (see GovCap). Short bursts run at full speed (a page draws in a
 // few seconds), because fans answer heat built up over time, not a moment of work. Measured every 100 ms;
 // while the 10-second average is under the cap nothing is touched; over it, Iris's helper processes are paced the way the `cpulimit` tool does it: in each 100 ms they run for
 // a share of the time and pause for the rest, and that share is steered by what they actually used (a page
@@ -11281,6 +11331,13 @@ static double SelfCPUSeconds(void) {
     return r.ru_utime.tv_sec + r.ru_utime.tv_usec / 1e6 + r.ru_stime.tv_sec + r.ru_stime.tv_usec / 1e6;
 }
 
+// The budget scales with the Mac: a quarter of its processor on battery, 40% plugged in (counting threads, the way
+// macOS does). A 2-core, 4-thread MacBook gets 1 core on battery and 1.6 plugged in; a bigger Mac gets more.
+static double GovCap(void) {
+    double threads = MAX(2, (double)NSProcessInfo.processInfo.activeProcessorCount);
+    return MAX(1.0, threads * (OnBattery() ? 0.25 : 0.4));
+}
+
 @interface VGovernor : NSObject
 + (void)start;
 + (void)stop;
@@ -11289,13 +11346,28 @@ static double SelfCPUSeconds(void) {
 @implementation VGovernor
 static volatile BOOL gGovRunning;
 
-// What may be paced: page and extension engines only. Never the graphics or network process (they carry video
-// and audio), never a tab playing sound, and never the tab you clicked or typed in during the last 8 seconds
-// (that's you pressing play: its first seconds of decoding and buffering must run free or the audio stutters).
+// What may be paced: background page and extension engines only. Never the graphics or network process (they
+// carry video and audio), and never a page that is:
+//   · on screen: the current tab of any visible window (pausing it makes scrolling and video stutter)
+//   · playing sound now, or in the last 90 seconds (the gap between two videos, an ad break, a pause and resume:
+//     the next video's buffering and first frames must run free)
+//   · floating in Picture in Picture
+//   · the tab you clicked or typed in during the last 8 seconds
 + (NSDictionary *)snapshot {
     NSMutableSet *spare = [NSMutableSet set];
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
-    for (VTab *t in AllTabs(YES)) if (t.audible || now - t.lastInput < 8) { pid_t p = WebPid(t.web.web); if (p > 0) [spare addObject:@(p)]; }
+    static NSMapTable<VTab *, NSNumber *> *heard;   // when each tab last made sound
+    if (!heard) heard = [NSMapTable weakToStrongObjectsMapTable];
+    NSMutableSet *onScreen = [NSMutableSet set];
+    for (VWindow *w in gWindows) if (w.window.isVisible && !w.window.isMiniaturized && w.window.occlusionState & NSWindowOcclusionStateVisible) {
+        if (w.current) [onScreen addObject:w.current];
+        for (VTab *t in w.splitPair) [onScreen addObject:t];
+    }
+    for (VTab *t in AllTabs(YES)) {
+        if (t.audible) [heard setObject:@(now) forKey:t];
+        BOOL recent = now - [[heard objectForKey:t] doubleValue] < 90;
+        if (t.audible || recent || t.inPiP || [onScreen containsObject:t] || now - t.lastInput < 8) { pid_t p = WebPid(t.web.web); if (p > 0) [spare addObject:@(p)]; }
+    }
     NSMutableArray *first = [NSMutableArray array];
     for (NSNumber *p in IrisHelperPids()) {
         NSString *name = ProcName(p.intValue);
@@ -11304,7 +11376,7 @@ static volatile BOOL gGovRunning;
     }
     NSMutableArray *measured = [NSMutableArray array];
     for (NSNumber *p in IrisHelperPids()) if ([ProcName(p.intValue) hasPrefix:@"com.apple.WebKit"] && ![first containsObject:p]) [measured addObject:p];
-    return @{@"first": first, @"last": measured};
+    return @{@"first": first, @"last": measured, @"cap": @(GovCap())};
 }
 
 + (void)start {
@@ -11314,7 +11386,7 @@ static volatile BOOL gGovRunning;
     dispatch_once(&once, ^{ int sigs[] = {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP, SIGTERM}; for (int i = 0; i < 7; i++) signal(sigs[i], GovCrash); atexit(GovResumeAll); });
     [NSThread detachNewThreadWithBlock:^{
         [NSThread currentThread].qualityOfService = NSQualityOfServiceUtility;
-        const double period = 0.1, cap = 1.0;   // the rule: one core, averaged over 10 s, Iris and everything it runs
+        const double period = 0.1; double cap = 1.5;   // the rule: GovCap(), averaged over 10 s
         double frac = 1.0, lastSelf = SelfCPUSeconds();
         double ring[100] = {0}, ringSum = 0; int ri = 0;   // the last 10 s of use, one slot per period
         NSMutableDictionary<NSNumber *, NSNumber *> *last = [NSMutableDictionary dictionary];
@@ -11324,7 +11396,7 @@ static volatile BOOL gGovRunning;
             if (now - lastSnap > 0.5) {
                 __block NSDictionary *snap;
                 dispatch_sync(dispatch_get_main_queue(), ^{ snap = [VGovernor snapshot]; });
-                first = snap[@"first"]; late = snap[@"last"]; lastSnap = now;
+                first = snap[@"first"]; late = snap[@"last"]; cap = [snap[@"cap"] doubleValue] ?: 1.5; lastSnap = now;
                 int n = 0; for (NSNumber *p in [first arrayByAddingObjectsFromArray:late]) if (n < 256) gGovPids[n++] = p.intValue;
                 gGovCount = n;
                 NSSet *live = [NSSet setWithArray:[first arrayByAddingObjectsFromArray:late]];
@@ -11545,8 +11617,8 @@ static void CtlOut(NSString *s) {
 #pragma mark - Theme
 
 static void IrisApplyTheme(void) {
-    InitPalette();
-    NSApp.appearance = [Defaults() integerForKey:kTheme] == 0 ? nil : ThemeAppearance();
+    InitPalette();   // decides light or dark once; everything below follows that one answer
+    NSApp.appearance = ThemeAppearance();   // even with Follow macOS: the app matches the palette exactly, never half one and half the other
     for (VWindow *bw in gWindows) [bw applyTheme];
     for (VTab *t in AllTabs(YES)) if ([t.url hasPrefix:@"iris://"] && t.web) [t.web reload];   // built-in pages carry the theme's colours
     for (NSWindow *w in NSApp.windows) if (![w.windowController isKindOfClass:VWindow.class]) { w.appearance = ThemeAppearance(); w.backgroundColor = vBg; if (w.contentView) RedrawTree(w.contentView); }
@@ -11670,15 +11742,18 @@ static void RunBuildScript(NSString *stamp) {
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     [Defaults() registerDefaults:@{kDLAccel: @YES, kCodec: @(MacIsAppleSilicon() ? 0 : 2), kCodec30: @NO, kBgThrottle: @1, kSingleProcess: @NO, kRestorePaused: @YES, kResumeMedia: @YES, kLazyRestore: @NO, kBlock: @YES, kStrip: @YES, kCookieReject: @YES, kAutoPiP: @YES, kSleepMins: @10, kShowBookmarks: @YES, kSearch: @0, kStartup: @0, kScripts: @YES, kAskDownload: @NO,
-                                   kTheme: @1, kAccent: @0, kDensity: @1, kHTTPSOnly: @NO, kGPC: @YES, kHomeTopSites: @YES, kConfirmQuit: @NO, kSuggestNet: @YES}];
+                                   kThrottleOn: @YES, kTheme: @1, kAccent: @0, kDensity: @1, kHTTPSOnly: @NO, kGPC: @YES, kHomeTopSites: @YES, kConfirmQuit: @NO, kSuggestNet: @YES}];
     InitPalette();
-    if ([Defaults() integerForKey:kTheme] != 0) NSApp.appearance = ThemeAppearance();
+    NSApp.appearance = ThemeAppearance();   // the palette and the app agree from the first frame
     // the Dock keeps an old icon for ad-hoc builds; hand it the current one directly
     NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"Iris" ofType:@"icns"]];
     if (icon) NSApp.applicationIconImage = icon;
     // "Follow macOS": recolour when the system switches between light and dark
     [NSDistributedNotificationCenter.defaultCenter addObserverForName:@"AppleInterfaceThemeChangedNotification" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-        if ([Defaults() integerForKey:kTheme] == 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ IrisApplyTheme(); });
+        if ([Defaults() integerForKey:kTheme] != 0) return;
+        for (NSNumber *ms in @[@150, @900]) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms.longLongValue * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            if ((ThemeIsLightNow() ? 1 : 0) != gThemeLight) IrisApplyTheme();   // the system really changed: recolour once
+        });
     }];
     IrisSetBlocking([Defaults() boolForKey:kBlock]);
     IrisReloadBlocklists();
@@ -11702,7 +11777,7 @@ static void RunBuildScript(NSString *stamp) {
     [VBlocker.shared prepare:nil];
     [self.win startControl];
     [FExtHost.shared start];
-    [VGovernor start];   // the CPU rule: Iris and its helpers stay under 95% of one core
+    if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start];   // the CPU rule: background pages share a quarter of the processor on battery, 40% plugged in; what you watch is never paced
     [self fillMissingIcons];
 }
 
@@ -12244,10 +12319,12 @@ static NSArray *SettingsSchema(VWindow *win) {
                     @[@"Automatic", @"Avoid AV1", @"H.264 only"], [Defaults() integerForKey:kCodec], ^(NSInteger i) { [Defaults() setInteger:i forKey:kCodec]; IrisCodecChanged(); }),
             SKey(kCodec30, @"Limit videos to 30 fps", @"Turns down 60 fps streams: half the frames to decode. Sports and games look less smooth.", NO, ^{ IrisCodecChanged(); }) ]),
         SGroup(@"Engine", @[
-            SSelect(@"bgThrottle", @"Background tabs", @"Saving power slows a hidden tab's timers further the longer it stays hidden, as Safari does. Music and calls keep playing.",
+            SKey(kThrottleOn, @"Hold back background tabs", @"On: background pages share a quarter of your Mac's processor on battery and 40% plugged in (averaged over 10 seconds, bursts run free), and hidden tabs' timers slow down. The page you're looking at, anything that played sound in the last 90 seconds and Picture in Picture are never slowed. Off: every tab uses whatever it needs.", NO, ^{
+                if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start]; else [VGovernor stop];
+                [gApp applyThrottleNow]; }),
+            SSelect(@"bgThrottle", @"Background tabs", @"When holding back is on: saving power slows a hidden tab's timers further the longer it stays hidden, as Safari does. Music and calls keep playing.",
                     @[@"Standard", @"Save power on battery", @"Always save power"], [Defaults() integerForKey:kBgThrottle], ^(NSInteger i) { [Defaults() setInteger:i forKey:kBgThrottle]; [gApp applyThrottleNow]; }),
-            SKey(kSingleProcess, @"One process for all tabs", @"Saves a lot of memory with many tabs open. If one tab crashes, all of them reload. Takes effect when Iris restarts.", NO, nil),
-            SValue(@"Processor use", @"Iris and its helpers average at most one core over any 10 seconds; short bursts run at full speed, and sound and video are never slowed.", @"Always on") ]),
+            SKey(kSingleProcess, @"One process for all tabs", @"Saves a lot of memory with many tabs open. If one tab crashes, all of them reload. Takes effect when Iris restarts.", NO, nil) ]),
         SGroup(@"Launch", @[
             SKey(kRestorePaused, @"Restored video starts paused", @"The tab you were on comes back without playing by itself.", NO, nil),
             SKey(kResumeMedia, @"Videos resume where you left off", @"After a restart, a reopened tab or a sleeping tab waking, the video picks up at the same moment.", NO, nil),
