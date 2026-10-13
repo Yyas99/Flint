@@ -62,7 +62,7 @@ article hr{border:0;height:1px;background:var(--rline);margin:2em 0}
   <div class="grp"><button data-font="serif" style="font-family:ui-serif,Georgia,serif">Serif</button><button data-font="sans">Sans</button></div>
   <div class="grp"><button data-measure="600">Narrow</button><button data-measure="680">Medium</button><button data-measure="800">Wide</button></div>
   <div class="grp">
-    <button data-look="flint" title="Match Flint"><span class="sw" style="background:var(--bg);border:1px solid var(--border)"></span></button>
+    <button data-look="iris" title="Match Iris"><span class="sw" style="background:var(--bg);border:1px solid var(--border)"></span></button>
     <button data-look="light" title="Light"><span class="sw" style="background:#fbfbfc;border:1px solid #ddd"></span></button>
     <button data-look="paper" title="Paper"><span class="sw" style="background:#efeeec;border:1px solid #d8d6d2"></span></button>
     <button data-look="night" title="Night"><span class="sw" style="background:#0b0b0c;border:1px solid #333"></span></button>
@@ -71,11 +71,11 @@ article hr{border:0;height:1px;background:var(--rline);margin:2em 0}
 <main id="main"></main>
 <script nonce="{{NONCE}}">
 'use strict';
-const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
+const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
 const $ = s => document.querySelector(s);
 const params = new URLSearchParams(location.search);
 const original = params.get('u') || '';
-let prefs = {size: 20, font: 'serif', measure: 680, look: 'flint'};
+let prefs = {size: 20, font: 'serif', measure: 680, look: 'iris'};
 
 // Article markup comes from an arbitrary website: rebuild it from an allowlist of tags and attributes.
 const KEEP = new Set(['P','BR','HR','H1','H2','H3','H4','H5','H6','UL','OL','LI','DL','DT','DD','BLOCKQUOTE','PRE','CODE','EM','I','STRONG','B','U','S','SMALL','SUB','SUP','MARK','A','IMG','FIGURE','FIGCAPTION','PICTURE','TABLE','THEAD','TBODY','TFOOT','TR','TD','TH','CAPTION','ABBR','CITE','Q','TIME','KBD','VAR','DEL','INS','SPAN','DIV','SECTION','ARTICLE','HEADER','MAIN','DETAILS','SUMMARY']);
@@ -102,7 +102,7 @@ function clean(src, dst) {
 function apply() {
   const r = document.documentElement;
   r.style.setProperty('--size', prefs.size + 'px'); r.style.setProperty('--measure', prefs.measure + 'px');
-  r.dataset.font = prefs.font; if (prefs.look === 'flint') delete r.dataset.look; else r.dataset.look = prefs.look;
+  r.dataset.font = prefs.font; if (prefs.look === 'iris') delete r.dataset.look; else r.dataset.look = prefs.look;
   for (const b of document.querySelectorAll('.pop button')) {
     b.classList.toggle('on', b.dataset.font === prefs.font || b.dataset.look === prefs.look || (b.dataset.measure && +b.dataset.measure === prefs.measure));
   }
@@ -139,7 +139,7 @@ addEventListener('scroll', () => {
   try { a = await call('reader.get', {id: params.get('id') || ''}); } catch (e) {}
   const main = $('#main');
   if (!a || !a.html) {
-    main.innerHTML = '<div class="gone"><b>This Reader view has expired</b>Reader keeps articles only while Flint is open.</div>';
+    main.innerHTML = '<div class="gone"><b>This Reader view has expired</b>Reader keeps articles only while Iris is open.</div>';
     if (original) { const l = document.createElement('a'); l.href = original; l.textContent = 'Open the original page'; main.firstChild.appendChild(document.createElement('br')); main.firstChild.appendChild(l); }
     return;
   }

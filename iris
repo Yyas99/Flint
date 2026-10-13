@@ -1,26 +1,36 @@
 #!/bin/bash
-# Flint: builds Flint.app (AppKit window + WebKit, Safari's engine) and opens it.
-#   ./flint          build if anything changed, then open
-#   ./flint build    force a rebuild, then open
-#   ./flint stop     quit Flint
+# Iris: builds Iris.app (AppKit window + WebKit, Safari's engine) and opens it.
+#   ./iris          build if anything changed, then open
+#   ./iris build    force a rebuild, then open
+#   ./iris stop     quit Iris
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
-LIVE="$DIR/Flint.app"; SRC="$DIR/Flint.m"; LOG="$DIR/build.log"
-# Builds go to .staged/Flint.app. Flint, if it's open, shows an "Update" pill and swaps in when you click it;
-# if Flint isn't open (or this is the first staged build), the new build is installed and opened right away.
+LIVE="$DIR/Iris.app"; SRC="$DIR/Iris.m"; LOG="$DIR/build.log"
+# Builds go to .staged/Iris.app. Iris, if it's open, shows an "Update" pill and swaps in when you click it;
+# if Iris isn't open (or this is the first staged build), the new build is installed and opened right away.
 STAGE="$DIR/.staged"; FIRST_STAGE=0; [ -d "$STAGE" ] || FIRST_STAGE=1; mkdir -p "$STAGE"
-APP="$STAGE/Flint.app"; BIN="$APP/Contents/MacOS/Flint"
-if [ "$1" = "stop" ]; then pkill -a -x Flint 2>/dev/null || true; echo "Flint stopped"; exit 0; fi
+APP="$STAGE/Iris.app"; BIN="$APP/Contents/MacOS/Iris"
+if [ "$1" = "stop" ]; then pkill -a -x Iris 2>/dev/null || true; echo "Iris stopped"; exit 0; fi
 
-install_staged() {   # quit Flint, put the staged build in place, open it (tabs are restored)
-  pkill -a -x Flint 2>/dev/null || true
-  for i in $(seq 1 50); do pgrep -a -x Flint >/dev/null || break; sleep 0.1; done
-  pkill -9 -a -x Flint 2>/dev/null || true
+install_staged() {   # quit Iris, put the staged build in place, open it (tabs are restored)
+  for p in Iris Flint; do pkill -a -x $p 2>/dev/null || true; done
+  for i in $(seq 1 50); do pgrep -a -x Iris >/dev/null || pgrep -a -x Flint >/dev/null || break; sleep 0.1; done
+  for p in Iris Flint; do pkill -9 -a -x $p 2>/dev/null || true; done
   rm -rf "$LIVE.old"; [ -d "$LIVE" ] && mv "$LIVE" "$LIVE.old"
   if ditto "$APP" "$LIVE"; then rm -rf "$LIVE.old"; else rm -rf "$LIVE"; mv "$LIVE.old" "$LIVE"; fi
   rm -f "$STAGE/ready" "$STAGE/install" "$STAGE/notes"; : > "$DIR/update-notes.txt"
+  # one-time move from the old name: Iris copies Flint's settings, tabs and website data on its first launch
+  LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  if [ -d "$DIR/Flint.app" ]; then "$LSR" -u "$DIR/Flint.app" >/dev/null 2>&1 || true; rm -rf "$DIR/Flint.app"; fi
+  mkdir -p "$DIR/jobs/old"
+  for f in Flint.m Flint.icns; do [ -f "$DIR/$f" ] && mv -f "$DIR/$f" "$DIR/jobs/old/$f"; done
+  rm -f "$DIR/flint" "$DIR/.flint-run" "$DIR/flint.log"
+  if [ "$(basename "$DIR")" = "Flint" ] && [ ! -e "$(dirname "$DIR")/Iris" ]; then
+    NEW="$(dirname "$DIR")/Iris"
+    if mv "$DIR" "$NEW"; then DIR="$NEW"; LIVE="$DIR/Iris.app"; LOG="$DIR/build.log"; STAGE="$DIR/.staged"; LOCK="$DIR/.buildlock"; cd "$DIR"; fi
+  fi
   touch "$LIVE"
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$LIVE" >/dev/null 2>&1 || true
+  "$LSR" -f "$LIVE" >/dev/null 2>&1 || true
   open "$LIVE" || { sleep 1; open "$LIVE"; }
 }
 
@@ -36,10 +46,10 @@ bar() { local p=$1 f i out=""; f=$(( p * BW / 100 )); for ((i=0;i<f;i++)); do ou
 live() { printf '%s %s%s%s %s%s%s %s %s%3d%%%s  %s%s%s' "$CL" "$A" "${SPIN[$((K % 10))]}" "$R" "$B" "$(label "$1")" "$R" "$(bar "$2")" "$B" "$2" "$R" "$D" "$3" "$R"; }
 
 if ! xcode-select -p >/dev/null 2>&1; then fail_line "Tools" "Command Line Tools missing — installing; run again after"; xcode-select --install || true; exit 1; fi
-# one build at a time (Flint builds itself now; an old Terminal watcher may still be running)
+# one build at a time (Iris builds itself now; an old Terminal watcher may still be running)
 LOCK="$DIR/.buildlock"
 if ! mkdir "$LOCK" 2>/dev/null; then
-  if [ $(( $(date +%s) - $(stat -f %m "$LOCK") )) -lt 300 ]; then exit 75; fi   # busy: Flint tries again shortly
+  if [ $(( $(date +%s) - $(stat -f %m "$LOCK") )) -lt 300 ]; then exit 75; fi   # busy: Iris tries again shortly
   rm -rf "$LOCK"; mkdir "$LOCK"
 fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
@@ -58,14 +68,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Flint</string>
-  <key>CFBundleDisplayName</key><string>Flint</string>
-  <key>CFBundleIdentifier</key><string>com.y.flint</string>
-  <key>CFBundleExecutable</key><string>Flint</string>
+  <key>CFBundleName</key><string>Iris</string>
+  <key>CFBundleDisplayName</key><string>Iris</string>
+  <key>CFBundleIdentifier</key><string>com.y.iris</string>
+  <key>CFBundleExecutable</key><string>Iris</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>4</string>
   <key>CFBundleShortVersionString</key><string>0.4</string>
-  <key>CFBundleIconFile</key><string>Flint</string>
+  <key>CFBundleIconFile</key><string>Iris</string>
   <key>LSMinimumSystemVersion</key><string>12.3</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -86,32 +96,32 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   </dict></array>
 </dict></plist>
 PLIST
-[ -f "$DIR/Flint.icns" ] && cp -f "$DIR/Flint.icns" "$APP/Contents/Resources/Flint.icns"
+[ -f "$DIR/Iris.icns" ] && cp -f "$DIR/Iris.icns" "$APP/Contents/Resources/Iris.icns"
 cp -f "$DIR/ext-shim.js" "$APP/Contents/Resources/ext-shim.js"
 if [ -d "$DIR/pages" ]; then rm -rf "$APP/Contents/Resources/pages"; cp -R "$DIR/pages" "$APP/Contents/Resources/pages"; fi
-# developer switches travel inside the app, so Flint never has to reach into Documents at launch
+# developer switches travel inside the app, so Iris never has to reach into Documents at launch
 for f in jsc.env extdebug; do rm -f "$APP/Contents/Resources/$f"; if [ -f "$DIR/$f" ]; then cp -f "$DIR/$f" "$APP/Contents/Resources/$f"; fi; done
 rm -rf "$APP/Contents/Frameworks" 2>/dev/null || true
-done_line "Bundle" "Flint.app · extension layer"
+done_line "Bundle" "Iris.app · extension layer"
 
 if [ "$1" = "build" ] || [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
   T=$(date +%s)
   clang -fobjc-arc -O2 -Wall -Wno-deprecated-declarations -Wno-nonnull -Wno-unused-function -mmacosx-version-min=12.3 "$SRC" -o "$BIN" \
     -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework QuartzCore -framework Security -framework CoreServices -framework CoreLocation -lsqlite3 >>"$LOG" 2>&1 & WP=$!
-  while kill -0 $WP 2>/dev/null; do P=$(( 10 + ($(date +%s) - T) * 6 )); [ $P -gt 95 ] && P=95; live "Window" "$P" "compiling Flint.m · $(since $T)"; K=$((K+1)); sleep 0.25; done
+  while kill -0 $WP 2>/dev/null; do P=$(( 10 + ($(date +%s) - T) * 6 )); [ $P -gt 95 ] && P=95; live "Window" "$P" "compiling Iris.m · $(since $T)"; K=$((K+1)); sleep 0.25; done
   if ! wait $WP; then fail_line "Window" "build failed"; grep -m10 "error" "$LOG" | sed "s/^/   ${D}│${R} /"; exit 1; fi
   done_line "Window" "$(wc -l < "$SRC" | tr -d ' ') lines · $(grep -c warning: "$LOG" || true) warnings · $(since $T)"
 else done_line "Window" "unchanged"; fi
 # a stable local identity (if present) keeps macOS permissions across rebuilds; ad-hoc otherwise
-SIGNID="Flint Local Signing"; SIGNED="ad-hoc"
-if security find-certificate -c "$SIGNID" >/dev/null 2>&1 && codesign -s "$SIGNID" -f --identifier com.y.flint "$APP" >"$DIR/.sign.log" 2>&1; then SIGNED="$SIGNID"
-else codesign -s - -f --identifier com.y.flint "$APP" >/dev/null 2>&1 || true; fi
+SIGNID="Iris Local Signing"; security find-certificate -c "$SIGNID" >/dev/null 2>&1 || SIGNID="Flint Local Signing"; SIGNED="ad-hoc"   # the local certificate made before the rename keeps working
+if security find-certificate -c "$SIGNID" >/dev/null 2>&1 && codesign -s "$SIGNID" -f --identifier com.y.iris "$APP" >"$DIR/.sign.log" 2>&1; then SIGNED="$SIGNID"
+else codesign -s - -f --identifier com.y.iris "$APP" >/dev/null 2>&1 || true; fi
 echo "$SIGNED" > "$DIR/.signed-with"
 rm -f "$STAGE/install"
-if [ "$1" = "now" ] || [ $FIRST_STAGE = 1 ] || ! pgrep -a -x Flint >/dev/null; then
+if [ "$1" = "now" ] || [ $FIRST_STAGE = 1 ] || ! pgrep -a -x Iris >/dev/null; then
   install_staged; done_line "Launched" "total $(since $T0)"
 else
   [ -s "$DIR/update-notes.txt" ] && cp -f "$DIR/update-notes.txt" "$STAGE/notes"
   date +%s > "$STAGE/ready"
-  done_line "Staged" "Flint shows Update when you're ready · $(since $T0)"
+  done_line "Staged" "Iris shows Update when you're ready · $(since $T0)"
 fi

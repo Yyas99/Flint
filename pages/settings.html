@@ -71,7 +71,7 @@ dialog input{width:100%;height:32px;border:1px solid var(--border);background:va
   <div class="drow"><button class="btn left danger" id="dataAll">Remove All</button><button class="btn" id="dataDone">Done</button><button class="btn primary" id="dataRm">Remove Selected</button></div></dialog>
 
 <script nonce="{{NONCE}}">
-const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
+const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ICON = {

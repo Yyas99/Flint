@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/icon.png" width="128" height="128" alt="Flint icon">
+  <img src="assets/icon.png" width="128" height="128" alt="Iris icon">
 </p>
 
-<h1 align="center">Flint</h1>
+<h1 align="center">Iris</h1>
 
 <p align="center">
   A calm, minimal web browser for macOS.<br>
@@ -17,12 +17,12 @@
 </p>
 
 <p align="center">
-  <img src="assets/hero.png" alt="Flint: the page fills the window, with the controls floating in a thin band above it" width="900">
+  <img src="assets/hero.png" alt="Iris: the page fills the window, with the controls floating in a thin band above it" width="900">
 </p>
 
 ## The design
 
-Flint gives the page the whole window. There is no tab bar and no sidebar: back, forward and the address float as small capsules in a thin band above the page, and everything else stays out of sight until you reach for it.
+Iris gives the page the whole window. There is no tab bar and no sidebar: back, forward and the address float as small capsules in a thin band above the page, and everything else stays out of sight until you reach for it.
 
 - **Tabs come up from the bottom edge.** Move the pointer to the bottom of the window (or press ⌘S) and your tabs rise as a timeline of page previews, the one you're on at the right end. Pinned tabs sit first, the same size as the rest; a New tab card closes the row.
 - **Bookmarks live under the address.** Click the address and it's selected, ready to type over, with your bookmarks underneath: folders open in place, no dropdown menus, and your other open tabs below them.
@@ -34,7 +34,7 @@ Flint gives the page the whole window. There is no tab bar and no sidebar: back,
 - Split view (two tabs side by side), private windows, reader mode, tab sleep after a set idle time
 - Location, camera and microphone for sites that ask, decided once per site
 - Profiles, each with its own sign-ins, cookies, history and tabs, marked by a colour (separate website data needs macOS 14)
-- Address suggestions from history, bookmarks and open tabs; built-in pages at `flint://settings`, `flint://downloads`, `flint://history`, `flint://bookmarks`
+- Address suggestions from history, bookmarks and open tabs; built-in pages at `iris://settings`, `iris://downloads`, `iris://history`, `iris://bookmarks`
 - Bookmark import from Helium
 
 **Privacy**
@@ -56,7 +56,7 @@ Flint gives the page the whole window. There is no tab bar and no sidebar: back,
 - Installs Chrome Web Store extensions through its own extension layer, built against the Chrome APIs rather than any one extension: runtime messaging, storage, tabs, scripting (with frame targeting and registered content scripts), context menus, user scripts and declarativeNetRequest (translated to WebKit content rules). Proton Pass, SponsorBlock and Enhancer for YouTube run on it.
 
 **Performance**
-- One rule: Flint and every process it starts average at most one CPU core over any 10 seconds. Short bursts run at full speed; audio, video and the tab you're using are never slowed.
+- One rule: Iris and every process it starts average at most one CPU core over any 10 seconds. Short bursts run at full speed; audio, video and the tab you're using are never slowed.
 - Background tab throttling that adapts to battery or power
 
 ## Screenshots
@@ -84,24 +84,24 @@ Flint gives the page the whole window. There is no tab bar and no sidebar: back,
 ## Build
 
 ```sh
-./flint          # build if anything changed, then open
-./flint build    # force a rebuild
-./flint stop     # quit Flint
+./iris          # build if anything changed, then open
+./iris build    # force a rebuild
+./iris stop     # quit Iris
 ```
 
-The script compiles `Flint.m` with clang and bundles `ext-shim.js`, `pages/` and `Flint.icns` into `Flint.app`. It signs with a local identity named "Flint Local Signing" if one exists in your keychain (so macOS permissions persist between builds), otherwise ad hoc.
+The script compiles `Iris.m` with clang and bundles `ext-shim.js`, `pages/` and `Iris.icns` into `Iris.app`. It signs with a local identity named "Iris Local Signing" if one exists in your keychain (so macOS permissions persist between builds), otherwise ad hoc.
 
 ## Development
 
-While Flint is open it watches its own source. A change is built in the background into `.staged/`, and an **Update** pill appears beside the address; click it when you're ready and Flint restarts into the new build with your tabs restored. Nothing restarts on its own.
+While Iris is open it watches its own source. A change is built in the background into `.staged/`, and an **Update** pill appears beside the address; click it when you're ready and Iris restarts into the new build with your tabs restored. Nothing restarts on its own.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `Flint.m` | The whole app: window, capsules, tab strip, panels, blocker, downloads, extensions, settings |
+| `Iris.m` | The whole app: window, capsules, tab strip, panels, blocker, downloads, extensions, settings |
 | `ext-shim.js` | The Chrome extension API layer, injected into extension pages |
-| `pages/` | Built-in pages served at `flint://` |
-| `flint` | Build, sign and update script |
-| `Flint.icns` | App icon |
+| `pages/` | Built-in pages served at `iris://` |
+| `iris` | Build, sign and update script |
+| `Iris.icns` | App icon |
 | `assets/` | Images for this page |

@@ -1,7 +1,7 @@
-// Flint: a native macOS browser. The window, tabs, sidebar and settings are AppKit; pages are rendered
+// Iris: a native macOS browser. The window, tabs, sidebar and settings are AppKit; pages are rendered
 // by WebKit (Safari's engine). Ad blocking is compiled into WebKit content rules, and Chrome-style
-// extensions (Proton Pass…) run on Flint's own extension layer (FExt below).
-// Build: see the `flint` script.
+// extensions (Proton Pass…) run on Iris's own extension layer (FExt below).
+// Build: see the `iris` script.
 
 #import <sys/xattr.h>
 #import <sys/resource.h>
@@ -15,7 +15,7 @@
 #import <dlfcn.h>
 #import <libkern/OSByteOrder.h>
 
-#pragma mark - Engine: WebKit (Safari's engine), with Flint's own blocking and extension system
+#pragma mark - Engine: WebKit (Safari's engine), with Iris's own blocking and extension system
 
 #import <WebKit/WebKit.h>
 #import <Security/Security.h>
@@ -24,15 +24,15 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreLocation/CoreLocation.h>
 
-static void FlintReloadBlocklists(void);
-static void FlintSetBlocking(BOOL on);
+static void IrisReloadBlocklists(void);
+static void IrisSetBlocking(BOOL on);
 static void CtlOut(NSString *s);
 static void RelayoutAll(void);
-static void FlintInternalInstall(WKWebViewConfiguration *c, WKUserContentController *ucc);
+static void IrisInternalInstall(WKWebViewConfiguration *c, WKUserContentController *ucc);
 static NSString *ThemeCSS(void);
-static void FlintCosmeticInstall(WKUserContentController *ucc);
+static void IrisCosmeticInstall(WKUserContentController *ucc);
 // Quit and reopen (extension changes take effect at launch); tabs are restored.
-static void FlintRelaunch(void) {
+static void IrisRelaunch(void) {
     [NSTask launchedTaskWithLaunchPath:@"/bin/sh" arguments:@[@"-c", [NSString stringWithFormat:@"sleep 1.2; open \"%@\"", NSBundle.mainBundle.bundlePath]]];
     [NSApp terminate:nil];
 }
@@ -69,7 +69,7 @@ static NSString *const kClearOnQuit   = @"clearDataOnQuit";
 static NSString *const kSitePerms     = @"sitePermissions";   // host → {camera, microphone: 1 allow / 2 block}
 static NSString *const kJSOff         = @"javascriptOffSites";
 static NSString *const kCustomEngine  = @"customSearchEngine"; // [name, url with %@]
-static NSString *const kDLAccel        = @"downloadAccelerator";   // Flint's multi-connection downloader for http(s) files
+static NSString *const kDLAccel        = @"downloadAccelerator";   // Iris's multi-connection downloader for http(s) files
 static NSString *const kCodec          = @"videoCodec";          // 0 automatic, 1 avoid AV1, 2 H.264 only
 static NSString *const kCodec30       = @"videoMax30fps";
 static NSString *const kBgThrottle    = @"backgroundThrottle";   // 0 standard, 1 save power on battery, 2 always
@@ -113,12 +113,12 @@ static BOOL ExtensionPinned(NSString *ident) {
     return !p || [p containsObject:ident];
 }
 
-// Debug log next to the source when it exists (~/Documents/Flint/flint.log).
-// Developer files live beside Flint.app (in Documents); they're touched only on this background queue,
+// Debug log next to the source when it exists (~/Documents/Iris/iris.log).
+// Developer files live beside Iris.app (in Documents); they're touched only on this background queue,
 // so a macOS folder-access prompt can never freeze the browser itself.
 static dispatch_queue_t DevQueue(void) {
     static dispatch_queue_t q; static dispatch_once_t once;
-    dispatch_once(&once, ^{ q = dispatch_queue_create("flint.dev", DISPATCH_QUEUE_SERIAL); });
+    dispatch_once(&once, ^{ q = dispatch_queue_create("iris.dev", DISPATCH_QUEUE_SERIAL); });
     return q;
 }
 static void DLog(NSString *fmt, ...) {
@@ -127,7 +127,7 @@ static void DLog(NSString *fmt, ...) {
     va_end(ap);
     NSString *line = [NSString stringWithFormat:@"%@  %@\n", [NSDate.date descriptionWithLocale:nil], s];
     dispatch_async(DevQueue(), ^{
-        NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Flint/flint.log"];
+        NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Iris/iris.log"];
         if (![NSFileManager.defaultManager fileExistsAtPath:path.stringByDeletingLastPathComponent]) return;
         NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!h) { [NSFileManager.defaultManager createFileAtPath:path contents:nil attributes:nil]; h = [NSFileHandle fileHandleForWritingAtPath:path]; }
@@ -203,7 +203,7 @@ static NSImage *Tinted(NSImage *im, NSColor *c) {
         [im drawInRect:r]; [c set]; NSRectFillUsingOperation(r, NSCompositingOperationSourceAtop); return YES;
     }];
 }
-// Flint's look: quiet and exact. Soft macOS corners, hairline edges, no glow; colour only where it means something.
+// Iris's look: quiet and exact. Soft macOS corners, hairline edges, no glow; colour only where it means something.
 static void RoundRect(NSRect r, CGFloat radius, NSColor *fill) {
     [fill setFill];
     [[NSBezierPath bezierPathWithRoundedRect:r xRadius:radius yRadius:radius] fill];
@@ -254,7 +254,7 @@ static NSString *HostOf(NSURL *u) {
 }
 static NSString *SupportDir(void) {
     NSString *d = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
-                   stringByAppendingPathComponent:@"Vela"];
+                   stringByAppendingPathComponent:@"Iris"];
     [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     return d;
 }
@@ -295,7 +295,7 @@ static NSURL *URLFromInput(NSString *s) {
         NSRegularExpression *scheme = [NSRegularExpression regularExpressionWithPattern:@"^[a-zA-Z][a-zA-Z0-9+.-]*:" options:0 error:nil];
         if ([scheme firstMatchInString:s options:0 range:NSMakeRange(0, s.length)] && ![s hasPrefix:@"localhost:"]) {
             NSURL *u = [NSURL URLWithString:s];
-            if (u.scheme && ([u.scheme isEqualToString:@"http"] || [u.scheme isEqualToString:@"https"] || [u.scheme isEqualToString:@"file"] || [u.scheme isEqualToString:@"about"] || [u.scheme isEqualToString:@"flint"] || [u.scheme isEqualToString:@"chrome-extension"] || [u.scheme isEqualToString:@"view-source"])) return u;
+            if (u.scheme && ([u.scheme isEqualToString:@"http"] || [u.scheme isEqualToString:@"https"] || [u.scheme isEqualToString:@"file"] || [u.scheme isEqualToString:@"about"] || [u.scheme isEqualToString:@"iris"] || [u.scheme isEqualToString:@"chrome-extension"] || [u.scheme isEqualToString:@"view-source"])) return u;
         }
         NSRegularExpression *hostish = [NSRegularExpression regularExpressionWithPattern:
             @"^(localhost|[^./\\s]+(\\.[^./\\s]+)*\\.[a-zA-Z]{2,}|\\d{1,3}(\\.\\d{1,3}){3})(:\\d+)?(/.*)?$" options:0 error:nil];
@@ -378,6 +378,7 @@ static NSURL *StripTracking(NSURL *u) {
 @property (strong) NSArray *savedBack;     // history kept while asleep
 @property (strong) id savedState;          // WebKit's own back/forward + scroll state, kept while asleep and across launches
 @property NSTimeInterval hiddenAt;
+@property NSTimeInterval openedFresh;   // opened in the background and not looked at yet: sits right of the current tab in the strip, in opening order
 @property NSTimeInterval lastInput;      // when you last clicked or typed in this tab (the CPU rule leaves it alone for a while)
 @property NSInteger blocked;
 @property (weak) VWindow *owner;          // the window this tab lives in
@@ -458,7 +459,7 @@ static NSURL *StripTracking(NSURL *u) {
 @property (strong) VFindBar *findBar;
 @property (strong) NSView *railDock;
 @property (strong) NSView *nowPlaying;
-@property (strong) NSView *shelf, *lights, *shelfHandle;
+@property (strong) NSView *shelf, *lights, *shelfHandle, *loadLine;
 @property (strong) NSView *lensPanel, *addressPanel;   // Monolith: Lens, and the popup under the address   // Monolith: the tab strip from the bottom edge, the window buttons, the hint at the bottom
 @property (weak) VTab *mediaTab;   // the tab whose music the sidebar player controls
 @property (strong) NSArray<VTab *> *splitPair;   // two tabs sharing the page area, left then right
@@ -485,6 +486,7 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)showLink:(NSString *)u;
 - (void)findCount:(int)count active:(int)active;
 - (void)newTabWithPage:(VPage *)p url:(NSURL *)u select:(BOOL)sel;
+- (void)tabOpenedBehind;
 - (void)applyTheme;
 - (void)openDownloads:(id)s;
 - (void)useSuggestion:(NSDictionary *)it newTab:(BOOL)nt;
@@ -584,7 +586,7 @@ static NSURL *StripTracking(NSURL *u) {
 static VWindow *gWin;                       // the browser window you're using (the last one that was key)
 
 // Profiles: every profile has its own website data (cookies, sign-ins, site storage), history and open tabs.
-// The first profile is the one Flint always had (WebKit's default data); others get their own data store.
+// The first profile is the one Iris always had (WebKit's default data); others get their own data store.
 static NSArray<NSDictionary *> *Profiles(void) {
     NSMutableArray *a = [NSMutableArray arrayWithObject:@{@"id": @"", @"name": [Defaults() stringForKey:kMainProfileName] ?: @"Personal"}];
     for (NSDictionary *p in [Defaults() arrayForKey:kProfiles] ?: @[]) if ([p isKindOfClass:NSDictionary.class] && [p[@"id"] length]) [a addObject:p];
@@ -634,7 +636,7 @@ static WKWebsiteDataStore *ProfileStore(NSString *pid) {
     return s;
 }
 @class VWindow;
-static BOOL gQuitting;   // set once Flint has decided to quit: windows closing now must not overwrite the saved tabs
+static BOOL gQuitting;   // set once Iris has decided to quit: windows closing now must not overwrite the saved tabs
 static void SettingsOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *));   // at launch, restored tabs wait until the extensions are up (then load)
 static NSMutableArray<VWindow *> *gWindows;  // every open browser window, oldest first
 
@@ -1011,7 +1013,7 @@ static NSMutableURLRequest *IconRequest(NSURL *u) {
     }] resume];
 }
 
-// Icons saved before Flint preferred real favicons were often apple-touch tiles: opaque squares with a white
+// Icons saved before Iris preferred real favicons were often apple-touch tiles: opaque squares with a white
 // background. Those are removed once so the proper icon is fetched (or re-read from Helium) instead.
 static BOOL IsWhiteTile(NSBitmapImageRep *r) {
     if (!r || r.pixelsWide < 8 || r.pixelsHigh < 8) return NO;
@@ -1072,7 +1074,7 @@ static BOOL IsWhiteTile(NSBitmapImageRep *r) {
 @end
 #pragma mark - Ad and tracker blocking
 
-// Filter lists are downloaded here; Flint's request filter reads them and cancels requests to ad and tracker hosts.
+// Filter lists are downloaded here weekly; v3b_filters turns them into WebKit content rules (requests, element hiding, pop-ups).
 
 static NSArray<NSArray<NSString *> *> *FilterLists(void) {
     return @[@[@"easylist", @"EasyList (ads)", @"https://easylist.to/easylist/easylist.txt"],
@@ -1083,7 +1085,13 @@ static NSArray<NSArray<NSString *> *> *FilterLists(void) {
 }
 static NSSet<NSString *> *ListsOn(void) {
     NSArray *a = [Defaults() arrayForKey:kListsOn];
-    return [NSSet setWithArray:a ?: @[@"easylist", @"easyprivacy", @"pgl", @"cookies"]];
+    // Annoyances (newsletter and sign-up pop-ups, "allow notifications" boxes, chat bubbles) became a default when Iris
+    // learned element hiding; it's added once to an existing choice, and stays off if you turn it off afterwards.
+    if (a && ![Defaults() boolForKey:@"listsAnnoyancesOffered"]) {
+        [Defaults() setBool:YES forKey:@"listsAnnoyancesOffered"];
+        if (![a containsObject:@"annoyances"]) { a = [a arrayByAddingObject:@"annoyances"]; [Defaults() setObject:a forKey:kListsOn]; }
+    }
+    return [NSSet setWithArray:a ?: @[@"easylist", @"easyprivacy", @"pgl", @"cookies", @"annoyances"]];
 }
 
 @interface VBlocker ()
@@ -1115,8 +1123,9 @@ static NSString *ListDir(void) {
 - (void)prepare:(void (^)(void))ready {
     double age = NSDate.date.timeIntervalSince1970 - [Defaults() doubleForKey:kListsUpdated];
     self.status = [NSString stringWithFormat:@"Ready · updated %@", [self updatedText]];
-    BOOL empty = [NSFileManager.defaultManager contentsOfDirectoryAtPath:ListDir() error:nil].count == 0;
-    if (age > 7 * 86400 || empty) [self updateLists:empty done:ready];
+    BOOL empty = [NSFileManager.defaultManager contentsOfDirectoryAtPath:ListDir() error:nil].count == 0, missing = NO;
+    for (NSString *l in ListsOn()) if (![NSFileManager.defaultManager fileExistsAtPath:[[ListDir() stringByAppendingPathComponent:l] stringByAppendingPathExtension:@"txt"]]) missing = YES;
+    if (age > 7 * 86400 || empty || missing) [self updateLists:empty done:ready];   // a list you just turned on is fetched now
     else if (ready) ready();
 }
 
@@ -1140,7 +1149,7 @@ static NSString *ListDir(void) {
         }] resume];
     }
     dispatch_group_notify(g, dispatch_get_main_queue(), ^{
-        FlintReloadBlocklists();
+        IrisReloadBlocklists();
         [Defaults() setDouble:NSDate.date.timeIntervalSince1970 forKey:kListsUpdated];
         self.busy = NO;
         self.status = [NSString stringWithFormat:@"Ready · updated %@", [self updatedText]];
@@ -1149,6 +1158,303 @@ static NSString *ListDir(void) {
     });
 }
 
+@end
+#pragma mark - Filter lists → WebKit content rules
+
+// The filter lists (EasyList, EasyPrivacy, Fanboy…) are written in Adblock Plus syntax. This turns them into
+// WebKit content rules — the engine Safari's blockers use — so every check runs inside WebKit at no per-request cost:
+//   network rules   ||host^, URL patterns (/ads/banner*, &ad_slot=), anchors, the ^ separator, wildcards, and the
+//                   options $third-party/$1p, resource types (script, image, xhr, frame, popup…), $domain=, $match-case,
+//                   $important, $badfilter, and @@ exceptions (including whole-site @@…$document)
+//   element hiding  ##selector everywhere, example.com##selector on one site, #@# exceptions, $elemhide/$generichide
+//   pop-ups         $popup rules stop ad windows and pop-unders; WebKit already refuses pop-ups no click asked for
+// Anything WebKit can't do faithfully (regex rules, redirects, scriptlets, :has-text and other procedural selectors,
+// header rules) is left out rather than applied wrongly. Selectors are checked by WebKit's own parser before use,
+// because one bad selector would silence every rule grouped with it.
+
+static NSString *FLEsc(unichar c) {
+    return strchr(".+?()[]{}\\$|^*", (int)c) ? [NSString stringWithFormat:@"\\%C", c] : [NSString stringWithFormat:@"%C", c];
+}
+
+// An Adblock pattern → WebKit url-filter. nil when it can't be expressed. *hostOnly: the pattern is just ||host^.
+static NSString *FLPattern(NSString *p, BOOL *hostOnly) {
+    *hostOnly = NO;
+    NSMutableString *r = [NSMutableString string];
+    NSUInteger i = 0, n = p.length;
+    BOOL host = [p hasPrefix:@"||"];
+    if (host) { [r appendString:@"^[a-z][a-z0-9.+-]*://([^/?#]*\\.)?"]; i = 2; }
+    else if ([p hasPrefix:@"|"]) { [r appendString:@"^"]; i = 1; }
+    while (n > i && [p characterAtIndex:n - 1] == '*') n--;   // a trailing * adds nothing
+    BOOL end = n > i && [p characterAtIndex:n - 1] == '|';
+    if (end) n--;
+    if (host) {
+        NSString *rest = [p substringWithRange:NSMakeRange(i, n - i)];
+        while ([rest hasSuffix:@"^"]) rest = [rest substringToIndex:rest.length - 1];
+        *hostOnly = rest.length && [rest rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/*^?=&:|"]].location == NSNotFound;
+    }
+    NSUInteger lead = i;
+    while (i < n && [p characterAtIndex:i] == '*') i++;
+    if (i > lead && !host && [r isEqualToString:@"^"]) [r setString:@""];
+    for (; i < n; i++) {
+        unichar c = [p characterAtIndex:i];
+        if (c > 126 || c < 32 || c == ' ') return nil;   // WebKit's rules are ASCII
+        if (c == '*') { if (![r hasSuffix:@".*"]) [r appendString:@".*"]; }
+        else if (c == '^') [r appendString:(i == n - 1 && !end) ? @"([^a-zA-Z0-9_.%-].*)?$" : @"[^a-zA-Z0-9_.%-]"];
+        else [r appendString:FLEsc(c)];
+    }
+    if (end && ![r hasSuffix:@"$"]) [r appendString:@"$"];
+    return r;
+}
+
+static NSString *FLDomain(NSString *d) {
+    d = d.lowercaseString;
+    if (!d.length || [d hasSuffix:@".*"] || [d hasPrefix:@"/"]) return nil;   // entities (example.*) and regex domains: WebKit has no equivalent
+    for (NSUInteger i = 0; i < d.length; i++) { unichar c = [d characterAtIndex:i]; if (!(isalnum(c) || c == '.' || c == '-' || c == '_')) return nil; }
+    return [@"*" stringByAppendingString:d];   // "*" = the domain and its subdomains
+}
+// "a.com|~b.a.com" → included / excluded; NO when there were included domains but none WebKit can express
+static BOOL FLDomains(NSString *s, NSString *sep, NSMutableArray *inc, NSMutableArray *exc) {
+    BOOL hadInc = NO;
+    for (NSString *raw in [s componentsSeparatedByString:sep]) {
+        NSString *d = Trim(raw); if (!d.length) continue;
+        BOOL neg = [d hasPrefix:@"~"]; if (neg) d = [d substringFromIndex:1];
+        if (!neg) hadInc = YES;
+        NSString *w = FLDomain(d); if (!w) continue;
+        [(neg ? exc : inc) addObject:w];
+    }
+    return !(hadInc && !inc.count);
+}
+
+static NSArray *FLBaseTypes(void) { return @[@"image", @"style-sheet", @"script", @"font", @"raw", @"svg-document", @"media"]; }
+
+// One network line (without "@@") and its options → a WebKit trigger, or nil to leave it out.
+// *flags: 1 important, 2 exception for the whole page ($document), 4 $elemhide, 8 $generichide
+static NSMutableDictionary *FLNetTrigger(NSString *pattern, NSString *opts, BOOL exception, int *flags) {
+    *flags = 0;
+    NSMutableSet *types = [NSMutableSet set], *notTypes = [NSMutableSet set];
+    NSMutableArray *inc = [NSMutableArray array], *exc = [NSMutableArray array];
+    NSString *load = nil; BOOL caseSens = NO, onlyUnsupportedTypes = NO, sawType = NO;
+    NSDictionary *map = @{@"script": @"script", @"image": @"image", @"stylesheet": @"style-sheet", @"css": @"style-sheet", @"font": @"font",
+                          @"media": @"media", @"xmlhttprequest": @"raw", @"xhr": @"raw", @"subdocument": @"document", @"frame": @"document",
+                          @"popup": @"popup", @"popunder": @"popup", @"document": @"document", @"doc": @"document"};
+    NSSet *ignoredTypes = [NSSet setWithArray:@[@"other", @"ping", @"beacon", @"websocket", @"webrtc", @"object", @"object-subrequest"]];
+    if (opts.length) for (NSString *raw in [opts componentsSeparatedByString:@","]) {
+        NSString *o = Trim(raw); NSString *lo = o.lowercaseString; if (!o.length) continue;
+        BOOL neg = [lo hasPrefix:@"~"]; NSString *name = neg ? [lo substringFromIndex:1] : lo;
+        if ([name isEqualToString:@"third-party"] || [name isEqualToString:@"3p"] || [name isEqualToString:@"strict3p"]) load = neg ? @"first-party" : @"third-party";
+        else if ([name isEqualToString:@"first-party"] || [name isEqualToString:@"1p"] || [name isEqualToString:@"strict1p"]) load = neg ? @"third-party" : @"first-party";
+        else if ([name isEqualToString:@"important"]) *flags |= 1;
+        else if ([name isEqualToString:@"match-case"]) caseSens = YES;
+        else if ([name hasPrefix:@"domain="] || [name hasPrefix:@"from="]) { if (!FLDomains([o substringFromIndex:[o rangeOfString:@"="].location + 1], @"|", inc, exc)) return nil; }
+        else if (exception && ([name isEqualToString:@"elemhide"] || [name isEqualToString:@"ehide"])) *flags |= 4;
+        else if (exception && ([name isEqualToString:@"generichide"] || [name isEqualToString:@"ghide"])) *flags |= 8;
+        else if (exception && [name isEqualToString:@"document"] && !neg) *flags |= 2;
+        else if ([name isEqualToString:@"all"]) { [types addObjectsFromArray:FLBaseTypes()]; [types addObjectsFromArray:@[@"document", @"popup"]]; sawType = YES; }
+        else if (map[name]) { if (neg) [notTypes addObject:map[name]]; else { [types addObject:map[name]]; sawType = YES; } }
+        else if ([ignoredTypes containsObject:name]) { if (!neg) { sawType = YES; onlyUnsupportedTypes = YES; } }
+        else return nil;   // redirect, removeparam, csp, header… WebKit can't do these faithfully
+    }
+    if (exception && (*flags & (4 | 8))) return [NSMutableDictionary dictionary];   // handled with element hiding
+    if (sawType && !types.count) return nil;   // only types WebKit can't single out (pings, websockets…)
+    (void)onlyUnsupportedTypes;
+    BOOL hostOnly = NO;
+    NSString *rx = FLPattern(pattern, &hostOnly);
+    if (!rx) return nil;
+    BOOL anywhere = !rx.length || [rx isEqualToString:@".*"];
+    if (anywhere) {
+        if (!inc.count) return nil;   // "block everything" is only ever meant for named sites
+        rx = @".*";
+    } else if (!hostOnly) {
+        NSString *core = [[pattern stringByReplacingOccurrencesOfString:@"*" withString:@""] stringByReplacingOccurrencesOfString:@"|" withString:@""];
+        if (core.length < 4 && ![pattern hasPrefix:@"||"] && !inc.count) return nil;   // too short to mean one thing
+    }
+    NSMutableDictionary *t = [NSMutableDictionary dictionaryWithObject:rx forKey:@"url-filter"];
+    if (caseSens) t[@"url-filter-is-case-sensitive"] = @YES;
+    if (load) t[@"load-type"] = @[load];
+    if (inc.count) t[@"if-domain"] = inc; else if (exc.count) t[@"unless-domain"] = exc;
+    if (*flags & 2) {   // @@||site^$document: the whole site is left alone
+        if (!hostOnly) return nil;
+        NSString *site = [[pattern substringFromIndex:2] stringByReplacingOccurrencesOfString:@"^" withString:@""];
+        NSString *w = FLDomain(site); if (!w) return nil;
+        return [@{@"url-filter": @".*", @"if-domain": @[w]} mutableCopy];
+    }
+    NSMutableSet *final = types.count ? types : [NSMutableSet setWithArray:FLBaseTypes()];
+    if (!types.count && (hostOnly || exception)) [final addObject:@"document"];   // an ad host's frames and pages too; plain patterns never block the page you asked for
+    [final minusSet:notTypes];
+    if (!final.count) return nil;
+    if (!(types.count == 0 && hostOnly && !notTypes.count)) t[@"resource-type"] = [final.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    return t;
+}
+
+// Cosmetic selectors WebKit can't use as plain CSS (uBlock/AdGuard procedural extensions).
+static BOOL FLSelectorOK(NSString *s) {
+    if (!s.length || s.length > 2000 || [s rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"{}"]].location != NSNotFound) return NO;
+    static NSArray *bad; if (!bad) bad = @[@":-abp-", @":has-text(", @":contains(", @":xpath(", @":upward(", @":remove(", @":style(", @":matches-css", @":min-text-length(",
+        @":watch-attr(", @":others(", @":if(", @":if-not(", @":matches-path(", @":matches-attr(", @":matches-prop(", @":nth-ancestor(", @":remove-attr(", @":remove-class(", @"[-ext-", @":-ext-", @":shadow", @"+js(", @":matches-media("];
+    for (NSString *b in bad) if ([s rangeOfString:b options:NSCaseInsensitiveSearch].location != NSNotFound) return NO;
+    return YES;
+}
+
+@interface FLRules : NSObject
+@property (strong) NSMutableArray *block, *allow, *important;   // network rules
+@property (strong) NSMutableOrderedSet<NSString *> *generic;     // ##sel
+@property (strong) NSMutableDictionary<NSString *, NSMutableSet *> *genericExcept;   // sel → sites where it must not apply
+@property (strong) NSMutableDictionary<NSString *, NSMutableOrderedSet *> *specific;   // "*a.com,*b.com" → selectors
+@property (strong) NSMutableSet *hideOff, *genericOff;   // sites with $elemhide / $generichide exceptions
+@end
+@implementation FLRules
+@end
+
+static FLRules *FLParse(NSString *dir) {
+    FLRules *R = [FLRules new];
+    R.block = [NSMutableArray array]; R.allow = [NSMutableArray array]; R.important = [NSMutableArray array];
+    R.generic = [NSMutableOrderedSet orderedSet]; R.genericExcept = [NSMutableDictionary dictionary]; R.specific = [NSMutableDictionary dictionary];
+    R.hideOff = [NSMutableSet set]; R.genericOff = [NSMutableSet set];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *f in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
+        if (![f.pathExtension isEqualToString:@"txt"]) continue;
+        NSString *text = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil];
+        for (NSString *raw in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+            NSString *l = Trim(raw);
+            if (l.length < 3 || [l hasPrefix:@"!"] || [l hasPrefix:@"["]) continue;
+            [lines addObject:l];
+        }
+    }
+    // $badfilter cancels the rule it repeats
+    NSMutableSet *cancelled = [NSMutableSet set];
+    for (NSString *l in lines) if ([l rangeOfString:@"badfilter"].location != NSNotFound) {
+        NSString *x = [[[l stringByReplacingOccurrencesOfString:@",badfilter" withString:@""] stringByReplacingOccurrencesOfString:@"badfilter," withString:@""] stringByReplacingOccurrencesOfString:@"$badfilter" withString:@""];
+        [cancelled addObject:x];
+    }
+    NSMutableSet *seen = [NSMutableSet set];
+    NSMutableArray *exceptSel = [NSMutableArray array];   // @[sel, NSArray domains]
+    NSCharacterSet *optChars = [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789~,=|._*-"] invertedSet];
+    for (NSString *l in lines) {
+        if ([cancelled containsObject:l] || [l rangeOfString:@"badfilter"].location != NSNotFound || [seen containsObject:l]) continue;
+        [seen addObject:l];
+        // element hiding
+        NSRange hr = [l rangeOfString:@"#@#"]; BOOL hideExc = hr.location != NSNotFound;
+        if (!hideExc) hr = [l rangeOfString:@"##"];
+        if (hr.location != NSNotFound) {
+            NSString *doms = [l substringToIndex:hr.location], *sel = Trim([l substringFromIndex:hr.location + hr.length]);
+            if ([doms rangeOfString:@"#"].location != NSNotFound || [sel hasPrefix:@"+js("] || [sel hasPrefix:@"^"] || !FLSelectorOK(sel)) continue;
+            NSMutableArray *inc = [NSMutableArray array], *exc = [NSMutableArray array];
+            if (!FLDomains(doms, @",", inc, exc)) continue;
+            if (hideExc) { [exceptSel addObject:@[sel, inc]]; continue; }
+            if (!inc.count) {
+                [R.generic addObject:sel];
+                if (exc.count) { NSMutableSet *s = R.genericExcept[sel] ?: [NSMutableSet set]; [s addObjectsFromArray:exc]; R.genericExcept[sel] = s; }
+            } else {
+                NSString *key = [[inc sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","];
+                NSMutableOrderedSet *s = R.specific[key] ?: [NSMutableOrderedSet orderedSet]; [s addObject:sel]; R.specific[key] = s;
+            }
+            continue;
+        }
+        if ([l rangeOfString:@"#?#"].location != NSNotFound || [l rangeOfString:@"#$#"].location != NSNotFound || [l rangeOfString:@"#%#"].location != NSNotFound) continue;
+        // network
+        BOOL exception = [l hasPrefix:@"@@"];
+        NSString *body = exception ? [l substringFromIndex:2] : l, *opts = nil;
+        if ([body hasPrefix:@"/"] && [body hasSuffix:@"/"] && body.length > 2) continue;   // regex rules
+        NSRange dollar = [body rangeOfString:@"$" options:NSBackwardsSearch];
+        if (dollar.location != NSNotFound) {
+            NSString *o = [body substringFromIndex:dollar.location + 1];
+            if ([o rangeOfCharacterFromSet:optChars].location == NSNotFound) { opts = o; body = [body substringToIndex:dollar.location]; }
+        }
+        if ([body hasPrefix:@"/"] && [body hasSuffix:@"/"] && body.length > 2) continue;
+        int flags = 0;
+        NSMutableDictionary *trig = FLNetTrigger(body, opts, exception, &flags);
+        if (!trig) continue;
+        if (exception && (flags & (4 | 8))) {   // $elemhide / $generichide: switch hiding off on those sites
+            BOOL ho = NO; NSString *rx = FLPattern(body, &ho); (void)rx;
+            if (!ho) continue;
+            NSString *w = FLDomain([[body substringFromIndex:2] stringByReplacingOccurrencesOfString:@"^" withString:@""]); if (!w) continue;
+            [((flags & 4) ? R.hideOff : R.genericOff) addObject:w];
+            continue;
+        }
+        NSDictionary *rule = @{@"trigger": trig, @"action": @{@"type": exception ? @"ignore-previous-rules" : @"block"}};
+        [(exception ? R.allow : (flags & 1) ? R.important : R.block) addObject:rule];
+    }
+    for (NSArray *e in exceptSel) {
+        NSString *sel = e[0]; NSArray *doms = e[1];
+        if (!doms.count) { [R.generic removeObject:sel]; for (NSString *k in R.specific) [R.specific[k] removeObject:sel]; continue; }
+        if ([R.generic containsObject:sel]) { NSMutableSet *s = R.genericExcept[sel] ?: [NSMutableSet set]; [s addObjectsFromArray:doms]; R.genericExcept[sel] = s; }
+        for (NSString *d in doms) [R.specific[d] removeObject:sel];
+    }
+    return R;
+}
+
+// Element-hiding rules, given the selectors WebKit accepted. Order matters: ignore-previous-rules only reaches rules above it.
+static NSArray *FLCosmeticRules(FLRules *R, NSSet *valid) {
+    NSMutableArray *rules = [NSMutableArray array];
+    NSMutableArray *group = [NSMutableArray array];
+    void (^flush)(void) = ^{ if (!group.count) return;
+        [rules addObject:@{@"trigger": @{@"url-filter": @".*"}, @"action": @{@"type": @"css-display-none", @"selector": [group componentsJoinedByString:@", "]}}];
+        [group removeAllObjects]; };
+    for (NSString *s in R.generic) {
+        if (![valid containsObject:s]) continue;
+        NSSet *not = R.genericExcept[s];
+        if (not.count) {
+            [rules addObject:@{@"trigger": @{@"url-filter": @".*", @"unless-domain": [not.allObjects sortedArrayUsingSelector:@selector(compare:)]},
+                               @"action": @{@"type": @"css-display-none", @"selector": s}}];
+            continue;
+        }
+        [group addObject:s]; if (group.count >= 250) flush();
+    }
+    flush();
+    NSMutableSet *genericOff = [R.genericOff mutableCopy]; [genericOff unionSet:R.hideOff];
+    for (NSString *d in [genericOff.allObjects sortedArrayUsingSelector:@selector(compare:)])
+        [rules addObject:@{@"trigger": @{@"url-filter": @".*", @"if-domain": @[d]}, @"action": @{@"type": @"ignore-previous-rules"}}];
+    for (NSString *key in [R.specific.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSArray *doms = [key componentsSeparatedByString:@","];
+        NSMutableArray *sels = [NSMutableArray array];
+        for (NSString *s in R.specific[key]) if ([valid containsObject:s]) [sels addObject:s];
+        for (NSUInteger i = 0; i < sels.count; i += 250)
+            [rules addObject:@{@"trigger": @{@"url-filter": @".*", @"if-domain": doms},
+                               @"action": @{@"type": @"css-display-none", @"selector": [[sels subarrayWithRange:NSMakeRange(i, MIN(250, sels.count - i))] componentsJoinedByString:@", "]}}];
+    }
+    for (NSString *d in [R.hideOff.allObjects sortedArrayUsingSelector:@selector(compare:)])
+        [rules addObject:@{@"trigger": @{@"url-filter": @".*", @"if-domain": @[d]}, @"action": @{@"type": @"ignore-previous-rules"}}];
+    return rules;
+}
+
+// WebKit's own CSS parser decides which selectors are valid: a hidden page tries each one.
+@interface FLSelectorCheck : NSObject <WKNavigationDelegate>
+@property (strong) WKWebView *web;
+@property (strong) NSArray *sels;
+@property (copy) void (^done)(NSSet *valid);
+@end
+@implementation FLSelectorCheck
++ (void)check:(NSArray *)sels done:(void (^)(NSSet *))done {
+    static NSMutableSet *live; if (!live) live = [NSMutableSet set];
+    FLSelectorCheck *c = [FLSelectorCheck new]; c.sels = sels; c.done = done; [live addObject:c];
+    WKWebViewConfiguration *cfg = [WKWebViewConfiguration new]; cfg.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+    c.web = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 10, 10) configuration:cfg];
+    c.web.navigationDelegate = c;
+    __weak FLSelectorCheck *wc = c;
+    void (^finish)(NSSet *) = ^(NSSet *v) {
+        FLSelectorCheck *me = wc; if (!me || !me.done) return;
+        void (^d)(NSSet *) = me.done; me.done = nil; me.web.navigationDelegate = nil; me.web = nil;
+        objc_setAssociatedObject(me, "finish", nil, OBJC_ASSOCIATION_COPY_NONATOMIC); [live removeObject:me]; d(v);
+    };
+    objc_setAssociatedObject(c, "finish", finish, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [c.web loadHTMLString:@"<!doctype html><html><head></head><body></body></html>" baseURL:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ finish([NSSet set]); });   // never hold the blocker up: without the check, no element hiding this time
+}
+- (void)webView:(WKWebView *)w didFinishNavigation:(WKNavigation *)n {
+    void (^finish)(NSSet *) = objc_getAssociatedObject(self, "finish");
+    NSArray *sels = self.sels;
+    [w callAsyncJavaScript:@"const bad=[];const f=document.createDocumentFragment();for(let i=0;i<s.length;i++){try{f.querySelector(s[i])}catch(e){bad.push(i)}}return bad;"
+                 arguments:@{@"s": sels} inFrame:nil inContentWorld:WKContentWorld.defaultClientWorld completionHandler:^(id r, NSError *e) {
+        if (![r isKindOfClass:NSArray.class]) { finish([NSSet set]); return; }
+        NSMutableIndexSet *badIdx = [NSMutableIndexSet indexSet];
+        for (NSNumber *k in r) if ([k isKindOfClass:NSNumber.class] && k.unsignedIntegerValue < sels.count) [badIdx addIndex:k.unsignedIntegerValue];
+        NSMutableSet *ok = [NSMutableSet setWithCapacity:sels.count];
+        [sels enumerateObjectsUsingBlock:^(NSString *s, NSUInteger i, BOOL *stop) { if (![badIdx containsIndex:i]) [ok addObject:s]; }];
+        DLog(@"blocker: %lu of %lu selectors usable", (unsigned long)ok.count, (unsigned long)sels.count);
+        finish(ok);
+    }];
+}
+- (void)webView:(WKWebView *)w didFailNavigation:(WKNavigation *)n withError:(NSError *)e { void (^finish)(NSSet *) = objc_getAssociatedObject(self, "finish"); finish([NSSet set]); }
 @end
 #pragma mark - Downloads: the list behind the toolbar's downloads button
 
@@ -1162,7 +1468,7 @@ static NSString *ListDir(void) {
 @property (weak) WKDownload *wk;
 @property (strong) NSData *resume;
 @property (weak) WKWebView *view;
-// the accelerator (Flint's own downloader): several connections at once, each fetching a slice of the file
+// the accelerator (Iris's own downloader): several connections at once, each fetching a slice of the file
 @property (copy) NSString *ident, *kind, *partPath, *referer, *ua, *cookie, *error;   // kind: "accel" or "webkit"
 @property (strong) NSMutableArray<NSMutableDictionary *> *segs;   // {s: first byte, e: last byte (-1 unknown), g: bytes got, tries}
 @property (strong) NSMutableDictionary<NSNumber *, NSURLSessionDataTask *> *tasks;
@@ -1189,7 +1495,7 @@ static NSString *ListDir(void) {
 
 #pragma mark - Menus
 
-// Flint draws its own menus. The code still builds ordinary NSMenus (titles, actions, checkmarks,
+// Iris draws its own menus. The code still builds ordinary NSMenus (titles, actions, checkmarks,
 // shortcuts, submenus); PopMenu shows them in a quiet rounded panel with icons and soft hover,
 // instead of the stock macOS menu. Keyboard works as you'd expect: arrows, return, esc, letters.
 
@@ -1204,7 +1510,7 @@ static NSString *MenuSymbolFor(NSString *t) {
                   @"Mute Tab": @"speaker.slash", @"Unmute Tab": @"speaker.wave.2", @"Put Tab to Sleep": @"moon.zzz",
                   @"New Split View": @"rectangle.split.2x1", @"Split View with Current Tab": @"rectangle.split.2x1", @"Exit Split View": @"rectangle",
                   @"Swap Sides": @"arrow.left.arrow.right", @"Move Tab to New Window": @"macwindow", @"Close Tab": @"xmark",
-                  @"Close Other Tabs": @"xmark.square", @"Close Tabs Below": @"arrow.down.to.line", @"Address Bar Width": @"arrow.left.and.right",
+                  @"Close Other Tabs": @"xmark.square", @"Close Older Tabs": @"arrow.left.to.line", @"Address Bar Width": @"arrow.left.and.right",
                   @"Reset Toolbar": @"arrow.counterclockwise", @"Customise in Settings…": @"slider.horizontal.3",
                   @"Block Element…": @"hand.point.up.left", @"Undo Last": @"arrow.uturn.backward", @"Show All Hidden": @"eye",
                   @"Open in New Tab": @"plus.square", @"Open in Background Tab": @"square.on.square", @"Open All in Tabs": @"square.stack",
@@ -1213,6 +1519,75 @@ static NSString *MenuSymbolFor(NSString *t) {
                   @"Reader": @"doc.plaintext", @"Picture in Picture": @"pip", @"Zoom In": @"plus.magnifyingglass", @"Zoom Out": @"minus.magnifyingglass",
                   @"Manage Extensions": @"puzzlepiece.extension", @"Chrome Web Store": @"bag", @"Bookmark Manager": @"books.vertical"};
     return m[t];
+}
+
+// Every item gets an icon: named ones above, WebKit's own items by their identifier, the rest by what their title says.
+static NSString *MenuSymbolGuess(NSString *title) {
+    static NSArray<NSArray<NSString *> *> *rules;
+    if (!rules) rules = @[
+        @[@"open link in new tab", @"plus.square"], @[@"open image in new tab", @"photo"], @[@"open video in new tab", @"play.rectangle"],
+        @[@"background", @"square.on.square"], @[@"split", @"rectangle.split.2x1"], @[@"default browser", @"arrow.up.forward.app"], @[@"peek", @"eye"],
+        @[@"clean", @"sparkles"], @[@"copy image address", @"photo.badge.arrow.down"], @[@"copy image", @"photo.on.rectangle"], @[@"copy video", @"film"],
+        @[@"address", @"link"], @[@"copy link", @"link"], @[@"page link", @"link"], @[@"email", @"envelope"],
+        @[@"paste and go", @"arrow.right.doc.on.clipboard"], @[@"paste", @"doc.on.clipboard"], @[@"copy", @"doc.on.doc"], @[@"cut", @"scissors"],
+        @[@"select all", @"character.cursor.ibeam"], @[@"undo", @"arrow.uturn.backward"], @[@"redo", @"arrow.uturn.forward"],
+        @[@"save image", @"square.and.arrow.down"], @[@"save video", @"square.and.arrow.down"], @[@"web archive", @"archivebox"], @[@"pdf", @"doc.richtext"],
+        @[@"save", @"square.and.arrow.down"], @[@"download", @"arrow.down.circle"], @[@"print", @"printer"],
+        @[@"look up", @"character.book.closed"], @[@"translate", @"translate"], @[@"search", @"magnifyingglass"], @[@"go to", @"arrow.right.circle"],
+        @[@"find", @"text.magnifyingglass"], @[@"source", @"chevron.left.forwardslash.chevron.right"], @[@"inspect", @"wrench.and.screwdriver"],
+        @[@"web inspector", @"wrench.and.screwdriver"], @[@"console", @"terminal"], @[@"javascript", @"curlybraces"],
+        @[@"remove bookmark", @"star.slash"], @[@"bookmark", @"star"], @[@"block element", @"hand.raised"], @[@"hidden", @"eye"],
+        @[@"picture in picture", @"pip.enter"], @[@"loop", @"repeat"], @[@"unmute", @"speaker.wave.2"], @[@"mute", @"speaker.slash"],
+        @[@"speed", @"gauge.with.dots.needle.67percent"], @[@"controls", @"slider.horizontal.below.rectangle"], @[@"full screen", @"arrow.up.left.and.arrow.down.right"],
+        @[@"share", @"square.and.arrow.up"], @[@"speak", @"waveform"], @[@"speech", @"waveform"], @[@"services", @"gearshape.2"], @[@"spelling", @"textformat.abc"],
+        @[@"reload", @"arrow.clockwise"], @[@"stop", @"xmark.circle"], @[@"back", @"chevron.left"], @[@"forward", @"chevron.right"], @[@"home", @"house"],
+        @[@"reader", @"doc.plaintext"], @[@"shield", @"shield.lefthalf.filled"], @[@"filter list", @"arrow.triangle.2.circlepath"], @[@"zoom in", @"plus.magnifyingglass"],
+        @[@"zoom out", @"minus.magnifyingglass"], @[@"actual size", @"1.magnifyingglass"], @[@"zoom", @"plus.magnifyingglass"],
+        @[@"close", @"xmark"], @[@"quit", @"power"], @[@"hide", @"eye.slash"], @[@"minimi", @"minus.square"], @[@"customise", @"slider.horizontal.3"],
+        @[@"settings", @"gearshape"], @[@"options", @"gearshape"], @[@"profile", @"person.crop.circle"], @[@"extension", @"puzzlepiece.extension"],
+        @[@"recently closed", @"arrow.uturn.backward"], @[@"history", @"clock"], @[@"recent", @"clock"], @[@"folder", @"folder"], @[@"rename", @"pencil"],
+        @[@"edit", @"pencil"], @[@"delete", @"trash"], @[@"remove", @"trash"], @[@"clear", @"trash"], @[@"toolbar", @"menubar.rectangle"],
+        @[@"width", @"arrow.left.and.right"], @[@"unpin", @"pin.slash"], @[@"pin", @"pin"], @[@"sleep", @"moon.zzz"], @[@"duplicate", @"plus.square.on.square"],
+        @[@"next tab", @"arrow.right.square"], @[@"previous tab", @"arrow.left.square"], @[@"move tab", @"arrow.up.arrow.down.square"],
+        @[@"new private", @"eye.slash"], @[@"new window", @"macwindow.badge.plus"], @[@"new tab", @"plus"], @[@"new folder", @"folder.badge.plus"],
+        @[@"show tabs", @"rectangle.bottomthird.inset.filled"], @[@"lens", @"circle.hexagonpath"], @[@"open file", @"doc"], @[@"open location", @"globe"],
+        @[@"about", @"info.circle"], @[@"open in new tab", @"plus.square"], @[@"open all", @"square.stack"], @[@"open", @"arrow.up.right.square"],
+        @[@"manage", @"slider.horizontal.3"], @[@"show all", @"square.grid.2x2"], @[@"update", @"arrow.triangle.2.circlepath"], @[@"split view", @"rectangle.split.2x1"]];
+    NSString *t = title.lowercaseString;
+    for (NSArray *r in rules) if ([t containsString:r[0]]) return r[1];
+    return nil;
+}
+static NSString *WKMenuSymbol(NSString *ident) {
+    static NSDictionary *m;
+    if (!m) m = @{@"WKMenuItemIdentifierOpenLinkInNewWindow": @"plus.square", @"WKMenuItemIdentifierDownloadLinkedFile": @"arrow.down.circle",
+                  @"WKMenuItemIdentifierCopyLink": @"link", @"WKMenuItemIdentifierOpenImageInNewWindow": @"photo", @"WKMenuItemIdentifierDownloadImage": @"square.and.arrow.down",
+                  @"WKMenuItemIdentifierCopyImage": @"photo.on.rectangle", @"WKMenuItemIdentifierOpenMediaInNewWindow": @"play.rectangle",
+                  @"WKMenuItemIdentifierDownloadMedia": @"square.and.arrow.down", @"WKMenuItemIdentifierCopyMediaLink": @"film", @"WKMenuItemIdentifierToggleFullScreen": @"arrow.up.left.and.arrow.down.right",
+                  @"WKMenuItemIdentifierShowHideMediaControls": @"slider.horizontal.below.rectangle", @"WKMenuItemIdentifierToggleEnhancedFullScreen": @"pip.enter",
+                  @"WKMenuItemIdentifierCopy": @"doc.on.doc", @"WKMenuItemIdentifierCut": @"scissors", @"WKMenuItemIdentifierPaste": @"doc.on.clipboard",
+                  @"WKMenuItemIdentifierLookUp": @"character.book.closed", @"WKMenuItemIdentifierTranslate": @"translate", @"WKMenuItemIdentifierSearchWeb": @"magnifyingglass",
+                  @"WKMenuItemIdentifierShareMenu": @"square.and.arrow.up", @"WKMenuItemIdentifierSpeechMenu": @"waveform", @"WKMenuItemIdentifierInspectElement": @"wrench.and.screwdriver",
+                  @"WKMenuItemIdentifierGoBack": @"chevron.left", @"WKMenuItemIdentifierGoForward": @"chevron.right", @"WKMenuItemIdentifierReload": @"arrow.clockwise",
+                  @"WKMenuItemIdentifierStop": @"xmark.circle", @"WKMenuItemIdentifierSpellingMenu": @"textformat.abc", @"WKMenuItemIdentifierFontMenu": @"textformat",
+                  @"WKMenuItemIdentifierWritingTools": @"wand.and.stars", @"WKMenuItemIdentifierCopySubject": @"person.crop.rectangle"};
+    return ident ? m[ident] : nil;
+}
+static NSImage *MenuIcon(NSMenuItem *i, CGFloat pt) {
+    if (i.image) return i.image;
+    NSString *s = WKMenuSymbol(i.identifier) ?: MenuSymbolFor(i.title) ?: MenuSymbolGuess(i.title);
+    return s ? Symbol(s, pt, NSFontWeightRegular) : nil;
+}
+// Quick actions shown as a row of icon buttons across the top of a menu (Back, Forward, Reload, Bookmark, Share…).
+static char kMenuIconRowKey;
+static void MenuSetIconRow(NSMenu *m, NSArray<NSMenuItem *> *items) { objc_setAssociatedObject(m, &kMenuIconRowKey, items, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+static NSArray<NSMenuItem *> *MenuIconRow(NSMenu *m) { return m ? objc_getAssociatedObject(m, &kMenuIconRowKey) : nil; }
+// System menus (text fields keep macOS's own, for spelling and Writing Tools) get the same icons.
+static void MenuAddSystemIcons(NSMenu *m) {
+    for (NSMenuItem *i in m.itemArray) {
+        if (i.separatorItem || i.image) continue;
+        NSString *s = WKMenuSymbol(i.identifier) ?: MenuSymbolFor(i.title) ?: MenuSymbolGuess(i.title);
+        if (s) { NSImage *im = Symbol(s, 13, NSFontWeightRegular); im.template = YES; i.image = im; }
+    }
 }
 
 static NSString *KeyGlyphs(NSMenuItem *i) {
@@ -1269,8 +1644,10 @@ static void OpenMenuPanel(NSMenu *m, NSPoint topLeft, NSWindow *owner, VMenuPane
 @property (strong) NSMenu *source;
 @property (strong) NSArray<NSMenuItem *> *items;
 @property (strong) NSArray<NSValue *> *rects;
-@property NSInteger hover;
+@property NSInteger hover, iconHover;
 @property BOOL gutter;
+@property (strong) NSArray<NSMenuItem *> *iconItems;
+@property (strong) NSArray<NSValue *> *iconRects;
 @property (weak) VMenuPanel *panel;
 @property (strong) NSTimer *subTimer;
 @end
@@ -1287,7 +1664,7 @@ static void OpenMenuPanel(NSMenu *m, NSPoint topLeft, NSWindow *owner, VMenuPane
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
-static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
+static const CGFloat kMenuPad = 6, kMenuRow = 30, kMenuSep = 11, kMenuHead = 26, kMenuIcons = 58;
 
 @implementation VMenuView
 - (BOOL)isFlipped { return YES; }
@@ -1301,23 +1678,30 @@ static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
         if (i.hidden || i.isAlternate) continue;
         if (i.separatorItem && (!items.count || [items.lastObject isSeparatorItem])) continue;   // no leading or doubled lines
         [items addObject:i];
-        if (i.image || i.state == NSControlStateValueOn || MenuSymbolFor(i.title)) gutter = YES;
+        if (i.image || i.state == NSControlStateValueOn || (!i.separatorItem && !MenuItemIsHeader(i) && MenuIcon(i, 13))) gutter = YES;
     }
     while ([items.lastObject isSeparatorItem]) [items removeLastObject];
     NSDictionary *ta = @{NSFontAttributeName: UIFont(13, NSFontWeightRegular)}, *ka = @{NSFontAttributeName: UIFont(12, NSFontWeightRegular)};
-    CGFloat w = 0, y = kMenuPad;
+    NSMutableArray *icons = [NSMutableArray array];
+    for (NSMenuItem *i in MenuIconRow(self.source)) if (!i.hidden) [icons addObject:i];
+    self.iconItems = icons;
+    CGFloat w = 0, y = kMenuPad + (icons.count ? kMenuIcons + kMenuSep : 0);
     for (NSMenuItem *i in items) {
         CGFloat h = i.separatorItem ? kMenuSep : MenuItemIsHeader(i) ? kMenuHead : kMenuRow;
         [rects addObject:[NSValue valueWithRect:NSMakeRect(0, y, 0, h)]];
         y += h;
         if (!i.separatorItem) {
             NSString *keys = KeyGlyphs(i);
-            CGFloat tw = ceil([i.title sizeWithAttributes:ta].width) + (keys.length ? ceil([keys sizeWithAttributes:ka].width) + 28 : 0) + (i.submenu ? 22 : 0);
+            CGFloat tw = ceil([i.title sizeWithAttributes:ta].width) + (keys.length ? ceil([keys sizeWithAttributes:ka].width) + 36 : 0) + (i.submenu ? 22 : 0) + (i.state == NSControlStateValueOn ? 22 : 0);
             w = MAX(w, tw);
         }
     }
     self.items = items; self.rects = rects; self.gutter = gutter;
-    CGFloat width = MIN(420, MAX(gutter ? 232 : 210, w + (gutter ? 40 : 18) + 22));
+    CGFloat width = MIN(440, MAX(MAX(gutter ? 244 : 216, icons.count * 60 + kMenuPad * 2 + 8), w + (gutter ? 44 : 20) + 24));
+    NSMutableArray *irs = [NSMutableArray array];
+    CGFloat bw = icons.count ? (width - kMenuPad * 2 - 8) / icons.count : 0;
+    for (NSUInteger k = 0; k < icons.count; k++) [irs addObject:[NSValue valueWithRect:NSMakeRect(kMenuPad + 4 + k * bw, kMenuPad + 2, bw, kMenuIcons - 4)]];
+    self.iconRects = irs;
     NSMutableArray *full = [NSMutableArray array];
     for (NSValue *v in rects) { NSRect r = v.rectValue; r.origin.x = kMenuPad; r.size.width = width - kMenuPad * 2; [full addObject:[NSValue valueWithRect:r]]; }
     self.rects = full;
@@ -1327,39 +1711,62 @@ static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
 
 - (void)drawRect:(NSRect)dirty {
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    BOOL light = ThemeIsLight();
+    NSColor *hotFill = [vText colorWithAlphaComponent:light ? 0.075 : 0.11];
+    // quick actions across the top: icon over a small label
+    for (NSUInteger k = 0; k < self.iconItems.count; k++) {
+        NSMenuItem *i = self.iconItems[k]; NSRect r = self.iconRects[k].rectValue;
+        BOOL on = MenuItemEnabled(i), hot = on && (NSInteger)k == self.iconHover;
+        if (hot) RoundRect(NSInsetRect(r, 2, 0), 10, hotFill);
+        NSImage *ic = MenuIcon(i, 15.5);
+        if (i.state == NSControlStateValueOn && i.onStateImage) ic = i.onStateImage;
+        if (ic) { ic = Tinted(ic, !on ? vFaint : (i.state == NSControlStateValueOn ? vEmber : vText)); DrawImage(ic, CenterIn(ic.size, NSMakeRect(NSMinX(r), NSMinY(r) + 7, NSWidth(r), 22))); }
+        NSMutableParagraphStyle *cp = [NSMutableParagraphStyle new]; cp.alignment = NSTextAlignmentCenter; cp.lineBreakMode = NSLineBreakByTruncatingTail;
+        [i.title drawInRect:NSMakeRect(NSMinX(r) + 2, NSMinY(r) + 33, NSWidth(r) - 4, 14) withAttributes:@{NSFontAttributeName: UIFont(10.5, NSFontWeightMedium), NSForegroundColorAttributeName: on ? vDim : vFaint, NSParagraphStyleAttributeName: cp}];
+    }
+    if (self.iconItems.count) { [vSep setFill]; Blend(NSMakeRect(kMenuPad + 10, kMenuPad + kMenuIcons + floor(kMenuSep / 2), NSWidth(self.bounds) - kMenuPad * 2 - 20, 1)); }
     for (NSUInteger k = 0; k < self.items.count; k++) {
         NSMenuItem *i = self.items[k]; NSRect r = self.rects[k].rectValue;
         if (!NSIntersectsRect(r, dirty)) continue;
-        if (i.separatorItem) { [vSep setFill]; NSRectFill(NSMakeRect(NSMinX(r) + 8, round(NSMidY(r)), NSWidth(r) - 16, 1)); continue; }
-        if (MenuItemIsHeader(i)) {
-            [i.title drawInRect:NSMakeRect(NSMinX(r) + 8, NSMinY(r) + 6, NSWidth(r) - 16, 15)
-                 withAttributes:@{NSFontAttributeName: UIFont(11, NSFontWeightMedium), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps}];
+        if (i.separatorItem) { [vSep setFill]; Blend(NSMakeRect(NSMinX(r) + 10, round(NSMidY(r)), NSWidth(r) - 20, 1)); continue; }
+        if (MenuItemIsHeader(i)) {   // what the menu is about: a link, an image, the words you selected
+            NSMutableParagraphStyle *hp = [NSMutableParagraphStyle new]; hp.lineBreakMode = NSLineBreakByTruncatingMiddle;
+            [i.title drawInRect:NSMakeRect(NSMinX(r) + 10, NSMinY(r) + 7, NSWidth(r) - 20, 15)
+                 withAttributes:@{NSFontAttributeName: MMono(10.5, NSFontWeightMedium), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: hp, NSKernAttributeName: @0.2}];
             continue;
         }
         BOOL on = MenuItemEnabled(i), hot = on && (NSInteger)k == self.hover;
-        if (hot) RoundRect(r, 7, [vText colorWithAlphaComponent:ThemeIsLight() ? 0.07 : 0.09]);
-        CGFloat tx = NSMinX(r) + (self.gutter ? 32 : 10);
+        if (hot) RoundRect(r, 8, hotFill);
+        CGFloat tx = NSMinX(r) + (self.gutter ? 34 : 11);
+        NSImage *icon = MenuIcon(i, 13.5);
+        BOOL checked = i.state == NSControlStateValueOn;
         if (self.gutter) {
-            NSRect g = NSMakeRect(NSMinX(r) + 6, NSMinY(r), 20, NSHeight(r));
+            NSRect g = NSMakeRect(NSMinX(r) + 7, NSMinY(r), 20, NSHeight(r));
             NSImage *ic = nil;
-            if (i.state == NSControlStateValueOn) ic = Tinted(Symbol(@"checkmark", 11, NSFontWeightSemibold), on ? vText : vFaint);
+            if (checked && !icon) ic = Tinted(Symbol(@"checkmark", 11, NSFontWeightSemibold), on ? vText : vFaint);
             else if (i.image && !i.image.isTemplate) { DrawImage(i.image, CenterIn(NSMakeSize(16, 16), g)); }
-            else if (i.image) ic = Tinted(i.image, on ? vDim : vFaint);
-            else if (MenuSymbolFor(i.title)) ic = Tinted(Symbol(MenuSymbolFor(i.title), 12.5, NSFontWeightRegular), on ? vDim : vFaint);
+            else if (icon) ic = Tinted(icon, !on ? vFaint : hot ? vText : vDim);
             if (ic) DrawImage(ic, CenterIn(NSMakeSize(MIN(ic.size.width, 18), MIN(ic.size.height, 18)), g));
         }
         CGFloat right = NSMaxX(r) - 10;
         if (i.submenu) {
-            NSImage *ch = Tinted(Symbol(@"chevron.right", 9.5, NSFontWeightSemibold), vFaint);
+            NSImage *ch = Tinted(Symbol(@"chevron.right", 9.5, NSFontWeightSemibold), hot ? vDim : vFaint);
             DrawImage(ch, CenterIn(ch.size, NSMakeRect(right - 10, NSMinY(r), 10, NSHeight(r))));
             right -= 18;
         } else {
+            if (checked && icon) {   // a setting that's on: its icon stays, a check sits at the end
+                NSImage *ck = Tinted(Symbol(@"checkmark", 10.5, NSFontWeightSemibold), on ? vEmber : vFaint);
+                DrawImage(ck, CenterIn(ck.size, NSMakeRect(right - 12, NSMinY(r), 12, NSHeight(r))));
+                right -= 22;
+            }
             NSString *keys = KeyGlyphs(i);
-            if (keys.length) {
-                NSDictionary *ka = @{NSFontAttributeName: UIFont(12, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint};
+            if (keys.length) {   // shortcuts as small keycaps
+                NSDictionary *ka = @{NSFontAttributeName: UIFont(11, NSFontWeightMedium), NSForegroundColorAttributeName: hot ? vDim : vFaint, NSKernAttributeName: @0.6};
                 NSSize ks = [keys sizeWithAttributes:ka];
-                [keys drawAtPoint:NSMakePoint(right - ks.width, NSMinY(r) + round((NSHeight(r) - ks.height) / 2)) withAttributes:ka];
-                right -= ks.width + 14;
+                NSRect cap = NSMakeRect(round(right - ks.width - 10), round(NSMidY(r) - 9.5), ceil(ks.width) + 10, 19);
+                RoundRect(cap, 5.5, [vText colorWithAlphaComponent:light ? 0.05 : 0.07]);
+                [keys drawAtPoint:NSMakePoint(NSMinX(cap) + 5, NSMinY(cap) + round((19 - ks.height) / 2)) withAttributes:ka];
+                right = NSMinX(cap) - 10;
             }
         }
         NSDictionary *ta = @{NSFontAttributeName: UIFont(13, NSFontWeightRegular), NSForegroundColorAttributeName: on ? vText : vFaint, NSParagraphStyleAttributeName: ps};
@@ -1379,6 +1786,10 @@ static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
     [super updateTrackingAreas];
     for (NSTrackingArea *a in self.trackingAreas.copy) [self removeTrackingArea:a];
     [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
+}
+- (NSInteger)iconAt:(NSPoint)p {
+    for (NSUInteger k = 0; k < self.iconRects.count; k++) if (NSPointInRect(p, self.iconRects[k].rectValue)) return (NSInteger)k;
+    return -1;
 }
 - (NSInteger)rowAt:(NSPoint)p {
     for (NSUInteger k = 0; k < self.rects.count; k++) if (NSPointInRect(p, self.rects[k].rectValue)) return (NSInteger)k;
@@ -1403,9 +1814,14 @@ static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
     OpenMenuPanel(self.items[(NSUInteger)k].submenu, NSMakePoint(NSMaxX(p.frame) - 4, NSMaxY(sr) + kMenuPad), p.owner, p, NSMinX(p.frame) + 4);
     p.child.parentRow = k;
 }
-- (void)mouseMoved:(NSEvent *)e { [self setHot:[self rowAt:[self convertPoint:e.locationInWindow fromView:nil]] openSub:NO]; }
+- (void)mouseMoved:(NSEvent *)e {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    NSInteger ic = [self iconAt:p]; if (ic >= 0 && !MenuItemEnabled(self.iconItems[(NSUInteger)ic])) ic = -1;
+    if (ic != self.iconHover) { self.iconHover = ic; self.needsDisplay = YES; }
+    [self setHot:[self rowAt:p] openSub:NO];
+}
 - (void)mouseEntered:(NSEvent *)e { [self mouseMoved:e]; }
-- (void)mouseExited:(NSEvent *)e { if (!self.panel.child) { self.hover = -1; self.needsDisplay = YES; } }
+- (void)mouseExited:(NSEvent *)e { self.iconHover = -1; if (!self.panel.child) self.hover = -1; self.needsDisplay = YES; }
 - (void)mouseDown:(NSEvent *)e { self.pressAt = [self convertPoint:e.locationInWindow fromView:nil]; self.pressRow = [self rowAt:self.pressAt]; }
 - (void)mouseDragged:(NSEvent *)e {
     id<VMenuDropTarget> t = MenuDropTarget(self.source);
@@ -1462,6 +1878,8 @@ static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
     return ok;
 }
 - (void)mouseUp:(NSEvent *)e {
+    NSInteger ic = [self iconAt:[self convertPoint:e.locationInWindow fromView:nil]];
+    if (ic >= 0) { NSMenuItem *it = self.iconItems[(NSUInteger)ic]; if (MenuItemEnabled(it)) [self perform:it]; return; }
     NSInteger k = [self rowAt:[self convertPoint:e.locationInWindow fromView:nil]];
     if (![self selectable:k]) return;
     if (self.items[(NSUInteger)k].submenu) { [self setHot:k openSub:YES]; return; }
@@ -1553,10 +1971,10 @@ static void OpenMenuPanel(NSMenu *m, NSPoint topLeft, NSWindow *owner, VMenuPane
     if ([m.delegate respondsToSelector:@selector(menuWillOpen:)]) [m.delegate menuWillOpen:m];
     if (!gMenus) gMenus = [NSMutableArray array];
     VMenuView *list = [[VMenuView alloc] initWithFrame:NSZeroRect];
-    list.source = m; list.hover = -1; list.pressRow = list.dropRow = list.dropInto = -1;
-    if (MenuDropTarget(m)) [list registerForDraggedTypes:@[@"com.flint.bookmark-index", NSPasteboardTypeURL, @"WebURLsWithTitlesPboardType", NSPasteboardTypeString]];
+    list.source = m; list.hover = -1; list.iconHover = -1; list.pressRow = list.dropRow = list.dropInto = -1;
+    if (MenuDropTarget(m)) [list registerForDraggedTypes:@[@"com.iris.bookmark-index", NSPasteboardTypeURL, @"WebURLsWithTitlesPboardType", NSPasteboardTypeString]];
     CGFloat w = [list buildRows], h = NSHeight(list.frame);
-    if (!list.items.count) return;
+    if (!list.items.count && !list.iconItems.count) return;
     NSScreen *scr = owner.screen ?: NSScreen.mainScreen;
     for (NSScreen *s in NSScreen.screens) if (NSPointInRect(topLeft, NSInsetRect(s.frame, -1, -1))) scr = s;
     NSRect vis = NSInsetRect(scr.visibleFrame, 6, 6);
@@ -1571,24 +1989,45 @@ static void OpenMenuPanel(NSMenu *m, NSPoint topLeft, NSWindow *owner, VMenuPane
     p.opaque = NO; p.backgroundColor = NSColor.clearColor; p.hasShadow = YES; p.level = NSPopUpMenuWindowLevel;
     p.releasedWhenClosed = NO; p.hidesOnDeactivate = YES; p.appearance = ThemeAppearance(); p.becomesKeyOnlyIfNeeded = YES;
     p.owner = owner; p.parentMenu = parent; p.list = list; list.panel = p;
-    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, ph)];
-    root.wantsLayer = YES;
-    root.layer.backgroundColor = vCard.CGColor; root.layer.cornerRadius = 12; root.layer.masksToBounds = YES;
+    // frosted glass in the theme's own tone: the page shows through faintly, a hairline edge, a lit top rim
+    NSVisualEffectView *root = [[NSVisualEffectView alloc] initWithFrame:NSMakeRect(0, 0, w, ph)];
+    root.material = NSVisualEffectMaterialMenu; root.blendingMode = NSVisualEffectBlendingModeBehindWindow; root.state = NSVisualEffectStateActive;
+    // the rounded shape comes from a mask image, not a layer corner: a borderless window takes its shadow and edge
+    // from what's opaque, so a layer-clipped effect view left a square outline around the menu
+    root.maskImage = [NSImage imageWithSize:NSMakeSize(29, 29) flipped:NO drawingHandler:^BOOL(NSRect r) {
+        [NSColor.blackColor setFill]; [[NSBezierPath bezierPathWithRoundedRect:r xRadius:14 yRadius:14] fill]; return YES; }];
+    root.maskImage.capInsets = NSEdgeInsetsMake(14, 14, 14, 14); root.maskImage.resizingMode = NSImageResizingModeStretch;
+    root.wantsLayer = YES; root.layer.cornerRadius = 14; root.layer.masksToBounds = YES;
     if (@available(macOS 11.0, *)) root.layer.cornerCurve = kCACornerCurveContinuous;
-    root.layer.borderWidth = 1; root.layer.borderColor = (ThemeIsLight() ? [NSColor colorWithWhite:0 alpha:0.1] : [NSColor colorWithWhite:1 alpha:0.09]).CGColor;
+    root.layer.borderWidth = 0.75; root.layer.borderColor = (ThemeIsLight() ? [NSColor colorWithWhite:0 alpha:0.12] : [NSColor colorWithWhite:1 alpha:0.13]).CGColor;
+    NSView *tint = [[NSView alloc] initWithFrame:root.bounds]; tint.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; tint.wantsLayer = YES;
+    tint.layer.backgroundColor = [vCard colorWithAlphaComponent:ThemeIsLight() ? 0.72 : 0.80].CGColor;
+    CAGradientLayer *rim = [CAGradientLayer layer]; rim.frame = NSMakeRect(0, ph - 26, w, 26);
+    rim.colors = @[(id)[NSColor colorWithWhite:1 alpha:ThemeIsLight() ? 0.35 : 0.045].CGColor, (id)[NSColor colorWithWhite:1 alpha:0].CGColor];
+    rim.startPoint = CGPointMake(0.5, 1); rim.endPoint = CGPointMake(0.5, 0); [tint.layer addSublayer:rim];
+    [root addSubview:tint];
     if (h > ph) {   // taller than the screen: it scrolls
         NSScrollView *sv = [[NSScrollView alloc] initWithFrame:root.bounds];
         sv.drawsBackground = NO; sv.hasVerticalScroller = YES; sv.scrollerStyle = NSScrollerStyleOverlay; sv.autohidesScrollers = YES;
         sv.documentView = list; [root addSubview:sv];
     } else [root addSubview:list];
-    p.contentView = root;
+    NSView *holder = [[NSView alloc] initWithFrame:root.frame];   // a clear content view; the glass sits inside it
+    holder.wantsLayer = YES; holder.layer.backgroundColor = NSColor.clearColor.CGColor;
+    root.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; [holder addSubview:root];
+    p.contentView = holder;
     if (parent) parent.child = p;
     [gMenus addObject:p];
     WatchMenus();
     p.alphaValue = 0;
     [p orderFront:nil];
     [p invalidateShadow];
-    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.09; p.animator.alphaValue = 1; }];
+    // it unfolds from the corner it's anchored to: a quick fade with a small settle in scale
+    CABasicAnimation *grow = [CABasicAnimation animationWithKeyPath:@"transform"];
+    CATransform3D t0 = CATransform3DMakeTranslation(-w * 0.02, ph * 0.03, 0); t0 = CATransform3DScale(t0, 0.97, 0.97, 1);
+    grow.fromValue = [NSValue valueWithCATransform3D:t0]; grow.toValue = [NSValue valueWithCATransform3D:CATransform3DIdentity];
+    grow.duration = 0.16; grow.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.2 :0.9 :0.25 :1];
+    [root.layer addAnimation:grow forKey:@"open"];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.11; p.animator.alphaValue = 1; }];
 }
 
 // Same contract as -[NSMenu popUpMenuPositioningItem:nil atLocation:inView:]: the menu's top-left corner
@@ -1616,7 +2055,7 @@ static void PopMenuForEvent(NSMenu *m, NSEvent *e, NSView *v) {
 }
 #pragma mark - Dragging pages and bookmarks
 
-static NSString *const kBookmarkDragType = @"com.flint.bookmark-index";   // a bookmark being moved on the bar
+static NSString *const kBookmarkDragType = @"com.iris.bookmark-index";   // a bookmark being moved on the bar
 
 // What a dragged page looks like under the pointer: its icon and title in a small pill.
 static NSImage *DragChip(NSString *title, NSImage *icon) {
@@ -1651,7 +2090,7 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
 // The site button: a click opens site information; a drag carries the page.
 - (void)mouseDown:(NSEvent *)e {
     VTab *t = self.dragsPage ? WinFor(self).current : nil;
-    if (!t || t.isHome || !t.url.length || [t.url hasPrefix:@"flint:"]) { [super mouseDown:e]; return; }
+    if (!t || t.isHome || !t.url.length || [t.url hasPrefix:@"iris:"]) { [super mouseDown:e]; return; }
     self.highlighted = YES;
     NSPoint start = e.locationInWindow;
     while (YES) {
@@ -1707,7 +2146,7 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
     return ok;
 }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
-- (void)rightMouseDown:(NSEvent *)e {   // not typing: Flint's own menu for the page's address
+- (void)rightMouseDown:(NSEvent *)e {   // not typing: Iris's own menu for the page's address
     if (self.currentEditor) { [super rightMouseDown:e]; return; }
     PopMenuForEvent([self menuForEvent:e], e, self);
 }
@@ -1844,7 +2283,7 @@ static NSString *gUpdateNotes;
     self.dlRing.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [self.dlBtn addSubview:self.dlRing]; [self addSubview:self.dlBtn];
     __weak VToolbar *weakBar = self;
-    [NSNotificationCenter.defaultCenter addObserverForName:@"FlintDownloadsChanged" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { [weakBar updateDownloads]; }];
+    [NSNotificationCenter.defaultCenter addObserverForName:@"IrisDownloadsChanged" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { [weakBar updateDownloads]; }];
     for (NSView *v in @[self.sideBtn, self.backBtn, self.fwdBtn, self.reloadBtn, self.shieldBtn, self.menuBtn]) [self addSubview:v];
     self.updateBtn = [[VPillButton alloc] initWithFrame:NSZeroRect];
     self.updateBtn.bordered = NO; self.updateBtn.title = @""; self.updateBtn.target = nil; self.updateBtn.action = @selector(installUpdate:);
@@ -1866,7 +2305,7 @@ static NSString *gUpdateNotes;
         VWindow *w = WinFor(ws);
         [w refreshChrome];
         VTab *ct = w.current;   // editing shows the whole address, left-aligned, ready to copy or change
-        NSString *full = (ct.url && !ct.isHome && ![ct.url hasPrefix:@"flint://reader"]) ? ct.url : @"";
+        NSString *full = (ct.url && !ct.isHome && ![ct.url hasPrefix:@"iris://reader"]) ? ct.url : @"";
         NSMutableParagraphStyle *lp = [NSMutableParagraphStyle new]; lp.alignment = NSTextAlignmentLeft; lp.lineBreakMode = NSLineBreakByClipping;
         NSDictionary *ta = @{NSFontAttributeName: UIFont(12.5, NSFontWeightRegular), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: lp};
         ws.field.alignment = NSTextAlignmentLeft;
@@ -1949,7 +2388,7 @@ static NSString *gUpdateNotes;
     self.updateBtn.hidden = !gUpdateReady;
     if (gUpdateReady) {
         self.updateBtn.frame = NSMakeRect(x, y + 2, upW, 24);
-        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Flint is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Flint is ready: click to switch to it (your tabs come back).";
+        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Iris is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Iris is ready: click to switch to it (your tabs come back).";
         self.updateBtn.needsDisplay = YES;
     }
     self.shieldBtn.hidden = !ToolbarShows(@"shield");
@@ -1978,7 +2417,7 @@ static NSString *gUpdateNotes;
     if (gUpdateReady) {
         CGFloat pw = gUpdating ? 84 : 64;
         self.updateBtn.frame = NSMakeRect(right - pw, y, pw, 28); right -= pw + 6;
-        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Flint is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Flint is ready: click to switch to it (your tabs come back).";
+        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Iris is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Iris is ready: click to switch to it (your tabs come back).";
         self.updateBtn.needsDisplay = YES;
     }
     self.menuBtn.frame = NSMakeRect(right - 30, y, 30, 28); right -= 32;
@@ -2958,7 +3397,7 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
     // dragged out of the sidebar: the tab's page travels (onto the bookmarks bar, another app, the Finder)
     if (p.x > NSWidth(self.bounds) + 6 || p.x < -6) {
         VTab *t = self.dragTab; self.dragTab = nil; self.dragging = NO; self.needsDisplay = YES;
-        if (t.url.length && !t.isHome && ![t.url hasPrefix:@"flint:"]) BeginURLDrag(self, e, t.url, t.title, t.favicon, nil);
+        if (t.url.length && !t.isHome && ![t.url hasPrefix:@"iris:"]) BeginURLDrag(self, e, t.url, t.title, t.favicon, nil);
         return;
     }
     if (!self.dragging && fabs(p.y - self.downAt.y) < 4) return;
@@ -3320,7 +3759,7 @@ static void *kDLProgress = &kDLProgress;
     if (!any) return -1;
     return total > 0 ? (double)got / total : 0;
 }
-- (void)changed { [NSNotificationCenter.defaultCenter postNotificationName:@"FlintDownloadsChanged" object:nil]; }
+- (void)changed { [NSNotificationCenter.defaultCenter postNotificationName:@"IrisDownloadsChanged" object:nil]; }
 @end
 
 static NSPopover *gDLPop;   // the toolbar's quick list
@@ -3339,7 +3778,7 @@ static const CGFloat kDLRow = 52, kDLHead = 40, kDLFoot = 40;
 - (instancetype)initWithFrame:(NSRect)r {
     if (!(self = [super initWithFrame:r])) return nil;
     self.hover = -1;
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:@"FlintDownloadsChanged" object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refresh) name:@"IrisDownloadsChanged" object:nil];
     return self;
 }
 - (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; }
@@ -3400,7 +3839,7 @@ static const CGFloat kDLRow = 52, kDLHead = 40, kDLFoot = 40;
     CGFloat fy = NSHeight(self.bounds) - kDLFoot;
     if (p.y > fy) {
         if (p.x < NSWidth(self.bounds) / 2) { [gDLPop close]; [gWin showDownloadManager:nil]; }
-        else { [VDownloads.shared.items filterUsingPredicate:[NSPredicate predicateWithFormat:@"state == 'running'"]]; [VDownloads.shared save]; self.needsDisplay = YES; [NSNotificationCenter.defaultCenter postNotificationName:@"FlintDownloadsChanged" object:nil]; }
+        else { [VDownloads.shared.items filterUsingPredicate:[NSPredicate predicateWithFormat:@"state == 'running'"]]; [VDownloads.shared save]; self.needsDisplay = YES; [NSNotificationCenter.defaultCenter postNotificationName:@"IrisDownloadsChanged" object:nil]; }
         return;
     }
     NSInteger i = [self rowAt:p]; if (i < 0) return;
@@ -3437,14 +3876,14 @@ static const CGFloat kDLRow = 52, kDLHead = 40, kDLFoot = 40;
 }
 @end
 
-#pragma mark - Download accelerator (Flint's own downloader, in the spirit of Internet Download Manager)
+#pragma mark - Download accelerator (Iris's own downloader, in the spirit of Internet Download Manager)
 
 // A file the server can send in pieces (HTTP byte ranges) is fetched over several connections at once, each
-// carrying one slice, and written straight into place in a .flintpart file. When a slice finishes early, the
+// carrying one slice, and written straight into place in a .irispart file. When a slice finishes early, the
 // biggest slice still running is split in two and a new connection takes the second half, so the fast
-// connections keep working to the end. Pausing keeps every slice's progress, also across quitting Flint.
+// connections keep working to the end. Pausing keeps every slice's progress, also across quitting Iris.
 // The site's cookies, user agent and referrer go with every request, so signed-in downloads work; anything
-// Flint can't fetch itself (a form post, a one-time link that refuses a second request) falls back to WebKit's
+// Iris can't fetch itself (a form post, a one-time link that refuses a second request) falls back to WebKit's
 // own downloader. Finished files get macOS's "downloaded from the internet" flag, like Safari's.
 
 static NSString *const kDLConns  = @"dlConnections";   // slices per download, 1–16
@@ -3466,7 +3905,7 @@ static const int64_t kMinSlice = 1 << 20;   // never split below 1 MB
 
 static NSString *UniquePath(NSString *dir, NSString *name) {
     NSString *p = [dir stringByAppendingPathComponent:name];
-    for (int n = 1; [NSFileManager.defaultManager fileExistsAtPath:p] || [NSFileManager.defaultManager fileExistsAtPath:[p stringByAppendingString:@".flintpart"]]; n++)
+    for (int n = 1; [NSFileManager.defaultManager fileExistsAtPath:p] || [NSFileManager.defaultManager fileExistsAtPath:[p stringByAppendingString:@".irispart"]]; n++)
         p = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@ %d%@", name.stringByDeletingPathExtension, n, name.pathExtension.length ? [@"." stringByAppendingString:name.pathExtension] : @""]];
     return p;
 }
@@ -3486,7 +3925,7 @@ static NSString *CookieHeader(NSArray<NSHTTPCookie *> *all, NSURL *u) {
 }
 
 static void MarkQuarantined(NSString *path, NSString *from) {
-    NSString *q = [NSString stringWithFormat:@"0083;%08lx;Flint;%@", (unsigned long)time(NULL), NSUUID.UUID.UUIDString];
+    NSString *q = [NSString stringWithFormat:@"0083;%08lx;Iris;%@", (unsigned long)time(NULL), NSUUID.UUID.UUIDString];
     setxattr(path.fileSystemRepresentation, "com.apple.quarantine", q.UTF8String, strlen(q.UTF8String), 0, 0);
     if (from.length) {   // "where from", as Finder's Get Info shows it
         NSData *plist = [NSPropertyListSerialization dataWithPropertyList:@[from] format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
@@ -3526,7 +3965,7 @@ static void MarkQuarantined(NSString *path, NSString *from) {
     file = [[file stringByReplacingOccurrencesOfString:@"/" withString:@"-"] stringByReplacingOccurrencesOfString:@":" withString:@"-"];
     VDownload *x = [VDownload new];
     x.ident = NSUUID.UUID.UUIDString; x.kind = @"accel"; x.url = u.absoluteString; x.referer = ref; x.view = v; x.isPrivate = priv;
-    x.path = UniquePath(w.downloadFolder.path, file); x.name = x.path.lastPathComponent; x.partPath = [x.path stringByAppendingString:@".flintpart"];
+    x.path = UniquePath(w.downloadFolder.path, file); x.name = x.path.lastPathComponent; x.partPath = [x.path stringByAppendingString:@".irispart"];
     NSString *ua = nil; @try { ua = [v valueForKey:@"_userAgent"]; } @catch (NSException *e) {}
     x.ua = ua.length ? ua : @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15";
     x.state = @"queued"; x.started = x.lastTick = NSDate.date.timeIntervalSince1970;
@@ -3662,7 +4101,7 @@ static void MarkQuarantined(NSString *path, NSString *from) {
     [x.tasks removeObjectForKey:@(i)]; x.conns = (NSInteger)x.tasks.count;
     NSMutableDictionary *g = x.segs[i];
     if (!err && [g[@"e"] longLongValue] < 0) g[@"done"] = @YES;   // a stream of unknown length: ending cleanly means complete
-    if (!err && x.total > 0 && [g[@"e"] longLongValue] >= 0 && ![self segDone:g]) err = [NSError errorWithDomain:@"flint" code:1 userInfo:@{NSLocalizedDescriptionKey: @"The connection closed early"}];
+    if (!err && x.total > 0 && [g[@"e"] longLongValue] >= 0 && ![self segDone:g]) err = [NSError errorWithDomain:@"iris" code:1 userInfo:@{NSLocalizedDescriptionKey: @"The connection closed early"}];
     if ([self segDone:g]) { [self sliceFinished:x]; return; }
     if (err.code == NSURLErrorCancelled) return;   // paused, cancelled, or replaced
     if (![x.state isEqual:@"running"]) return;
@@ -3765,7 +4204,7 @@ static void MarkQuarantined(NSString *path, NSString *from) {
     [self schedule];
 }
 
-// Flint couldn't fetch it itself (the site refuses a second request): WebKit downloads it the usual way.
+// Iris couldn't fetch it itself (the site refuses a second request): WebKit downloads it the usual way.
 - (void)handBackToWebKit:(VDownload *)x why:(NSString *)why {
     for (NSURLSessionDataTask *t in x.tasks.allValues) [t cancel];
     [x.tasks removeAllObjects];
@@ -3856,22 +4295,22 @@ static void MarkQuarantined(NSString *path, NSString *from) {
 
 
 static WKUserContentController *gUCC;
-static WKUserContentController *gPrivUCC;   // private windows: Flint's helpers only, no extensions
-static void FlintApplyRules(void);
+static WKUserContentController *gPrivUCC;   // private windows: Iris's helpers only, no extensions
+static void IrisApplyRules(void);
 static WKProcessPool *gPool;
 static BOOL gBlockOn = YES;
 static NSArray<WKContentRuleList *> *gRules;
 static NSUInteger gRuleCount;
 static BOOL gAskNextDownload;   // "Save Image As…": ask where, once
-// Hosts whose broken certificate the person chose to accept; kept until Flint quits, like Chrome.
+// Hosts whose broken certificate the person chose to accept; kept until Iris quits, like Chrome.
 static NSMutableSet<NSString *> *gCertOK;
 
 
-// Safari's identity, so sites treat Flint like Safari rather than an unknown embedded browser.
+// Safari's identity, so sites treat Iris like Safari rather than an unknown embedded browser.
 static NSString *const kAppUA = @"Version/18.6 Safari/605.1.15";
 
 static NSString *HoverScript(void) {
-    return @"(()=>{let last=null;const send=h=>{if(h!==last){last=h;try{webkit.messageHandlers.flintHover.postMessage(h||'')}catch(e){}}};"
+    return @"(()=>{let last=null;const send=h=>{if(h!==last){last=h;try{webkit.messageHandlers.irisHover.postMessage(h||'')}catch(e){}}};"
             "document.addEventListener('mouseover',e=>{const a=e.target.closest&&e.target.closest('a[href]');send(a?a.href:null)},true);"
             "document.addEventListener('mouseout',e=>{if(!e.relatedTarget)send(null)},true);})();";
 }
@@ -3879,6 +4318,7 @@ static NSString *HoverScript(void) {
 @interface FWebView : WKWebView {
     NSDictionary *_ctx;
     NSTimeInterval _ctxAt;
+    NSPoint _menuAt;   // where the last right-click was, in this view
 }
 @property (weak) VPage *page;
 - (void)setContext:(NSDictionary *)c;
@@ -3888,25 +4328,27 @@ static NSString *ContextScript(void) {
     return @"(()=>{document.addEventListener('contextmenu',e=>{try{const t=e.target,el=t&&t.nodeType===1?t:t&&t.parentElement;"
             "const a=el&&el.closest('a[href]');const img=el&&(el.closest('img')||el.closest('picture')&&el.closest('picture').querySelector('img'));"
             "const vid=el&&el.closest('video');const sel=String(getSelection()||'').trim();"
-            "const ed=!!(el&&(el.isContentEditable||/^(INPUT|TEXTAREA)$/.test(el.tagName)));window.__flintCtxEl=el;"
-            "webkit.messageHandlers.flintContext.postMessage({link:a?a.href:'',image:img?(img.currentSrc||img.src||''):'',video:vid?(vid.currentSrc||vid.src||'x'):'',selection:sel.slice(0,2000),editable:ed})}catch(x){}},true)})();";
+            "const ed=!!(el&&(el.isContentEditable||/^(INPUT|TEXTAREA)$/.test(el.tagName)));window.__irisCtxEl=el;"
+            "const v=vid||(el&&el.parentElement&&el.parentElement.querySelector(':scope>video'))||null;window.__irisCtxVideo=v;"
+            "webkit.messageHandlers.irisContext.postMessage({link:a?a.href:'',image:img?(img.currentSrc||img.src||''):'',video:v?(v.currentSrc||v.src||'x'):'',selection:sel.slice(0,2000),editable:ed,"
+            "vloop:!!(v&&v.loop),vmuted:!!(v&&v.muted),vcontrols:!!(v&&v.controls),vrate:v?v.playbackRate:1})}catch(x){}},true)})();";
 }
 
-// Chrome Web Store pages get an "Add to Flint" button (the store itself only offers Chrome).
+// Chrome Web Store pages get an "Add to Iris" button (the store itself only offers Chrome).
 static NSString *WebStoreScript(void) {
     return @"(()=>{if(location.hostname!=='chromewebstore.google.com')return;let btn=null;"
             "const sync=()=>{const m=location.pathname.match(/\\/detail\\/[^/]*\\/([a-p]{32})/)||location.pathname.match(/\\/detail\\/([a-p]{32})/);"
             "if(!m){if(btn){btn.remove();btn=null}return}if(btn&&btn.dataset.id===m[1])return;if(btn)btn.remove();"
-            "btn=document.createElement('button');btn.dataset.id=m[1];btn.textContent='Add to Flint';"
+            "btn=document.createElement('button');btn.dataset.id=m[1];btn.textContent='Add to Iris';"
             "btn.style.cssText='position:fixed;top:84px;right:28px;z-index:2147483647;padding:10px 20px;border-radius:999px;border:0;font:600 14px -apple-system,system-ui;color:#111;background:#f2f2f4;box-shadow:0 6px 20px rgba(0,0,0,.3);cursor:pointer';"
-            "btn.onclick=()=>{const h=document.querySelector('h1');webkit.messageHandlers.flintInstall.postMessage({id:m[1],name:h?h.textContent.trim():''})};"
+            "btn.onclick=()=>{const h=document.querySelector('h1');webkit.messageHandlers.irisInstall.postMessage({id:m[1],name:h?h.textContent.trim():''})};"
             "document.documentElement.appendChild(btn)};"
-            // the store's "Switch to Chrome" banner and pop-over: hidden (Flint installs extensions itself)
+            // the store's "Switch to Chrome" banner and pop-over: hidden (Iris installs extensions itself)
             "const hideNag=()=>{const w=document.createTreeWalker(document.body||document.documentElement,NodeFilter.SHOW_TEXT);let n;"
-            "while((n=w.nextNode())){if(!/Switch to Chrome|Install Chrome|Download Chrome/i.test(n.nodeValue))continue;let el=n.parentElement;if(!el||el.dataset.flintHidden)continue;"
-            "const dlg=el.closest('[role=dialog]');if(dlg){dlg.style.setProperty('display','none','important');dlg.dataset.flintHidden=1;continue}"
+            "while((n=w.nextNode())){if(!/Switch to Chrome|Install Chrome|Download Chrome/i.test(n.nodeValue))continue;let el=n.parentElement;if(!el||el.dataset.irisHidden)continue;"
+            "const dlg=el.closest('[role=dialog]');if(dlg){dlg.style.setProperty('display','none','important');dlg.dataset.irisHidden=1;continue}"
             "while(el.parentElement&&el.parentElement!==document.body&&el.parentElement.textContent.trim().length<140)el=el.parentElement;"
-            "el.style.setProperty('display','none','important');el.dataset.flintHidden=1}};"
+            "el.style.setProperty('display','none','important');el.dataset.irisHidden=1}};"
             "setInterval(()=>{sync();hideNag()},800);sync();hideNag()})();";
 }
 
@@ -3917,8 +4359,8 @@ static NSString *WebStoreScript(void) {
     if (![m.frameInfo.securityOrigin.host isEqualToString:@"chromewebstore.google.com"] || ![m.body isKindOfClass:NSDictionary.class]) return;
     NSString *ident = m.body[@"id"], *name = [m.body[@"name"] length] ? m.body[@"name"] : @"this extension";
     NSAlert *a = [NSAlert new];
-    a.messageText = [NSString stringWithFormat:@"Add “%@” to Flint?", name];
-    a.informativeText = @"It runs on Flint's own extension layer. Most extensions work; some Chrome-only features may not.";
+    a.messageText = [NSString stringWithFormat:@"Add “%@” to Iris?", name];
+    a.informativeText = @"It runs on Iris's own extension layer. Most extensions work; some Chrome-only features may not.";
     [a addButtonWithTitle:@"Add Extension"]; [a addButtonWithTitle:@"Cancel"];
     [a beginSheetModalForWindow:gWin.window completionHandler:^(NSModalResponse r) {
         if (r != NSAlertFirstButtonReturn) return;
@@ -3927,9 +4369,9 @@ static NSString *WebStoreScript(void) {
             NSAlert *b = [NSAlert new];
             if (err) { b.messageText = @"Couldn't add the extension"; b.informativeText = err; [b beginSheetModalForWindow:gWin.window completionHandler:nil]; return; }
             b.messageText = [NSString stringWithFormat:@"%@ is installed", installed ?: name];
-            b.informativeText = @"Relaunch Flint to start it. Your tabs come back.";
+            b.informativeText = @"Relaunch Iris to start it. Your tabs come back.";
             [b addButtonWithTitle:@"Relaunch Now"]; [b addButtonWithTitle:@"Later"];
-            [b beginSheetModalForWindow:gWin.window completionHandler:^(NSModalResponse rr) { if (rr == NSAlertFirstButtonReturn) FlintRelaunch(); }];
+            [b beginSheetModalForWindow:gWin.window completionHandler:^(NSModalResponse rr) { if (rr == NSAlertFirstButtonReturn) IrisRelaunch(); }];
         }];
     }];
 }
@@ -3960,11 +4402,11 @@ static NSString *WebStoreScript(void) {
 // the others often fall back to the processor. Optionally 60 fps streams are refused too.
 static BOOL MacIsAppleSilicon(void) { int v = 0; size_t n = sizeof v; return sysctlbyname("hw.optional.arm64", &v, &n, NULL, 0) == 0 && v == 1; }
 static NSString *CodecConfigJS(void) {
-    return [NSString stringWithFormat:@"try{Object.defineProperty(window,'__flintCodec',{value:{mode:%ld,fps30:%@},configurable:true,enumerable:false})}catch(e){}",
+    return [NSString stringWithFormat:@"try{Object.defineProperty(window,'__irisCodec',{value:{mode:%ld,fps30:%@},configurable:true,enumerable:false})}catch(e){}",
             (long)[Defaults() integerForKey:kCodec], [Defaults() boolForKey:kCodec30] ? @"true" : @"false"];
 }
 static NSString *CodecScript(void) {
-    return @"(()=>{const cfg=()=>window.__flintCodec||{mode:0,fps30:false};"
+    return @"(()=>{const cfg=()=>window.__irisCodec||{mode:0,fps30:false};"
     "const refuse=t=>{const c=cfg();if(!c.mode&&!c.fps30)return false;t=String(t||'').toLowerCase();"
       "if(c.mode>=1&&/av01|av1/.test(t))return true;"
       "if(c.mode>=2&&(/vp0?[89]|vp09/.test(t)||/^video\\/webm/.test(t)))return true;"
@@ -3975,12 +4417,12 @@ static NSString *CodecScript(void) {
       "if(v&&(refuse(v.contentType)||(cfg().fps30&&+v.framerate>30)))return Promise.resolve({supported:false,smooth:false,powerEfficient:false});return d(c)}}"
     "})();";
 }
-static void FlintCodecInstall(WKUserContentController *ucc) {
+static void IrisCodecInstall(WKUserContentController *ucc) {
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:CodecConfigJS() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:CodecScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
 }
 // A settings change adds a newer config (it runs later, so it wins); pages pick it up when they next load.
-static void FlintCodecChanged(void) {
+static void IrisCodecChanged(void) {
     for (WKUserContentController *u in @[gUCC ?: (id)NSNull.null, gPrivUCC ?: (id)NSNull.null]) {
         if (![u isKindOfClass:WKUserContentController.class]) continue;
         [u addUserScript:[[WKUserScript alloc] initWithSource:CodecConfigJS() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
@@ -4019,7 +4461,7 @@ static void ApplyThrottle(WKWebView *w, BOOL hard) {
     if ([p respondsToSelector:a]) ((void (*)(id, SEL, BOOL))objc_msgSend)(p, a, hard);
 }
 
-static WKWebViewConfiguration *FlintConfig(void) {
+static WKWebViewConfiguration *IrisConfig(void) {
     if (!gUCC) {
         gPool = MakeProcessPool();
         // extension pages (chrome-extension://) count as secure, like in Chrome, so crypto.subtle etc. work
@@ -4028,16 +4470,16 @@ static WKWebViewConfiguration *FlintConfig(void) {
         SEL csp = NSSelectorFromString(@"_registerURLSchemeAsBypassingContentSecurityPolicy:");
         if ([gPool respondsToSelector:csp]) ((void (*)(id, SEL, id))objc_msgSend)(gPool, csp, @"chrome-extension");
         gUCC = [WKUserContentController new];
-        // Flint's own page helpers run in their own JavaScript world: pages can't see or spoof them
-        WKContentWorld *mine = [WKContentWorld worldWithName:@"flint"];
+        // Iris's own page helpers run in their own JavaScript world: pages can't see or spoof them
+        WKContentWorld *mine = [WKContentWorld worldWithName:@"iris"];
         [gUCC addUserScript:[[WKUserScript alloc] initWithSource:HoverScript() injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES inContentWorld:mine]];
-        [gUCC addScriptMessageHandler:[VHoverRelay new] contentWorld:mine name:@"flintHover"];
+        [gUCC addScriptMessageHandler:[VHoverRelay new] contentWorld:mine name:@"irisHover"];
         [gUCC addUserScript:[[WKUserScript alloc] initWithSource:ContextScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
-        [gUCC addScriptMessageHandler:[VContextRelay new] contentWorld:mine name:@"flintContext"];
+        [gUCC addScriptMessageHandler:[VContextRelay new] contentWorld:mine name:@"irisContext"];
         [gUCC addUserScript:[[WKUserScript alloc] initWithSource:WebStoreScript() injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES inContentWorld:mine]];
-        [gUCC addScriptMessageHandler:[VInstallRelay new] contentWorld:mine name:@"flintInstall"];
-        FlintCosmeticInstall(gUCC);
-        FlintCodecInstall(gUCC);
+        [gUCC addScriptMessageHandler:[VInstallRelay new] contentWorld:mine name:@"irisInstall"];
+        IrisCosmeticInstall(gUCC);
+        IrisCodecInstall(gUCC);
         // Global Privacy Control: tells sites you don't consent to your data being sold or shared
         if ([Defaults() boolForKey:kGPC])
             [gUCC addUserScript:[[WKUserScript alloc] initWithSource:@"try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true})}catch(e){}"
@@ -4063,36 +4505,36 @@ static WKWebViewConfiguration *FlintConfig(void) {
     if ([Defaults() integerForKey:kUserAgent] == 1) c.applicationNameForUserAgent = @"Chrome/140.0.0.0 Safari/537.36";
     if (@available(macOS 12.0, *)) c.upgradeKnownHostsToHTTPS = YES;
     [FExtHost.shared install:gUCC config:c];
-    FlintInternalInstall(c, gUCC);
+    IrisInternalInstall(c, gUCC);
     return c;
 }
 
 // Private windows: same engine settings, but their own in-memory website data and no extensions.
 static WKWebViewConfiguration *PrivateConfig(WKWebsiteDataStore *store) {
-    WKWebViewConfiguration *c = FlintConfig();
+    WKWebViewConfiguration *c = IrisConfig();
     if (!gPrivUCC) {
         gPrivUCC = [WKUserContentController new];
-        WKContentWorld *mine = [WKContentWorld worldWithName:@"flint"];
+        WKContentWorld *mine = [WKContentWorld worldWithName:@"iris"];
         [gPrivUCC addUserScript:[[WKUserScript alloc] initWithSource:HoverScript() injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES inContentWorld:mine]];
-        [gPrivUCC addScriptMessageHandler:[VHoverRelay new] contentWorld:mine name:@"flintHover"];
+        [gPrivUCC addScriptMessageHandler:[VHoverRelay new] contentWorld:mine name:@"irisHover"];
         [gPrivUCC addUserScript:[[WKUserScript alloc] initWithSource:ContextScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
-        [gPrivUCC addScriptMessageHandler:[VContextRelay new] contentWorld:mine name:@"flintContext"];
+        [gPrivUCC addScriptMessageHandler:[VContextRelay new] contentWorld:mine name:@"irisContext"];
         if ([Defaults() boolForKey:kGPC])
             [gPrivUCC addUserScript:[[WKUserScript alloc] initWithSource:@"try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true})}catch(e){}"
                                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
-        FlintCosmeticInstall(gPrivUCC);
-        FlintCodecInstall(gPrivUCC);
-        FlintApplyRules();
+        IrisCosmeticInstall(gPrivUCC);
+        IrisCodecInstall(gPrivUCC);
+        IrisApplyRules();
     }
     c.userContentController = gPrivUCC;
-    FlintInternalInstall(c, gPrivUCC);
+    IrisInternalInstall(c, gPrivUCC);
     c.websiteDataStore = store ?: WKWebsiteDataStore.nonPersistentDataStore;
     return c;
 }
 
-// A profile's pages: everything as usual (extensions, blocking, Flint's helpers), with that profile's own website data.
+// A profile's pages: everything as usual (extensions, blocking, Iris's helpers), with that profile's own website data.
 static WKWebViewConfiguration *ProfileConfig(NSString *pid) {
-    WKWebViewConfiguration *c = FlintConfig();
+    WKWebViewConfiguration *c = IrisConfig();
     if (pid.length) c.websiteDataStore = ProfileStore(pid);
     return c;
 }
@@ -4110,7 +4552,7 @@ static NSString *RuleHostRegex(NSString *h) {
     return r;
 }
 
-static void FlintApplyRules(void) {
+static void IrisApplyRules(void) {
     for (WKUserContentController *u in @[gUCC ?: (id)NSNull.null, gPrivUCC ?: (id)NSNull.null]) {
         if (![u isKindOfClass:WKUserContentController.class]) continue;
         [u removeAllContentRuleLists];
@@ -4120,10 +4562,25 @@ static void FlintApplyRules(void) {
     }
 }
 
-static void FlintSetBlocking(BOOL on) { gBlockOn = on; FlintApplyRules(); }
+static void IrisSetBlocking(BOOL on) { gBlockOn = on; IrisApplyRules(); }
+
+static BOOL BlockerSiteSwitch(void) {   // WebKit can switch content blockers off for one page
+    static int has = -1;
+    if (has < 0) has = [WKWebpagePreferences instancesRespondToSelector:NSSelectorFromString(@"_setContentBlockersEnabled:")] ? 1 : 0;
+    return has == 1;
+}
+static BOOL SiteAllowlisted(NSString *host) {
+    host = host.lowercaseString; if (!host.length) return NO;
+    for (NSString *a in [Defaults() arrayForKey:kAllowlist] ?: @[]) {
+        if (![a isKindOfClass:NSString.class] || !a.length) continue;
+        NSString *e = [a.lowercaseString hasPrefix:@"www."] ? [a.lowercaseString substringFromIndex:4] : a.lowercaseString;
+        if ([host isEqualToString:e] || [host hasSuffix:[@"." stringByAppendingString:e]]) return YES;
+    }
+    return NO;
+}
 
 static NSString *RulesFingerprint(NSString *dir, NSArray *allow) {
-    NSMutableString *fp = [NSMutableString stringWithString:@"v2|"];
+    NSMutableString *fp = [NSMutableString stringWithString:@"v3|"];
     for (NSString *f in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
         NSDictionary *a = [NSFileManager.defaultManager attributesOfItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
         [fp appendFormat:@"%@:%llu:%.0f|", f, a.fileSize, a.fileModificationDate.timeIntervalSince1970];
@@ -4132,15 +4589,58 @@ static NSString *RulesFingerprint(NSString *dir, NSArray *allow) {
     return fp;
 }
 
+// Compiles the lists into WebKit's store. A list WebKit refuses is split in half and tried again, so one rule it
+// can't take costs only its neighbours, never the whole blocker.
+static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInteger count, NSDate *t0, void (^finish)(NSArray *, NSUInteger)) {
+    NSMutableArray<NSArray *> *queue = [lists mutableCopy];
+    NSMutableArray *done = [NSMutableArray array];
+    __block NSUInteger dropped = 0;
+    __block void (^next)(void);
+    __block void (^weakNext)(void);
+    next = ^{
+        if (!queue.count) {
+            // drop compiled lists from a previous run that are no longer used
+            [WKContentRuleListStore.defaultStore getAvailableContentRuleListIdentifiers:^(NSArray<NSString *> *ids) {
+                for (NSString *i in ids) if ([i hasPrefix:@"iris-block-"] && [[i substringFromIndex:11] integerValue] >= (NSInteger)done.count)
+                    [WKContentRuleListStore.defaultStore removeContentRuleListForIdentifier:i completionHandler:^(NSError *e) {}];
+            }];
+            [Defaults() setObject:fp forKey:@"ruleFingerprint"];
+            [Defaults() setInteger:(NSInteger)done.count forKey:@"ruleListCount"];
+            [Defaults() setInteger:(NSInteger)count forKey:@"ruleHostCount"];
+            finish(done, count);
+            DLog(@"blocker: %lu rules in %lu lists, ready in %.1fs%@", (unsigned long)count, (unsigned long)done.count, -t0.timeIntervalSinceNow,
+                 dropped ? [NSString stringWithFormat:@" (%lu rules WebKit refused)", (unsigned long)dropped] : @"");
+            weakNext = nil; next = nil;
+            return;
+        }
+        NSArray *body = queue.firstObject[0], *tail = queue.firstObject[1]; [queue removeObjectAtIndex:0];
+        NSArray *rules = [body arrayByAddingObjectsFromArray:tail];
+        NSString *json = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:rules options:0 error:nil] encoding:NSUTF8StringEncoding];
+        NSString *ident = [NSString stringWithFormat:@"iris-block-%lu", (unsigned long)done.count];
+        [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) {
+            if (list) [done addObject:list];
+            else if (body.count > 200) {   // split the list's own rules; each half keeps the exceptions
+                DLog(@"rule list of %lu refused (%@): splitting", (unsigned long)rules.count, err.localizedDescription);
+                NSUInteger h = body.count / 2;
+                [queue insertObject:@[[body subarrayWithRange:NSMakeRange(h, body.count - h)], tail] atIndex:0];
+                [queue insertObject:@[[body subarrayWithRange:NSMakeRange(0, h)], tail] atIndex:0];
+            } else { dropped += body.count; DLog(@"rule list of %lu dropped: %@", (unsigned long)rules.count, err.localizedDescription); }
+            dispatch_async(dispatch_get_main_queue(), weakNext);
+        }];
+    };
+    weakNext = next;
+    dispatch_async(dispatch_get_main_queue(), next);
+}
+
 static void (^gRulesWaiter)(void);
-static void FlintReloadBlocklistsThen(void (^then)(void)) {
+static void IrisReloadBlocklistsThen(void (^then)(void)) {
     NSString *dir = SupportFile(@"lists");
-    NSArray *allow = [Defaults() arrayForKey:kAllowlist] ?: @[];
+    NSArray *allow = BlockerSiteSwitch() ? @[] : [Defaults() arrayForKey:kAllowlist] ?: @[];   // per page when WebKit can, else compiled in
     NSString *fp = RulesFingerprint(dir, allow);
     gRulesWaiter = then;
     void (^finish)(NSArray *, NSUInteger) = ^(NSArray *lists, NSUInteger count) {
         gRules = lists; gRuleCount = count;
-        FlintApplyRules();
+        IrisApplyRules();
         void (^w)(void) = gRulesWaiter; gRulesWaiter = nil; if (w) w();
     };
     // Same lists as last time: WebKit already has them compiled on disk.
@@ -4149,72 +4649,69 @@ static void FlintReloadBlocklistsThen(void (^then)(void)) {
         NSMutableArray *found = [NSMutableArray array];
         __block NSUInteger pending = cached; __block BOOL missing = NO;
         for (NSUInteger k = 0; k < cached; k++) {
-            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:[NSString stringWithFormat:@"flint-block-%lu", (unsigned long)k] completionHandler:^(WKContentRuleList *l, NSError *e) {
+            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:[NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k] completionHandler:^(WKContentRuleList *l, NSError *e) {
                 if (l) [found addObject:l]; else missing = YES;
                 if (--pending) return;
                 if (!missing) { finish(found, (NSUInteger)[Defaults() integerForKey:@"ruleHostCount"]); DLog(@"blocker: %lu cached lists", (unsigned long)found.count); }
-                else { [Defaults() removeObjectForKey:@"ruleFingerprint"]; FlintReloadBlocklistsThen(gRulesWaiter); }
+                else { [Defaults() removeObjectForKey:@"ruleFingerprint"]; IrisReloadBlocklistsThen(gRulesWaiter); }
             }];
         }
         return;
     }
+    // A build takes minutes on an Intel Mac: one at a time, and the previous lists keep blocking until the new ones are ready.
+    static BOOL compiling, again;
+    if (compiling) { again = YES; return; }
+    compiling = YES;
+    if (!gRules.count && cached) {
+        NSMutableArray *old = [NSMutableArray array]; __block NSUInteger pending = cached;
+        for (NSUInteger k = 0; k < cached; k++)
+            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:[NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k] completionHandler:^(WKContentRuleList *l, NSError *e) {
+                if (l) [old addObject:l];
+                if (--pending || !old.count || gRules.count) return;
+                gRules = old; gRuleCount = (NSUInteger)[Defaults() integerForKey:@"ruleHostCount"]; IrisApplyRules();
+                DLog(@"blocker: last lists in use while the new ones build");
+            }];
+    }
+    void (^outer)(NSArray *, NSUInteger) = finish;
+    finish = ^(NSArray *lists, NSUInteger count) {
+        outer(lists, count);
+        compiling = NO;
+        if (again) { again = NO; IrisReloadBlocklistsThen(nil); }
+    };
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSMutableSet<NSString *> *hosts = [NSMutableSet set], *exc = [NSMutableSet set];
-        for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) {
-            if (![f.pathExtension isEqualToString:@"txt"]) continue;
-            NSString *text = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil];
-            for (NSString *raw in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
-                NSString *l = Trim(raw); BOOL x = NO;
-                if ([l hasPrefix:@"@@||"]) { x = YES; l = [l substringFromIndex:4]; } else if ([l hasPrefix:@"||"]) l = [l substringFromIndex:2]; else continue;
-                NSString *opts = @""; NSRange d = [l rangeOfString:@"$"];
-                if (d.location != NSNotFound) { opts = [l substringFromIndex:d.location + 1]; l = [l substringToIndex:d.location]; }
-                if (opts.length && ![opts isEqualToString:@"third-party"] && ![opts isEqualToString:@"3p"] && ![opts isEqualToString:@"important"] && !(x && [opts containsString:@"document"])) continue;
-                while ([l hasSuffix:@"^"] || [l hasSuffix:@"|"]) l = [l substringToIndex:l.length - 1];
-                if (!l.length || [l rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/*^"]].location != NSNotFound || ![l containsString:@"."]) continue;
-                [(x ? exc : hosts) addObject:l.lowercaseString];
-            }
-        }
-        [hosts minusSet:exc];
-        // WebKit allows 150k rules per list; 40k per list keeps each compile quick. Every list ends with the
-        // sites you've turned blocking off for (ignore-previous-rules only reaches rules in its own list).
-        NSArray *all = [hosts.allObjects sortedArrayUsingSelector:@selector(compare:)];
-        NSMutableArray *chunks = [NSMutableArray array];
-        for (NSUInteger i = 0; i < MAX(all.count, 1); i += 40000) {
-            NSMutableArray *rules = [NSMutableArray array];
-            for (NSString *h in all.count ? [all subarrayWithRange:NSMakeRange(i, MIN(40000, all.count - i))] : @[]) {
-                NSString *rx = RuleHostRegex(h); if (!rx) continue;
-                [rules addObject:@{@"trigger": @{@"url-filter": [NSString stringWithFormat:@"^[a-z]+://([^/:]+\\.)?%@[:/]", rx], @"load-type": @[@"third-party"]},
-                                   @"action": @{@"type": @"block"}}];
-            }
-            if (!rules.count) [rules addObject:@{@"trigger": @{@"url-filter": @"^flint-never:"}, @"action": @{@"type": @"block"}}];
-            for (NSString *site in allow) if ([site isKindOfClass:NSString.class] && RuleHostRegex(site))
-                [rules addObject:@{@"trigger": @{@"url-filter": @".*", @"if-top-url": @[[NSString stringWithFormat:@"^[a-z]+://([^/:]+\\.)?%@[:/]", RuleHostRegex(site)]]},
-                                   @"action": @{@"type": @"ignore-previous-rules"}}];
-            [chunks addObject:[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:rules options:0 error:nil] encoding:NSUTF8StringEncoding]];
-        }
-        NSUInteger count = all.count;
+        NSDate *t0 = NSDate.date;
+        FLRules *R = FLParse(dir);
+        NSMutableOrderedSet *sels = [NSMutableOrderedSet orderedSetWithOrderedSet:R.generic];
+        for (NSString *k in R.specific) [sels unionOrderedSet:R.specific[k]];
+        DLog(@"blocker: parsed %lu block, %lu important, %lu exception rules, %lu selectors in %.1fs", (unsigned long)R.block.count, (unsigned long)R.important.count,
+             (unsigned long)R.allow.count, (unsigned long)sels.count, -t0.timeIntervalSinceNow);
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSMutableArray *lists = [NSMutableArray array];
-            __block NSUInteger pending = chunks.count;
-            NSDate *t0 = NSDate.date;
-            for (NSUInteger k = 0; k < chunks.count; k++) {
-                NSString *ident = [NSString stringWithFormat:@"flint-block-%lu", (unsigned long)k];
-                [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:chunks[k] completionHandler:^(WKContentRuleList *list, NSError *err) {
-                    if (list) [lists addObject:list]; else DLog(@"rule list %@ failed: %@", ident, err);
-                    if (--pending) return;
-                    if (lists.count == chunks.count) {
-                        [Defaults() setObject:fp forKey:@"ruleFingerprint"];
-                        [Defaults() setInteger:(NSInteger)lists.count forKey:@"ruleListCount"];
-                        [Defaults() setInteger:(NSInteger)count forKey:@"ruleHostCount"];
+            [FLSelectorCheck check:sels.array done:^(NSSet *valid) {
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    // the sites you've turned blocking off for close every list (ignore-previous-rules only reaches its own list)
+                    NSMutableArray *off = [NSMutableArray array];
+                    // (if-domain, not if-top-url: WebKit won't mix the two kinds in one list, and the filters use if-domain)
+                    for (NSString *site in allow) { NSString *w = [site isKindOfClass:NSString.class] ? FLDomain(site) : nil; if (!w) continue;
+                        [off addObject:@{@"trigger": @{@"url-filter": @".*", @"if-domain": @[w]}, @"action": @{@"type": @"ignore-previous-rules"}}]; }
+                    NSMutableArray<NSArray *> *lists = [NSMutableArray array];
+                    // network: 30k rules per list keeps each compile quick; every list carries all the exceptions
+                    for (NSUInteger i = 0; i < R.block.count; i += 30000) {
+                        [lists addObject:@[[R.block subarrayWithRange:NSMakeRange(i, MIN(30000, R.block.count - i))], [R.allow arrayByAddingObjectsFromArray:off]]];
                     }
-                    finish(lists, count);
-                    DLog(@"blocker: %lu hosts in %lu lists, compiled in %.1fs", (unsigned long)count, (unsigned long)lists.count, -t0.timeIntervalSinceNow);
-                }];
-            }
+                    if (R.important.count) [lists addObject:@[R.important, off]];   // $important: no exception reaches it
+                    NSArray *cos = FLCosmeticRules(R, valid);
+                    for (NSUInteger i = 0; i < cos.count; i += 40000) {
+                        [lists addObject:@[[cos subarrayWithRange:NSMakeRange(i, MIN(40000, cos.count - i))], off]];
+                    }
+                    if (!lists.count) [lists addObject:@[@[@{@"trigger": @{@"url-filter": @"^iris-never:"}, @"action": @{@"type": @"block"}}], @[]]];
+                    NSUInteger count = R.block.count + R.important.count + valid.count;
+                    dispatch_async(dispatch_get_main_queue(), ^{ IrisCompileRuleLists(lists, fp, count, t0, finish); });
+                });
+            }];
         });
     });
 }
-static void FlintReloadBlocklists(void) { FlintReloadBlocklistsThen(nil); }
+static void IrisReloadBlocklists(void) { IrisReloadBlocklistsThen(nil); }
 
 #pragma mark - Page view
 
@@ -4223,14 +4720,191 @@ static void FlintReloadBlocklists(void) { FlintReloadBlocklistsThen(nil); }
 @end
 
 @implementation FWebView
-// What's under the pointer, reported by Flint's own script (its own world, so pages can't fake it)
+// What's under the pointer, reported by Iris's own script (its own world, so pages can't fake it)
 // a moment before WebKit asks for the menu.
 - (void)setContext:(NSDictionary *)c { _ctx = c; _ctxAt = NSDate.timeIntervalSinceReferenceDate; }
 
-// Safari's context menu (Look Up, Translate, Share, spelling…) with Chrome's link/image/page items added.
+#pragma mark Iris's own right-click menu
+
+// Right-click on a page opens Iris's menu: quick actions across the top (back, forward, reload, bookmark, share),
+// then what you clicked on — the selection, the link, the image, the video — each under a small header naming it,
+// then the page. Text fields keep macOS's own menu (spelling, Writing Tools, autofill), with the same icons;
+// hold ⌥ while right-clicking for the full system menu anywhere.
+static NSString *MenuShort(NSString *s, NSUInteger n) {
+    s = [[s stringByReplacingOccurrencesOfString:@"\n" withString:@" "] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    return s.length > n ? [[s substringToIndex:n - 1] stringByAppendingString:@"…"] : s;
+}
+static NSString *MenuURLLabel(NSString *u) {
+    NSURL *x = [NSURL URLWithString:u ?: @""]; if (!x.host) return MenuShort(u ?: @"", 48);
+    NSString *h = [x.host hasPrefix:@"www."] ? [x.host substringFromIndex:4] : x.host;
+    NSString *p = x.path.length > 1 ? x.path : @"";
+    return MenuShort([h stringByAppendingString:p], 52);
+}
+- (NSMenu *)irisMenu:(NSDictionary *)c {
+    NSString *(^str)(NSString *) = ^NSString *(NSString *k) { id v = c[k]; return [v isKindOfClass:NSString.class] && [v length] ? v : nil; };
+    NSString *link = str(@"link"), *image = str(@"image"), *video = str(@"video"), *sel = str(@"selection");
+    if ([link hasPrefix:@"javascript:"]) link = nil;
+    VWindow *W = self.page.tab.owner ?: gWin;
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@""]; m.autoenablesItems = NO;
+    NSMenuItem *(^mk)(NSString *, SEL, id, id) = ^NSMenuItem *(NSString *t, SEL a, id target, id obj) {
+        NSMenuItem *i = [[NSMenuItem alloc] initWithTitle:t action:a keyEquivalent:@""]; i.target = target; i.representedObject = obj; return i;
+    };
+    NSMenuItem *(^add)(NSString *, SEL, id, id) = ^NSMenuItem *(NSString *t, SEL a, id target, id obj) { NSMenuItem *i = mk(t, a, target, obj); [m addItem:i]; return i; };
+    void (^keys)(NSMenuItem *, NSString *, NSEventModifierFlags) = ^(NSMenuItem *i, NSString *k, NSEventModifierFlags f) { i.keyEquivalent = k; i.keyEquivalentModifierMask = f; };
+    void (^sep)(void) = ^{ [m addItem:NSMenuItem.separatorItem]; };
+    void (^head)(NSString *) = ^(NSString *t) { sep(); [m addItem:[[NSMenuItem alloc] initWithTitle:t action:nil keyEquivalent:@""]]; };
+    NSString *page = self.URL.absoluteString;
+    BOOL web = [self.URL.scheme hasPrefix:@"http"];
+
+    // quick actions for the page, always there
+    NSMenuItem *bk = mk(@"Back", @selector(irisBack:), self, nil); bk.enabled = self.page.canGoBack;
+    NSMenuItem *fw = mk(@"Forward", @selector(irisForward:), self, nil); fw.enabled = self.page.canGoForward;
+    NSMenuItem *rl = mk(self.loading ? @"Stop" : @"Reload", @selector(irisReload:), self, nil);
+    BOOL saved = page && [VBookmarks.shared find:page] != nil;
+    NSMenuItem *st = mk(saved ? @"Saved" : @"Bookmark", @selector(toggleBookmark:), W, nil); st.enabled = web;
+    if (saved) { st.state = NSControlStateValueOn; st.onStateImage = Symbol(@"star.fill", 15.5, NSFontWeightRegular); }
+    NSMenuItem *sh = mk(@"Share", @selector(irisShare:), self, self.URL); sh.enabled = web;
+    MenuSetIconRow(m, @[bk, fw, rl, st, sh]);
+
+    if (sel) {
+        head([NSString stringWithFormat:@"“%@”", MenuShort(sel, 40)]);
+        keys(add(@"Copy", @selector(irisCopy:), self, nil), @"c", NSEventModifierFlagCommand);
+        add([NSString stringWithFormat:@"Search %@", Engine()[0]], @selector(searchFor:), W, sel);
+        NSURL *asURL = URLFromInput(sel);
+        if (asURL && [sel rangeOfString:@" "].location == NSNotFound && [sel containsString:@"."] && ![asURL.absoluteString containsString:@"q="])
+            add([NSString stringWithFormat:@"Go to %@", MenuShort(sel, 28)], @selector(openBookmarkInNewTab:), W, asURL.absoluteString);
+        add(@"Look Up", @selector(irisLookUp:), self, sel);
+        add(@"Share…", @selector(irisShare:), self, sel);
+    }
+    if (link) {
+        head(MenuURLLabel(link));
+        add(@"Open Link in New Tab", @selector(openBookmarkInNewTab:), W, link);
+        add(@"Open in Background Tab", @selector(openLinkInBackground:), W, link);
+        add(@"Open in Split View", @selector(splitLink:), W, link);
+        add(@"Peek Link", @selector(peekLink:), W, link);
+        add(@"Copy Link", @selector(copyText:), W, link);
+        NSURL *u = [NSURL URLWithString:link]; NSURL *clean = u ? StripTracking(u) : nil;
+        if (clean && ![clean.absoluteString isEqualToString:link]) add(@"Copy Clean Link", @selector(copyText:), W, clean.absoluteString);
+        add(@"Bookmark Link", @selector(bookmarkURL:), W, link);
+        add(@"Download Linked File", @selector(downloadURL:), W, link);
+        add(@"Open in Default Browser", @selector(openInDefaultBrowser:), W, link);
+    }
+    if (image) {
+        NSURL *iu = [NSURL URLWithString:image];
+        head(iu.host.length ? [@"Image · " stringByAppendingString:[iu.host hasPrefix:@"www."] ? [iu.host substringFromIndex:4] : iu.host] : @"Image");
+        add(@"Copy Image", @selector(irisCopyImage:), self, image).enabled = iu.host.length > 0;
+        add(@"Save Image As…", @selector(saveImageAs:), W, image);
+        add(@"Save Image to Downloads", @selector(downloadURL:), W, image);
+        add(@"Copy Image Address", @selector(copyText:), W, image);
+        add(@"Open Image in New Tab", @selector(openBookmarkInNewTab:), W, image);
+    }
+    if (video) {
+        head(@"Video");
+        add(@"Picture in Picture", @selector(pictureInPicture:), W, nil);
+        add(@"Loop", @selector(irisVideo:), self, @"loop").state = [c[@"vloop"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+        add([c[@"vmuted"] boolValue] ? @"Unmute" : @"Mute", @selector(irisVideo:), self, @"mute");
+        add([c[@"vcontrols"] boolValue] ? @"Hide Controls" : @"Show Controls", @selector(irisVideo:), self, @"controls");
+        NSMenuItem *sp = add(@"Playback Speed", nil, nil, nil);
+        NSMenu *spm = [[NSMenu alloc] initWithTitle:@""]; spm.autoenablesItems = NO;
+        double rate = [c[@"vrate"] doubleValue] ?: 1;
+        for (NSNumber *r in @[@0.5, @0.75, @1, @1.25, @1.5, @1.75, @2]) {
+            NSMenuItem *x = mk([r doubleValue] == 1 ? @"Normal" : [NSString stringWithFormat:@"%g×", r.doubleValue], @selector(irisVideo:), self, [NSString stringWithFormat:@"rate:%@", r]);
+            x.state = fabs(rate - r.doubleValue) < 0.01 ? NSControlStateValueOn : NSControlStateValueOff; [spm addItem:x];
+        }
+        sp.submenu = spm;
+        if (![video isEqualToString:@"x"] && ![video hasPrefix:@"blob:"]) {
+            add(@"Copy Video Address", @selector(copyText:), W, video);
+            add(@"Open Video in New Tab", @selector(openBookmarkInNewTab:), W, video);
+        }
+    }
+    if (!link && !image && !video && !sel) {   // the page itself
+        sep();
+        keys(add(@"Copy Page Link", @selector(copyText:), W, page), @"", 0);
+        NSURL *clean = self.URL ? StripTracking(self.URL) : nil;
+        if (clean && ![clean.absoluteString isEqualToString:page]) add(@"Copy Clean Page Link", @selector(copyText:), W, clean.absoluteString);
+        sep();
+        keys(add(@"Find on Page…", @selector(showFind:), W, nil), @"f", NSEventModifierFlagCommand);
+        if (web) keys(add(@"Reader", @selector(toggleReader:), W, nil), @"r", NSEventModifierFlagCommand | NSEventModifierFlagControl);
+        keys(add(@"Save Page As…", @selector(savePage:), W, nil), @"s", NSEventModifierFlagCommand | NSEventModifierFlagShift);
+        keys(add(@"Print…", @selector(printPage:), W, nil), @"p", NSEventModifierFlagCommand);
+        sep();
+        keys(add(@"View Page Source", @selector(viewSource:), W, nil), @"u", NSEventModifierFlagCommand | NSEventModifierFlagOption);
+        keys(add(@"Inspect Element", @selector(irisInspect:), self, nil), @"i", NSEventModifierFlagCommand | NSEventModifierFlagOption);
+        if (web) add(@"Open Page in Default Browser", @selector(openInDefaultBrowser:), W, page);
+    }
+    if (web) { sep(); add(@"Block Element…", @selector(blockElement:), W, nil); }
+    if (!self.page.tab.owner.isPrivate) {   // extensions' own items (chrome.contextMenus)
+        NSInteger before = m.numberOfItems;
+        [FExtHost.shared addMenuItemsTo:m context:c pageURL:page view:self];
+        if (m.numberOfItems > before && ![m itemAtIndex:before].isSeparatorItem) [m insertItem:NSMenuItem.separatorItem atIndex:before];
+    }
+    for (NSMenuItem *i in m.itemArray) if (i.action && !i.target) i.target = W;
+    return m;
+}
+- (void)irisBack:(id)s { [self.page goBack]; }
+- (void)irisForward:(id)s { [self.page goForward]; }
+- (void)irisReload:(id)s { if (self.loading) [self.page stop]; else [self.page reload]; }
+- (void)irisCopy:(id)s { [self.window makeFirstResponder:self]; [NSApp sendAction:@selector(copy:) to:self from:s]; }
+- (void)irisLookUp:(NSMenuItem *)m {
+    NSString *t = m.representedObject; if (!t.length) return;
+    [self showDefinitionForAttributedString:[[NSAttributedString alloc] initWithString:t attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:14]}] atPoint:_menuAt];
+}
+- (void)irisShare:(NSMenuItem *)m {
+    id item = m.representedObject; if (!item) return;
+    NSSharingServicePicker *pk = [[NSSharingServicePicker alloc] initWithItems:@[item]];
+    [pk showRelativeToRect:NSMakeRect(_menuAt.x, _menuAt.y, 1, 1) ofView:self preferredEdge:NSRectEdgeMaxY];
+}
+- (void)irisInspect:(id)s {
+    id i = nil; @try { i = [self valueForKey:@"_inspector"]; } @catch (NSException *e) {}
+    if (!i || ![i respondsToSelector:@selector(show)]) { [(self.page.tab.owner ?: gWin) showToast:@"Web Inspector isn't available"]; return; }
+    [i performSelector:@selector(show)];
+    SEL pick = NSSelectorFromString(@"toggleElementSelection");   // then click the element to inspect it
+    if ([i respondsToSelector:pick]) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ ((void (*)(id, SEL))objc_msgSend)(i, pick); });
+}
+- (void)irisVideo:(NSMenuItem *)m {
+    NSString *op = m.representedObject ?: @"";
+    NSString *js = [op isEqualToString:@"loop"] ? @"v.loop=!v.loop" : [op isEqualToString:@"mute"] ? @"v.muted=!v.muted" : [op isEqualToString:@"controls"] ? @"v.controls=!v.controls"
+                 : [op hasPrefix:@"rate:"] ? [NSString stringWithFormat:@"v.playbackRate=%g", [[op substringFromIndex:5] doubleValue]] : nil;
+    if (!js) return;
+    [self evaluateJavaScript:[NSString stringWithFormat:@"(()=>{const v=window.__irisCtxVideo;if(v){%@}})()", js] inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"iris"] completionHandler:nil];
+}
+// The image as you see it, fetched with this site's cookies (signed-in images too), onto the clipboard.
+- (void)irisCopyImage:(NSMenuItem *)m {
+    NSURL *u = [NSURL URLWithString:m.representedObject ?: @""]; if (!u) return;
+    VWindow *W = self.page.tab.owner ?: gWin; NSString *ref = self.URL.absoluteString;
+    void (^fetch)(NSArray<NSHTTPCookie *> *) = ^(NSArray<NSHTTPCookie *> *cookies) {
+        NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:u];
+        NSArray *mine = [cookies filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSHTTPCookie *k, NSDictionary *b) {
+            NSString *d = [k.domain hasPrefix:@"."] ? [k.domain substringFromIndex:1] : k.domain;
+            return [u.host isEqualToString:d] || [u.host hasSuffix:[@"." stringByAppendingString:d]]; }]];
+        [rq setAllHTTPHeaderFields:[NSHTTPCookie requestHeaderFieldsWithCookies:mine]];
+        if (ref) [rq setValue:ref forHTTPHeaderField:@"Referer"];
+        [[NSURLSession.sharedSession dataTaskWithRequest:rq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            NSImage *im = d ? [[NSImage alloc] initWithData:d] : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!im) { [W showToast:@"Couldn't copy that image"]; return; }
+                [NSPasteboard.generalPasteboard clearContents]; [NSPasteboard.generalPasteboard writeObjects:@[im]];
+                [W showToast:@"Image copied"];
+            });
+        }] resume];
+    };
+    WKHTTPCookieStore *store = self.configuration.websiteDataStore.httpCookieStore;
+    if (store) [store getAllCookies:fetch]; else fetch(@[]);
+}
+
+// WebKit's menu is about to show. Pages, links, images and video: Iris's menu instead. Text fields, or ⌥: the system's.
 - (void)willOpenMenu:(NSMenu *)menu withEvent:(NSEvent *)event {
     [super willOpenMenu:menu withEvent:event];
     NSDictionary *c = NSDate.timeIntervalSinceReferenceDate - _ctxAt < 2 ? _ctx : @{};
+    _menuAt = [self convertPoint:event.locationInWindow fromView:nil];
+    if (![c[@"editable"] boolValue] && !(event.modifierFlags & NSEventModifierFlagOption) && self.window) {
+        NSMenu *mine = [self irisMenu:c];
+        [menu removeAllItems];   // WebKit's own stays closed
+        NSPoint at = _menuAt;
+        __weak FWebView *ws = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ FWebView *me = ws; if (me.window) PopMenu(mine, at, me); });
+        return;
+    }
     NSString *(^str)(NSString *) = ^NSString *(NSString *k) { id v = c[k]; return [v isKindOfClass:NSString.class] && [v length] ? v : nil; };
     NSString *link = str(@"link"), *image = str(@"image"), *video = str(@"video"), *sel = str(@"selection");
     BOOL editable = [c[@"editable"] boolValue];
@@ -4310,6 +4984,7 @@ static void FlintReloadBlocklists(void) { FlintReloadBlocklistsThen(nil); }
         if ([menu itemAtIndex:k].isSeparatorItem && [menu itemAtIndex:k - 1].isSeparatorItem) [menu removeItemAtIndex:k];
     while (menu.numberOfItems && menu.itemArray.firstObject.isSeparatorItem) [menu removeItemAtIndex:0];
     while (menu.numberOfItems && menu.itemArray.lastObject.isSeparatorItem) [menu removeItemAtIndex:menu.numberOfItems - 1];
+    MenuAddSystemIcons(menu);
 }
 @end
 
@@ -4339,7 +5014,7 @@ static void *kKVO = &kKVO;
 }
 
 - (void)attach:(FWebView *)w {
-    if (!w) w = [[FWebView alloc] initWithFrame:self.bounds configuration:self.tab.owner ? [self.tab.owner pageConfig] : FlintConfig()];
+    if (!w) w = [[FWebView alloc] initWithFrame:self.bounds configuration:self.tab.owner ? [self.tab.owner pageConfig] : IrisConfig()];
     _web = w;
     w.page = self;
     w.frame = self.bounds;
@@ -4402,8 +5077,8 @@ static void *kKVO = &kKVO;
 
 #pragma mark Navigation
 
-// Flint marks a page as loading the moment you ask for it; WebKit's own flag decides when it's done. Some loads
-// (restored sessions, pages served from cache, single-page sites) finish without the change Flint listens for,
+// Iris marks a page as loading the moment you ask for it; WebKit's own flag decides when it's done. Some loads
+// (restored sessions, pages served from cache, single-page sites) finish without the change Iris listens for,
 // so while a page shows as loading this re-checks WebKit every 1.5 s and stops the bar when WebKit has.
 - (void)watchLoading {
     if (_watchingLoad) return;
@@ -4471,8 +5146,11 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     if (a.targetFrame.isMainFrame) {
         NSString *h = HostOf(u);
         prefs.allowsContentJavaScript = [Defaults() boolForKey:kScripts] && !(h.length && [[Defaults() arrayForKey:kJSOff] containsObject:h]);
+        // Blocking turned off for this site: WebKit skips the content blockers for this page (Safari's own per-site switch),
+        // so changing it never recompiles the lists.
+        if (BlockerSiteSwitch()) ((void (*)(id, SEL, BOOL))objc_msgSend)(prefs, NSSelectorFromString(@"_setContentBlockersEnabled:"), !SiteAllowlisted(u.host));
         // The tab coming back at launch: WebKit itself refuses playback (Safari's "Never Auto-Play") for this one
-        // page until you click or press a key in it, so nothing can start before Flint's own hold arrives.
+        // page until you click or press a key in it, so nothing can start before Iris's own hold arrives.
         if (self.tab.launchRestored && [u.scheme hasPrefix:@"http"]) {
             SEL s = NSSelectorFromString(@"_setAutoplayPolicy:");
             if ([prefs respondsToSelector:s]) { ((void (*)(id, SEL, NSUInteger))objc_msgSend)(prefs, s, 3); DLog(@"launch: WebKit autoplay denied for %@", HostOf(u)); }   // _WKWebsiteAutoplayPolicyDeny
@@ -4481,7 +5159,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     }
     // "Continue to the HTTP site" from the HTTPS-only page
     // "visit anyway" on the certificate warning: only a click on that warning, for that host, counts
-    if ([u.scheme isEqualToString:@"flint-cert"]) {
+    if ([u.scheme isEqualToString:@"iris-cert"]) {
         BOOL ok = u.host.length && a.navigationType == WKNavigationTypeLinkActivated && a.targetFrame.isMainFrame && [_certErrorFor isEqualToString:u.host.lowercaseString];
         if (!ok) { decide(WKNavigationActionPolicyCancel, prefs); return; }
         if (!gCertOK) gCertOK = [NSMutableSet set];
@@ -4491,7 +5169,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
         [w loadRequest:[NSURLRequest requestWithURL:c.URL]];
         return;
     }
-    if ([u.scheme isEqualToString:@"flint-http"]) {
+    if ([u.scheme isEqualToString:@"iris-http"]) {
         NSURLComponents *c = [NSURLComponents componentsWithURL:u resolvingAgainstBaseURL:NO]; c.scheme = @"http";
         if (!gHTTPAllowed) gHTTPAllowed = [NSMutableSet set];
         if (c.host) [gHTTPAllowed addObject:c.host];
@@ -4522,7 +5200,12 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
         done(WKNavigationActionPolicyCancel); return;
     }
     if (a.shouldPerformDownload) { done(WKNavigationActionPolicyDownload); return; }
-    if (scheme && ![@[@"http", @"https", @"file", @"about", @"data", @"blob", @"chrome-extension", @"javascript", @"flint-http", @"flint-cert", @"flint"] containsObject:scheme]) {
+    if (main && [scheme hasPrefix:@"flint"]) {   // addresses saved before the rename (flint://settings…) open their iris:// page
+        NSURL *now = [NSURL URLWithString:[@"iris" stringByAppendingString:[u.absoluteString substringFromIndex:5]]];
+        if (now) [w loadRequest:[NSURLRequest requestWithURL:now]];
+        done(WKNavigationActionPolicyCancel); return;
+    }
+    if (scheme && ![@[@"http", @"https", @"file", @"about", @"data", @"blob", @"chrome-extension", @"javascript", @"iris-http", @"iris-cert", @"iris"] containsObject:scheme]) {
         if (main || a.navigationType == WKNavigationTypeLinkActivated) [NSWorkspace.sharedWorkspace openURL:u];   // mailto:, zoommtg:, apps
         done(WKNavigationActionPolicyCancel); return;
     }
@@ -4538,7 +5221,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     NSString *disp = [(NSHTTPURLResponse *)r.response respondsToSelector:@selector(valueForHTTPHeaderField:)] ? [(NSHTTPURLResponse *)r.response valueForHTTPHeaderField:@"Content-Disposition"] : nil;
     BOOL isDownload = !r.canShowMIMEType || [disp.lowercaseString hasPrefix:@"attachment"];
     if (!isDownload) { done(WKNavigationResponsePolicyAllow); return; }
-    // Flint's accelerator takes plain GET downloads over http(s); everything else stays with WebKit
+    // Iris's accelerator takes plain GET downloads over http(s); everything else stays with WebKit
     NSURL *u = r.response.URL;
     BOOL ask = [Defaults() boolForKey:kAskDownload] || gAskNextDownload;
     if ([Defaults() boolForKey:kDLAccel] && !ask && [@[@"http", @"https"] containsObject:u.scheme.lowercaseString ?: @""] && [(_lastMethod ?: @"GET") isEqualToString:@"GET"]) {
@@ -4560,7 +5243,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     dispatch_async(dispatch_get_main_queue(), ^{ if (t && [PW.tabs containsObject:t]) [PW closeTab:t]; });
 }
 
-- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; }
+- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { self.blocked = 0; self.tab.blocked = 0; _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; }
 // The tab you had open at launch comes back paused, and stays paused until you click or press a key on it.
 // Playback is refused the way a browser's autoplay block refuses it (the page's play() is turned down with
 // "not allowed"), so YouTube shows its play button instead of starting and being stopped a moment later.
@@ -4568,7 +5251,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     if (!self.tab.launchRestored || ![_web.URL.scheme hasPrefix:@"http"]) return;
     self.tab.launchRestored = NO;
     DLog(@"launch: holding playback in %@ until you interact", HostOf(_web.URL));
-    [_web evaluateJavaScript:@"(()=>{if(window.__flintHold)return;window.__flintHold=1;let hold=true;const P=HTMLMediaElement.prototype,op=P.play;"
+    [_web evaluateJavaScript:@"(()=>{if(window.__irisHold)return;window.__irisHold=1;let hold=true;const P=HTMLMediaElement.prototype,op=P.play;"
         "P.play=function(){if(hold){try{this.pause()}catch(e){}return Promise.reject(new DOMException('Playback starts when you click','NotAllowedError'))}return op.apply(this,arguments)};"
         "const you=e=>{if(!e.isTrusted)return;hold=false;for(const t of['pointerdown','keydown'])removeEventListener(t,you,true)};"
         "for(const t of['pointerdown','keydown'])addEventListener(t,you,true);"
@@ -4607,9 +5290,9 @@ static NSString *ErrorPage(NSString *title, NSString *heading, NSString *body, N
     if ([e.domain isEqualToString:NSURLErrorDomain] && e.code == NSURLErrorCancelled) return;
     NSURL *wanted = _httpsUpgradeOf; _httpsUpgradeOf = nil;
     if (wanted) {
-        NSURLComponents *c = [NSURLComponents componentsWithURL:wanted resolvingAgainstBaseURL:NO]; c.scheme = @"flint-http";
+        NSURLComponents *c = [NSURLComponents componentsWithURL:wanted resolvingAgainstBaseURL:NO]; c.scheme = @"iris-http";
         NSString *html = ErrorPage(@"Not secure", [NSString stringWithFormat:@"%@ doesn't offer a secure connection", wanted.host],
-            @"<p>HTTPS-only mode is on, so Flint didn't open the insecure version. Anyone on your network could see or change what you send there.</p>",
+            @"<p>HTTPS-only mode is on, so Iris didn't open the insecure version. Anyone on your network could see or change what you send there.</p>",
             [NSString stringWithFormat:@"<a class=primary href=\"javascript:history.back()\">Go Back</a><a href=\"%@\">Continue to the HTTP Site</a>", ErrEsc(c.URL.absoluteString)], nil);
         [_web loadHTMLString:html baseURL:nil];
         self.loading = NO; self.title = wanted.host; self.url = wanted.absoluteString; [PW pageChanged:self];
@@ -4639,7 +5322,7 @@ static NSString *ErrorPage(NSString *title, NSString *heading, NSString *body, N
     BOOL cert = ssl;
     NSString *html;
     if (kind) {
-        NSURLComponents *c = [NSURLComponents componentsWithURL:failed resolvingAgainstBaseURL:NO]; c.scheme = @"flint-cert";
+        NSURLComponents *c = [NSURLComponents componentsWithURL:failed resolvingAgainstBaseURL:NO]; c.scheme = @"iris-cert";
         _certErrorFor = failed.host.lowercaseString;
         NSString *why = kind == 1 ? @"Its security certificate has expired or isn't valid yet." :
                         kind == 2 ? @"Its security certificate isn't trusted by this Mac — it may be self-signed or issued by an unknown authority." :
@@ -4648,10 +5331,10 @@ static NSString *ErrorPage(NSString *title, NSString *heading, NSString *body, N
         html = ErrorPage(@"Privacy error", [NSString stringWithFormat:@"Your connection to %@ isn't private", host],
             [NSString stringWithFormat:@"<p>%@ Someone could be trying to read or change what you send to this site, such as passwords or card numbers.</p>", ErrEsc(why)],
             @"<a class=primary href=\"javascript:history.length>1?history.back():location.replace('about:blank')\">Back to Safety</a>",
-            [NSString stringWithFormat:@"<details><summary>Details</summary><p><code>%@ (%ld)</code></p><p>If you understand the risk — for example, it's a device on your own network — you can <a href=\"%@\">visit %@ anyway</a>. Flint will allow it until you quit.</p></details>",
+            [NSString stringWithFormat:@"<details><summary>Details</summary><p><code>%@ (%ld)</code></p><p>If you understand the risk — for example, it's a device on your own network — you can <a href=\"%@\">visit %@ anyway</a>. Iris will allow it until you quit.</p></details>",
              ErrEsc(e.localizedDescription), (long)e.code, ErrEsc(c.URL.absoluteString), ErrEsc(host)]);
     } else {
-        NSString *why = e.code == NSURLErrorCannotFindHost ? @"Flint couldn't find this site. Check the address for typos, or your connection." :
+        NSString *why = e.code == NSURLErrorCannotFindHost ? @"Iris couldn't find this site. Check the address for typos, or your connection." :
                         e.code == NSURLErrorNotConnectedToInternet ? @"You're offline. Check your Wi-Fi or network cable." :
                         e.code == NSURLErrorTimedOut ? @"The site took too long to respond." :
                         e.code == NSURLErrorCannotConnectToHost ? @"The site refused the connection." :
@@ -4699,7 +5382,7 @@ static NSString *ErrorPage(NSString *title, NSString *heading, NSString *body, N
     VTab *t = self.tab; NSURL *page = _web.URL;
     if (!t || !page) return;
     if ([page.scheme isEqualToString:@"chrome-extension"]) { t.favicon = [FExtHost.shared iconForID:page.host]; [PW refreshChrome]; return; }
-    if ([page.scheme isEqualToString:@"flint"]) {
+    if ([page.scheme isEqualToString:@"iris"]) {
         NSString *sym = @{@"bookmarks": @"book", @"history": @"clock.arrow.circlepath", @"reader": @"doc.plaintext", @"downloads": @"arrow.down.circle", @"settings": @"gearshape"}[page.host] ?: @"flame";
         t.favicon = Tinted(Symbol(sym, 13, NSFontWeightMedium), vDim); [PW refreshChrome]; return;
     }
@@ -4869,7 +5552,7 @@ static NSString *MediaKey(NSURL *u) {
 }
 
 // Location: a site asks, you answer once for that site (change it later from the lock, or Settings ▸ Site Settings).
-// WebKit gets the position from macOS Location Services, which asks you the first time Flint uses it.
+// WebKit gets the position from macOS Location Services, which asks you the first time Iris uses it.
 - (void)askPermission:(NSString *)key host:(NSString *)host noun:(NSString *)noun done:(void (^)(BOOL))done {
     host = host.lowercaseString ?: @"";
     NSInteger v = [[Defaults() dictionaryForKey:kSitePerms][host][key] integerValue];
@@ -4917,6 +5600,18 @@ static NSString *MediaKey(NSURL *u) {
     };
     sample();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_main_queue(), sample);   // late headers
+}
+
+// WebKit tells us each time a content rule acts (the built-in lists and extensions' rules alike):
+// every blocked load counts toward the number on the shield.
+- (void)_webView:(WKWebView *)w contentRuleListWithIdentifier:(NSString *)ident performedAction:(id)action forURL:(NSURL *)u {
+    SEL bl = NSSelectorFromString(@"blockedLoad");
+    if (![action respondsToSelector:bl] || !((BOOL (*)(id, SEL))objc_msgSend)(action, bl)) return;
+    self.blocked++; self.tab.blocked = self.blocked;
+    static BOOL queued;   // a busy page blocks dozens at once: one redraw for the lot
+    if (queued) return;
+    queued = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ queued = NO; for (VWindow *win in gWindows) [win refreshChrome]; });
 }
 
 #pragma mark Downloads
@@ -4993,7 +5688,7 @@ static NSString *MediaKey(NSURL *u) {
 #pragma mark - Element blocking (uBlock-style "block element")
 
 // Rules are kept per site as CSS selectors and hidden with a style sheet as each page starts.
-// Flint's own JavaScript world does the work, so pages can't see or tamper with it.
+// Iris's own JavaScript world does the work, so pages can't see or tamper with it.
 static NSString *const kCosmetic = @"cosmeticFilters";   // host → [selector]
 
 static NSString *SiteKey(NSString *host) {
@@ -5002,17 +5697,17 @@ static NSString *SiteKey(NSString *host) {
 }
 
 static NSString *CosmeticScript(void) {
-    return @"(()=>{if(!/^https?:$/.test(location.protocol))return;try{webkit.messageHandlers.flintCosmetic.postMessage({op:'get',host:location.hostname}).then(list=>{"
-            "if(!list||!list.length)return;const s=document.createElement('style');s.id='flint-cosmetic';"
+    return @"(()=>{if(!/^https?:$/.test(location.protocol))return;try{webkit.messageHandlers.irisCosmetic.postMessage({op:'get',host:location.hostname}).then(list=>{"
+            "if(!list||!list.length)return;const s=document.createElement('style');s.id='iris-cosmetic';"
             "s.textContent=list.map(x=>x+'{display:none!important}').join('\\n');"
             "const put=()=>(document.head||document.documentElement).appendChild(s);document.documentElement?put():document.addEventListener('readystatechange',put,{once:true})})}catch(e){}})();";
 }
 
 static NSString *PickerScript(void) {
     return @"(()=>{"
-    "if(window.__flintPicker)window.__flintPicker.stop();"
+    "if(window.__irisPicker)window.__irisPicker.stop();"
     "const doc=document,root=doc.documentElement,esc=CSS.escape;"
-    "const host=doc.createElement('flint-picker');const sh=host.attachShadow({mode:'closed'});"
+    "const host=doc.createElement('iris-picker');const sh=host.attachShadow({mode:'closed'});"
     "host.style.cssText='all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none';"
     "sh.innerHTML='<style>"
       ".box{position:fixed;pointer-events:none;background:rgba(140,150,255,.16);outline:2px solid rgba(140,150,255,.85);border-radius:3px;transition:all .05s}"
@@ -5057,14 +5752,14 @@ static NSString *PickerScript(void) {
     "addEventListener('click',click,opts);addEventListener('keydown',key,opts);addEventListener('scroll',scroll,{capture:true,passive:true});"
     "input.addEventListener('input',()=>{try{const m=doc.querySelector(input.value);if(m){cur=m;const r=m.getBoundingClientRect();Object.assign(box.style,{left:r.left+'px',top:r.top+'px',width:r.width+'px',height:r.height+'px'})}}catch(e){}upd()});"
     "const stop=()=>{removeEventListener('mousemove',move,opts);for(const t of['mousedown','mouseup','pointerdown','pointerup','auxclick','contextmenu'])removeEventListener(t,swallow,opts);"
-      "removeEventListener('click',click,opts);removeEventListener('keydown',key,opts);removeEventListener('scroll',scroll,{capture:true});host.remove();window.__flintPicker=null};"
+      "removeEventListener('click',click,opts);removeEventListener('keydown',key,opts);removeEventListener('scroll',scroll,{capture:true});host.remove();window.__irisPicker=null};"
     "const block=()=>{const s=input.value.trim();if(!s||go.disabled)return;"
-      "let st=doc.getElementById('flint-cosmetic');if(!st){st=doc.createElement('style');st.id='flint-cosmetic';(doc.head||root).appendChild(st)}"
+      "let st=doc.getElementById('iris-cosmetic');if(!st){st=doc.createElement('style');st.id='iris-cosmetic';(doc.head||root).appendChild(st)}"
       "st.textContent+='\\n'+s+'{display:none!important}';"
-      "webkit.messageHandlers.flintCosmetic.postMessage({op:'add',host:location.hostname,selector:s});stop()};"
+      "webkit.messageHandlers.irisCosmetic.postMessage({op:'add',host:location.hostname,selector:s});stop()};"
     "sh.querySelector('.cancel').onclick=stop;go.onclick=block;"
-    "window.__flintPicker={stop};"
-    "const start=window.__flintCtxEl;window.__flintCtxEl=null;if(start&&start.isConnected){locked=true;show(start)}"
+    "window.__irisPicker={stop};"
+    "const start=window.__irisCtxEl;window.__irisCtxEl=null;if(start&&start.isConnected){locked=true;show(start)}"
     "})();";
 }
 
@@ -5086,7 +5781,7 @@ static NSString *ConsentScript(void) {
     "const frameIsCmp=window!==top&&/privacy-mgmt|consent|cmp|sourcepoint|cookie/i.test(location.hostname+location.pathname);"
     "let done=false,tries=0,timer=0;"
     "const vis=el=>{const r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;const s=getComputedStyle(el);return s.visibility!=='hidden'&&s.display!=='none'&&+s.opacity>0.05};"
-    "const press=el=>{done=true;try{el.click()}catch(e){}try{webkit.messageHandlers.flintCosmetic.postMessage({op:'consented',host:location.hostname,top:window===top})}catch(e){}};"
+    "const press=el=>{done=true;try{el.click()}catch(e){}try{webkit.messageHandlers.irisCosmetic.postMessage({op:'consented',host:location.hostname,top:window===top})}catch(e){}};"
     "const roots=()=>{const out=[document];for(const h of document.querySelectorAll('#usercentrics-root,#usercentrics-cmp-ui,[id*=consent i],[class*=consent i]'))if(h.shadowRoot)out.push(h.shadowRoot);return out};"
     // only places that call themselves cookie/consent are searched, so ordinary pages cost next to nothing
     "const boxes=()=>{if(frameIsCmp)return[document];const out=new Set();for(const r of roots())for(const c of r.querySelectorAll(Q)){out.add(c);if(c.parentElement)out.add(c.parentElement)}return[...out].slice(0,30)};"
@@ -5097,7 +5792,7 @@ static NSString *ConsentScript(void) {
         "if(!t||t.length>60||!no.test(t)||yes.test(t))continue;if(vis(el)){press(el);return stop()}}};"
     "let mo;const stop=()=>{if(mo)mo.disconnect();clearTimeout(timer)};"
     "const later=()=>{if(timer||done)return;timer=setTimeout(()=>{timer=0;scan()},400)};"
-    "webkit.messageHandlers.flintCosmetic.postMessage({op:'consentOn',host:location.hostname}).then(on=>{if(!on)return;"
+    "webkit.messageHandlers.irisCosmetic.postMessage({op:'consentOn',host:location.hostname}).then(on=>{if(!on)return;"
       "const go=()=>{scan();if(done)return;mo=new MutationObserver(later);mo.observe(document.documentElement,{childList:true,subtree:true});setTimeout(stop,20000)};"
       "document.readyState==='loading'?document.addEventListener('DOMContentLoaded',go,{once:true}):go()}).catch(()=>{})})();";
 }
@@ -5140,7 +5835,7 @@ static NSString *ConsentScript(void) {
 @end
 
 // Scrollbars: when macOS shows classic always-on scroll bars (a mouse is connected, or "Show scroll bars: Always"),
-// WebKit draws them as a white trough with a grey bar on every page, light or dark. Flint draws a thin rounded
+// WebKit draws them as a white trough with a grey bar on every page, light or dark. Iris draws a thin rounded
 // thumb on a clear track instead, in a grey that sits on either. It goes in first, so a site's own scroll bar styling
 // still wins. With overlay scroll bars (trackpad only) macOS's own are already right and nothing is added.
 static NSString *ScrollbarScript(void) {
@@ -5150,16 +5845,16 @@ static NSString *ScrollbarScript(void) {
     "+'::-webkit-scrollbar-thumb:hover{background-color:rgba(128,128,128,.62)}'"
     "+'::-webkit-scrollbar-thumb:active{background-color:rgba(128,128,128,.75)}'"
     "+'::-webkit-scrollbar-button{display:none;width:0;height:0}';"
-    "const put=()=>{if(document.getElementById('flint-scrollbar'))return;const st=document.createElement('style');st.id='flint-scrollbar';st.textContent=css;"
+    "const put=()=>{if(document.getElementById('iris-scrollbar'))return;const st=document.createElement('style');st.id='iris-scrollbar';st.textContent=css;"
     "const r=document.documentElement;if(!r)return;r.insertBefore(st,r.firstChild)};"
     "put();document.addEventListener('DOMContentLoaded',put);})();";
 }
 
-// Location. WebKit inside an app doesn't get positions from macOS on its own, so Flint answers
+// Location. WebKit inside an app doesn't get positions from macOS on its own, so Iris answers
 // navigator.geolocation itself: the page's request comes here, the site is asked about once (remembered
 // per site), and the position comes from macOS Location Services (which asks you the first time).
 static NSString *GeoScript(void) {
-    return @"(()=>{const g=navigator.geolocation,h=window.webkit&&webkit.messageHandlers&&webkit.messageHandlers.flintGeo;if(!g||!h||window.__flintGeo)return;window.__flintGeo=1;"
+    return @"(()=>{const g=navigator.geolocation,h=window.webkit&&webkit.messageHandlers&&webkit.messageHandlers.irisGeo;if(!g||!h||window.__irisGeo)return;window.__irisGeo=1;"
             "const E=(c,m)=>({code:c,message:m,PERMISSION_DENIED:1,POSITION_UNAVAILABLE:2,TIMEOUT:3});"
             "const P=r=>({coords:{latitude:r.lat,longitude:r.lon,accuracy:r.acc,altitude:r.alt??null,altitudeAccuracy:r.altAcc??null,heading:null,speed:null},timestamp:Date.now()});"
             "const get=(ok,bad)=>h.postMessage({op:'get'}).then(r=>{if(r&&r.lat!=null){ok&&ok(P(r))}else if(bad)bad(E(r&&r.code||2,r&&r.msg||'Position unavailable'))},()=>bad&&bad(E(2,'Position unavailable')));"
@@ -5205,7 +5900,7 @@ static NSString *GeoScript(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ if (ws.waiting.count) [ws finish:@{@"code": @3, @"msg": @"Timeout expired"}]; });
 }
 - (void)denied {
-    [gWin showToast:@"Location is off for Flint: turn it on in System Settings ▸ Privacy & Security ▸ Location Services"];
+    [gWin showToast:@"Location is off for Iris: turn it on in System Settings ▸ Privacy & Security ▸ Location Services"];
     [self finish:@{@"code": @1, @"msg": @"User denied Geolocation"}];
 }
 - (void)finish:(NSDictionary *)answer {
@@ -5233,18 +5928,18 @@ static NSString *GeoScript(void) {
 }
 @end
 
-static void FlintCosmeticInstall(WKUserContentController *ucc) {
+static void IrisCosmeticInstall(WKUserContentController *ucc) {
     static NSHashTable *done; if (!done) done = [NSHashTable weakObjectsHashTable];
     if (!ucc || [done containsObject:ucc]) return;
     [done addObject:ucc];
-    WKContentWorld *mine = [WKContentWorld worldWithName:@"flint"];
+    WKContentWorld *mine = [WKContentWorld worldWithName:@"iris"];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:CosmeticScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:ConsentScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
     if (NSScroller.preferredScrollerStyle == NSScrollerStyleLegacy)
         [ucc addUserScript:[[WKUserScript alloc] initWithSource:ScrollbarScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:mine]];
-    [ucc addScriptMessageHandlerWithReply:VCosmetic.shared contentWorld:mine name:@"flintCosmetic"];
+    [ucc addScriptMessageHandlerWithReply:VCosmetic.shared contentWorld:mine name:@"irisCosmetic"];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:GeoScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
-    [ucc addScriptMessageHandlerWithReply:VGeo.shared contentWorld:WKContentWorld.pageWorld name:@"flintGeo"];
+    [ucc addScriptMessageHandlerWithReply:VGeo.shared contentWorld:WKContentWorld.pageWorld name:@"irisGeo"];
 }
 
 @implementation VWindow (Cosmetic)
@@ -5252,7 +5947,7 @@ static void FlintCosmeticInstall(WKUserContentController *ucc) {
     VPage *p = self.current.web;
     if (!p || ![p.web.URL.scheme hasPrefix:@"http"]) { [self showToast:@"Open a web page to block an element on it"]; return; }
     [self.window makeFirstResponder:p.web];
-    [p.web callAsyncJavaScript:PickerScript() arguments:@{} inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"flint"] completionHandler:nil];
+    [p.web callAsyncJavaScript:PickerScript() arguments:@{} inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"iris"] completionHandler:nil];
 }
 - (void)undoLastElement:(NSMenuItem *)i {
     NSString *site = i.representedObject;
@@ -5495,8 +6190,8 @@ static NSArray<NSDictionary *> *DNRConvert(NSDictionary *rule, DNRKind *kind, NS
     if (!res.count && ![perms containsObject:@"declarativeNetRequest"] && ![perms containsObject:@"declarativeNetRequestWithHostAccess"]) return;
     static dispatch_once_t probe;
     dispatch_once(&probe, ^{   // learn once whether this WebKit knows "load-context"
-        NSString *json = @"[{\"trigger\":{\"url-filter\":\"^flint-probe:\",\"resource-type\":[\"document\"],\"load-context\":[\"child-frame\"]},\"action\":{\"type\":\"block\"}}]";
-        [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"flint-dnr-probe" encodedContentRuleList:json completionHandler:^(WKContentRuleList *l, NSError *e) { gDNRLoadContext = l != nil; }];
+        NSString *json = @"[{\"trigger\":{\"url-filter\":\"^iris-probe:\",\"resource-type\":[\"document\"],\"load-context\":[\"child-frame\"]},\"action\":{\"type\":\"block\"}}]";
+        [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"iris-dnr-probe" encodedContentRuleList:json completionHandler:^(WKContentRuleList *l, NSError *e) { gDNRLoadContext = l != nil; }];
     });
     FDNRExt *x = [FDNRExt new];
     x.ident = ident; x.dir = dir; x.resources = res;
@@ -5515,7 +6210,7 @@ static NSArray<NSDictionary *> *DNRConvert(NSDictionary *rule, DNRKind *kind, NS
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self rebuild:x reply:nil]; });
 }
 
-- (void)forget:(NSString *)ident { [_exts removeObjectForKey:ident]; [gExtRuleLists removeObjectForKey:ident]; FlintApplyRules(); }
+- (void)forget:(NSString *)ident { [_exts removeObjectForKey:ident]; [gExtRuleLists removeObjectForKey:ident]; IrisApplyRules(); }
 
 - (NSString *)fingerprint:(FDNRExt *)x {
     NSMutableString *fp = [NSMutableString stringWithFormat:@"v2|lc%d|", gDNRLoadContext];   // bump when the translation changes
@@ -5540,7 +6235,7 @@ static NSArray<NSDictionary *> *DNRConvert(NSDictionary *rule, DNRKind *kind, NS
     NSString *fpKey = [@"dnr.fp." stringByAppendingString:x.ident], *idsKey = [@"dnr.lists." stringByAppendingString:x.ident];
     void (^finish)(NSArray *) = ^(NSArray *lists) {
         gExtRuleLists[x.ident] = lists ?: @[];
-        FlintApplyRules();
+        IrisApplyRules();
         x.compiling = NO;
         NSArray *w = x.waiters.copy; [x.waiters removeAllObjects];
         for (void (^b)(void) in w) b();
@@ -5607,7 +6302,7 @@ static NSArray<NSDictionary *> *DNRConvert(NSDictionary *rule, DNRKind *kind, NS
             NSMutableArray *lists = [NSMutableArray array], *ids = [NSMutableArray array];
             __block NSUInteger pending = chunks.count;
             for (NSUInteger k = 0; k < chunks.count; k++) {
-                [self compile:chunks[k] ident:[NSString stringWithFormat:@"flint-dnr-%@-%lu", x.ident, (unsigned long)k] into:lists ids:ids done:^{
+                [self compile:chunks[k] ident:[NSString stringWithFormat:@"iris-dnr-%@-%lu", x.ident, (unsigned long)k] into:lists ids:ids done:^{
                     if (--pending) return;
                     [Defaults() setObject:fp forKey:fpKey]; [Defaults() setObject:ids forKey:idsKey];
                     DLog(@"extension rules: %@ → %lu WebKit rules in %lu lists (%lu Chrome rules not expressible), %.1fs", x.ident, (unsigned long)total, (unsigned long)lists.count, (unsigned long)skipped, -t0.timeIntervalSinceNow);
@@ -5711,14 +6406,14 @@ static NSString *DNRUpdate(NSMutableArray *rules, NSDictionary *opts, NSUInteger
     }
     else if ([op isEqualToString:@"dnr.getDisabledRuleIds"]) { NSString *rid = o[@"rulesetId"]; reply([rid isKindOfClass:NSString.class] && [x.disabledStatic[rid] isKindOfClass:NSArray.class] ? x.disabledStatic[rid] : @[], nil); }
     else if ([op isEqualToString:@"dnr.getAvailableStaticRuleCount"]) reply(@(MAX(0, 330000 - (NSInteger)x.ruleCount)), nil);
-    else reply(nil, [@"Flint doesn't support " stringByAppendingString:op]);
+    else reply(nil, [@"Iris doesn't support " stringByAppendingString:op]);
 }
 @end
-#pragma mark - Extensions: Flint's own Chrome-extension layer on WebKit
-// Unpacked Chrome extensions live in ~/Library/Application Support/Flint/Extensions/<name>/.
+#pragma mark - Extensions: Iris's own Chrome-extension layer on WebKit
+// Unpacked Chrome extensions live in ~/Library/Application Support/Iris/Extensions/<name>/.
 // Content scripts run in a WebKit content world per extension (Chrome's "isolated world"),
 // extension pages are served from chrome-extension://<id>/ by FExtHost, the background script
-// runs in a hidden page, and chrome.* calls (ext-shim.js) come here through flintExt.
+// runs in a hidden page, and chrome.* calls (ext-shim.js) come here through irisExt.
 
 @interface FExt : NSObject
 @property (copy) NSString *ident, *dir, *name;
@@ -5744,7 +6439,7 @@ static NSString *DNRUpdate(NSMutableArray *rules, NSDictionary *opts, NSUInteger
 
 static NSString *ExtRoot(void) {
     NSString *d = [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
-                    stringByAppendingPathComponent:@"Flint"] stringByAppendingPathComponent:@"Extensions"];
+                    stringByAppendingPathComponent:@"Iris"] stringByAppendingPathComponent:@"Extensions"];
     [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     return d;
 }
@@ -5773,7 +6468,7 @@ static id JSONFile(NSString *path) {
 
 // the page world has no shim, so MAIN-world content scripts get their own copy of the match test
 static NSString *MatchJS(void) {
-    return @"const __flintMatch = (patterns, url) => (patterns || []).some(p => { if (p === '<all_urls>') return /^(https?|file|ftp|wss?):/.test(url);"
+    return @"const __irisMatch = (patterns, url) => (patterns || []).some(p => { if (p === '<all_urls>') return /^(https?|file|ftp|wss?):/.test(url);"
             "const m = /^(\\*|https?|file|ftp|wss?):\\/\\/([^/]*)(\\/.*)$/.exec(p); if (!m) return false; const esc = s => s.replace(/[.+?^${}()|[\\]\\\\]/g, '\\\\$&');"
             "const scheme = m[1] === '*' ? '(https?|wss?)' : esc(m[1]); let host = m[2]; host = host === '*' ? '[^/]*' : host.startsWith('*.') ? '([^/]*\\\\.)?' + esc(host.slice(2)) : esc(host);"
             "const path = esc(m[3]).replace(/\\\\\\*/g, '.*').replace(/\\*/g, '.*'); return new RegExp('^' + scheme + '://' + host + '(:\\\\d+)?' + path + '$').test(url); });\n";
@@ -5798,8 +6493,8 @@ static VTab *TabForID(NSInteger i) { for (VTab *t in AllTabs(NO)) if (TabID(t) =
 static VTab *TabForView(WKWebView *w) { for (VTab *t in AllTabs(NO)) if (t.web.web == w) return t; return nil; }
 static NSInteger WinID(VWindow *w) {
     static NSInteger next = 1;
-    NSNumber *n = objc_getAssociatedObject(w, "flintWinId");
-    if (!n && w) { n = @(next++); objc_setAssociatedObject(w, "flintWinId", n, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+    NSNumber *n = objc_getAssociatedObject(w, "irisWinId");
+    if (!n && w) { n = @(next++); objc_setAssociatedObject(w, "irisWinId", n, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     return n.integerValue;
 }
 static VWindow *NormalWin(void) {
@@ -5815,7 +6510,7 @@ static NSDictionary *TabInfo(VTab *t) {
              @"incognito": @NO, @"audible": @NO, @"discarded": @(t.web == nil), @"autoDiscardable": @YES, @"groupId": @-1};
 }
 
-// Frames: Chrome gives every frame a number (0 = the page). WebKit's frames carry an id of their own; Flint
+// Frames: Chrome gives every frame a number (0 = the page). WebKit's frames carry an id of their own; Iris
 // remembers each frame that has talked to an extension, so later calls (executeScript, insertCSS, sendMessage
 // with frameIds) can reach that exact frame.
 static NSMapTable<WKWebView *, NSMutableDictionary<NSNumber *, WKFrameInfo *> *> *gFrames;
@@ -5844,9 +6539,9 @@ static NSArray *TargetFrames(WKWebView *v, NSDictionary *target) {
     return out;
 }
 
-// logs message types only, never contents (they can carry keys); on only while developing, when an "extdebug" file sits beside Flint.app
+// logs message types only, never contents (they can carry keys); on only while developing, when an "extdebug" file sits beside Iris.app
 static BOOL gExtDebug = NO;
-__attribute__((constructor)) static void FlintExtDebugInit(void) { gExtDebug = [NSBundle.mainBundle pathForResource:@"extdebug" ofType:nil] != nil; }
+__attribute__((constructor)) static void IrisExtDebugInit(void) { gExtDebug = [NSBundle.mainBundle pathForResource:@"extdebug" ofType:nil] != nil; }
 
 @interface FExtHost () <WKNavigationDelegate>
 @end
@@ -5891,7 +6586,7 @@ __attribute__((constructor)) static void FlintExtDebugInit(void) { gExtDebug = [
         lower[@"@@extension_id"] = @{@"message": e.ident};
         e.messages = lower;
         e.name = [self i18n:m[@"name"] ext:e] ?: n;
-        e.world = [WKContentWorld worldWithName:[@"flint-ext-" stringByAppendingString:e.ident]];
+        e.world = [WKContentWorld worldWithName:[@"iris-ext-" stringByAppendingString:e.ident]];
         e.store = [NSMutableDictionary dictionary];
         for (NSString *area in @[@"local", @"sync"]) e.store[area] = JSONFile([self storePath:e area:area]) ?: [NSMutableDictionary dictionary];
         e.store[@"session"] = [NSMutableDictionary dictionary];
@@ -5941,7 +6636,7 @@ __attribute__((constructor)) static void FlintExtDebugInit(void) { gExtDebug = [
     return [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:cfg options:0 error:nil] encoding:NSUTF8StringEncoding];
 }
 
-- (NSString *)shimFor:(NSString *)mode ext:(FExt *)e { return [_shim stringByReplacingOccurrencesOfString:@"__FLINT_CFG__" withString:[self configJSON:mode ext:e]]; }
+- (NSString *)shimFor:(NSString *)mode ext:(FExt *)e { return [_shim stringByReplacingOccurrencesOfString:@"__IRIS_CFG__" withString:[self configJSON:mode ext:e]]; }
 
 // Page-world scripts from extensions assume Chrome's platform: requestIdleCallback and Trusted Types.
 // WebKit (on this macOS) has neither, so they get minimal stand-ins — only on pages those scripts run on.
@@ -5981,11 +6676,11 @@ static WKUserScript *MatchedScript(NSString *src, WKUserScriptInjectionTime when
     _installed = YES;
     if (!_exts.count) return;
     WKContentWorld *page = WKContentWorld.pageWorld;
-    [ucc addScriptMessageHandlerWithReply:self contentWorld:page name:@"flintExt"];
+    [ucc addScriptMessageHandlerWithReply:self contentWorld:page name:@"irisExt"];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:[self shimFor:@"page" ext:nil] injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:page]];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:[self shimFor:@"external" ext:nil] injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:page]];
     for (FExt *e in _exts.allValues) {
-        [ucc addScriptMessageHandlerWithReply:self contentWorld:e.world name:@"flintExt"];
+        [ucc addScriptMessageHandlerWithReply:self contentWorld:e.world name:@"irisExt"];
         [ucc addUserScript:[[WKUserScript alloc] initWithSource:[self shimFor:@"content" ext:e] injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:e.world]];
         for (NSDictionary *cs in e.manifest[@"content_scripts"] ?: @[]) for (WKUserScript *us in [self userScriptsFor:cs ext:e]) [ucc addUserScript:us];
     }
@@ -5999,7 +6694,7 @@ static WKUserScript *MatchedScript(NSString *src, WKUserScriptInjectionTime when
     if (![cs isKindOfClass:NSDictionary.class]) return out;
     BOOL mainWorld = [cs[@"world"] isEqual:@"MAIN"];
     // user scripts (chrome.userScripts) get a world of their own, apart from the extension's content scripts
-    WKContentWorld *world = mainWorld ? WKContentWorld.pageWorld : [cs[@"world"] isEqual:@"USER_SCRIPT"] ? [WKContentWorld worldWithName:[@"flint-us-" stringByAppendingString:e.ident]] : e.world;
+    WKContentWorld *world = mainWorld ? WKContentWorld.pageWorld : [cs[@"world"] isEqual:@"USER_SCRIPT"] ? [WKContentWorld worldWithName:[@"iris-us-" stringByAppendingString:e.ident]] : e.world;
     BOOL mainOnly = ![cs[@"all_frames"] boolValue];
     NSString *at = [cs[@"run_at"] isKindOfClass:NSString.class] ? cs[@"run_at"] : @"document_idle";
     WKUserScriptInjectionTime when = [at isEqualToString:@"document_start"] ? WKUserScriptInjectionTimeAtDocumentStart : WKUserScriptInjectionTimeAtDocumentEnd;
@@ -6031,7 +6726,7 @@ static WKUserScript *MatchedScript(NSString *src, WKUserScriptInjectionTime when
         if (!us) {   // older WebKit without per-site scripts: check the address in JavaScript (files then share no top-level scope)
             NSString *matches = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:cs[@"matches"] ?: @[] options:0 error:nil] encoding:NSUTF8StringEncoding];
             NSString *excludes = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:cs[@"exclude_matches"] ?: @[] options:0 error:nil] encoding:NSUTF8StringEncoding];
-            NSString *wrapped = [NSString stringWithFormat:@"{\n%@if (__flintMatch(%@, location.href) && !__flintMatch(%@, location.href)) {\n%@\n}\n}\n", mainWorld ? MatchJS() : @"", matches, excludes, src];
+            NSString *wrapped = [NSString stringWithFormat:@"{\n%@if (__irisMatch(%@, location.href) && !__irisMatch(%@, location.href)) {\n%@\n}\n}\n", mainWorld ? MatchJS() : @"", matches, excludes, src];
             us = [[WKUserScript alloc] initWithSource:wrapped injectionTime:when forMainFrameOnly:mainOnly inContentWorld:world];
         }
         [out addObject:us];
@@ -6138,7 +6833,7 @@ static NSDictionary *ManifestFormOf(NSDictionary *r) {
         [items filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *x, NSDictionary *b) { return ![gone containsObject:x[@"id"]]; }]];
         ok(nil);
     } else if ([op isEqualToString:@"contextMenus.removeAll"]) { [items removeAllObjects]; ok(nil); }
-    else fail([@"Flint doesn't support " stringByAppendingString:op]);
+    else fail([@"Iris doesn't support " stringByAppendingString:op]);
 }
 
 static BOOL MenuPatternsMatch(id patterns, NSString *url) {
@@ -6242,7 +6937,7 @@ static BOOL MenuPatternsMatch(id patterns, NSString *url) {
         for (NSMutableDictionary *x in _menus[e.ident]) if ([x[@"type"] isEqual:@"radio"] && ((!x[@"parentId"] && !item[@"parentId"]) || [x[@"parentId"] isEqual:item[@"parentId"]])) x[@"checked"] = @NO;
         item[@"checked"] = @YES; info[@"wasChecked"] = @(was); info[@"checked"] = @YES;
     }
-    [self toBackground:e body:@"return globalThis.__flintMenuClicked ? __flintMenuClicked(info, tab) : false" args:@{@"info": info, @"tab": r[@"tab"] ?: @{}} done:nil];
+    [self toBackground:e body:@"return globalThis.__irisMenuClicked ? __irisMenuClicked(info, tab) : false" args:@{@"info": info, @"tab": r[@"tab"] ?: @{}} done:nil];
 }
 
 #pragma mark Background pages
@@ -6261,20 +6956,20 @@ static double ProcessCPUSeconds(pid_t pid) {
     if (![bg isKindOfClass:NSDictionary.class]) { e.bgReady = YES; return; }
     // an offscreen window keeps the page's timers running at full speed
     e.bgWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(-10000, -10000, 400, 300) styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
-    e.background = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300) configuration:FlintConfig()];
+    e.background = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 400, 300) configuration:IrisConfig()];
     if (@available(macOS 13.3, *)) e.background.inspectable = YES;
     e.bgWindow.contentView = e.background;
     [e.bgWindow orderBack:nil];
     e.bgWindow.alphaValue = 0;
     e.bgWindow.ignoresMouseEvents = YES;
-    [e.background loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"chrome-extension://%@/__flint_background.html", e.ident]]]];
+    [e.background loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"chrome-extension://%@/__iris_background.html", e.ident]]]];
     // once its scripts have run, tell it it's installed / started
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         e.bgReady = YES;
         NSString *flag = [NSString stringWithFormat:@"extInstalled.%@", e.ident];
         NSString *reason = [Defaults() boolForKey:flag] ? @"update" : @"install";
         [Defaults() setBool:YES forKey:flag];
-        [self call:@"return __flintInstalled(d)" args:@{@"d": @{@"reason": reason}} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
+        [self call:@"return __irisInstalled(d)" args:@{@"d": @{@"reason": reason}} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
         NSArray *q = e.bgQueue.copy; [e.bgQueue removeAllObjects];
         for (void (^b)(void) in q) b();
     });
@@ -6294,12 +6989,12 @@ static double ProcessCPUSeconds(pid_t pid) {
 }
 
 - (void)call:(NSString *)body args:(NSDictionary *)args view:(WKWebView *)v world:(WKContentWorld *)w frame:(WKFrameInfo *)f done:(void (^)(id, NSError *))done {
-    if (!v) { if (done) done(nil, [NSError errorWithDomain:@"flint" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Receiving end does not exist."}]); return; }
+    if (!v) { if (done) done(nil, [NSError errorWithDomain:@"iris" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Receiving end does not exist."}]); return; }
     [v callAsyncJavaScript:body arguments:args inFrame:f inContentWorld:w completionHandler:^(id r, NSError *e) { if (done) done(r, e); }];
 }
 
 - (void)toBackground:(FExt *)e body:(NSString *)body args:(NSDictionary *)args done:(void (^)(id, NSError *))done {
-    if (!e.background) { if (done) done(nil, [NSError errorWithDomain:@"flint" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Could not establish connection. Receiving end does not exist."}]); return; }
+    if (!e.background) { if (done) done(nil, [NSError errorWithDomain:@"iris" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Could not establish connection. Receiving end does not exist."}]); return; }
     void (^go)(void) = ^{ [self call:body args:args view:e.background world:WKContentWorld.pageWorld frame:nil done:done]; };
     if (e.bgReady) go(); else [e.bgQueue addObject:[go copy]];
 }
@@ -6314,11 +7009,11 @@ static double ProcessCPUSeconds(pid_t pid) {
         if ([kind isEqualToString:@"loading"] || [kind isEqualToString:@"complete"]) {
             NSMutableDictionary *change = [@{@"status": kind} mutableCopy];
             if ([kind isEqualToString:@"loading"] && t.url) change[@"url"] = t.url;
-            [self call:@"return __flintTabEvent('updated', id, c, t)" args:@{@"id": @(TabID(t)), @"c": change, @"t": info} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
+            [self call:@"return __irisTabEvent('updated', id, c, t)" args:@{@"id": @(TabID(t)), @"c": change, @"t": info} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
         } else if ([kind isEqualToString:@"activated"]) {
-            [self call:@"return __flintTabEvent('activated', a)" args:@{@"a": @{@"tabId": @(TabID(t)), @"windowId": @1}} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
+            [self call:@"return __irisTabEvent('activated', a)" args:@{@"a": @{@"tabId": @(TabID(t)), @"windowId": @1}} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
         } else if ([kind isEqualToString:@"removed"]) {
-            [self call:@"return __flintTabEvent('removed', id, i)" args:@{@"id": @(TabID(t)), @"i": @{@"windowId": @1, @"isWindowClosing": @NO}} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
+            [self call:@"return __irisTabEvent('removed', id, i)" args:@{@"id": @(TabID(t)), @"i": @{@"windowId": @1, @"isWindowClosing": @NO}} view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
         }
     }
 }
@@ -6367,7 +7062,7 @@ static double ProcessCPUSeconds(pid_t pid) {
         if (m.webView == e.background) { ok(nil); return; }   // background → itself isn't delivered (popup listeners not tracked yet)
         NSMutableDictionary *sender = [[self senderFor:m ext:e] mutableCopy];
         if (ext) [sender removeObjectForKey:@"id"];   // like Chrome: messages from web pages carry no extension id
-        [self toBackground:e body:@"return await __flintOnMessage(msg, sender, external)" args:@{@"msg": arg(0) ?: NSNull.null, @"sender": sender, @"external": @(ext)}
+        [self toBackground:e body:@"return await __irisOnMessage(msg, sender, external)" args:@{@"msg": arg(0) ?: NSNull.null, @"sender": sender, @"external": @(ext)}
                       done:^(id r, NSError *err) {
             if (ext || gExtDebug) DLog(@"ext msg%@ from %@: %@ → %@ %@", ext ? @" (external)" : @"", m.frameInfo.securityOrigin.host, [self brief:arg(0)], [self brief:r], err.localizedDescription ?: @"");
             if (err) fail(err.localizedDescription); else ok(r); }];
@@ -6378,7 +7073,7 @@ static double ProcessCPUSeconds(pid_t pid) {
         p.bView = e.background; p.bWorld = WKContentWorld.pageWorld;
         if (!p.ident || !e.background) { ok(@NO); return; }
         _ports[p.ident] = p;
-        [self toBackground:e body:@"return __flintOnConnect(id, name, sender, false)" args:@{@"id": p.ident, @"name": arg(1) ?: @"", @"sender": [self senderFor:m ext:e]}
+        [self toBackground:e body:@"return __irisOnConnect(id, name, sender, false)" args:@{@"id": p.ident, @"name": arg(1) ?: @"", @"sender": [self senderFor:m ext:e]}
                       done:^(id r, NSError *err) { ok(@(err == nil)); }];
     }
     else if ([op isEqualToString:@"port.post"] || [op isEqualToString:@"port.disconnect"]) {
@@ -6389,8 +7084,8 @@ static double ProcessCPUSeconds(pid_t pid) {
         BOOL post = [op isEqualToString:@"port.post"];
         if (gExtDebug) DLog(@"ext port %@ %@ %@: %@", p.ident, fromA ? @"→bg" : @"→page", post ? @"msg" : @"disconnect", [self brief:arg(1)]);
         if (!post) [_ports removeObjectForKey:p.ident];
-        [self call:@"return __flintPortEvent(id, kind, data)" args:@{@"id": p.ident, @"kind": post ? @"message" : @"disconnect", @"data": arg(1) ?: NSNull.null}
-              view:v world:w frame:f done:^(id r, NSError *err) { if (err && f) [self call:@"return __flintPortEvent(id, kind, data)" args:@{@"id": p.ident, @"kind": post ? @"message" : @"disconnect", @"data": arg(1) ?: NSNull.null} view:v world:w frame:nil done:nil]; }];
+        [self call:@"return __irisPortEvent(id, kind, data)" args:@{@"id": p.ident, @"kind": post ? @"message" : @"disconnect", @"data": arg(1) ?: NSNull.null}
+              view:v world:w frame:f done:^(id r, NSError *err) { if (err && f) [self call:@"return __irisPortEvent(id, kind, data)" args:@{@"id": p.ident, @"kind": post ? @"message" : @"disconnect", @"data": arg(1) ?: NSNull.null} view:v world:w frame:nil done:nil]; }];
         ok(@YES);
     }
     else if ([op hasPrefix:@"storage."]) [self storageOp:op ext:e args:args ok:ok];
@@ -6440,7 +7135,7 @@ static double ProcessCPUSeconds(pid_t pid) {
         NSDictionary *opts = [arg(2) isKindOfClass:NSDictionary.class] ? arg(2) : nil;
         WKFrameInfo *fi = nil;
         if ([opts[@"frameId"] isKindOfClass:NSNumber.class] && [opts[@"frameId"] longLongValue] != 0) { fi = [gFrames objectForKey:t.web.web][opts[@"frameId"]]; if (!fi) { fail(@"Could not establish connection. Receiving end does not exist."); return; } }
-        [self call:@"return await __flintOnMessage(msg, sender, false)" args:@{@"msg": arg(1) ?: NSNull.null, @"sender": sender} view:t.web.web world:e.world frame:fi
+        [self call:@"return await __irisOnMessage(msg, sender, false)" args:@{@"msg": arg(1) ?: NSNull.null, @"sender": sender} view:t.web.web world:e.world frame:fi
               done:^(id r, NSError *err) { if (err) fail(@"Could not establish connection. Receiving end does not exist."); else ok(r); }];
     }
     else if ([op isEqualToString:@"scripting.executeScript"] || [op isEqualToString:@"scripting.insertCSS"] || [op isEqualToString:@"scripting.removeCSS"]) [self scripting:op ext:e details:arg(0) ok:ok fail:fail];
@@ -6454,7 +7149,7 @@ static double ProcessCPUSeconds(pid_t pid) {
     }
     else if ([op isEqualToString:@"runtime.reload"]) { [e.background reload]; ok(nil); }
     else if ([op isEqualToString:@"net.fetch"]) [self fetch:arg(0) ok:ok];
-    else { DLog(@"ext unsupported op %@", op); fail([@"Flint doesn't support " stringByAppendingString:op]); }
+    else { DLog(@"ext unsupported op %@", op); fail([@"Iris doesn't support " stringByAppendingString:op]); }
 }
 
 - (NSString *)brief:(id)o {
@@ -6495,7 +7190,7 @@ static double ProcessCPUSeconds(pid_t pid) {
     }
     // tell every part of the extension (onChanged): background, its pages, its content scripts
     NSDictionary *a = @{@"c": changes, @"a": areaName};
-    NSString *body = @"return globalThis.__flintStorageChanged ? __flintStorageChanged(c, a) : false";
+    NSString *body = @"return globalThis.__irisStorageChanged ? __irisStorageChanged(c, a) : false";
     if (e.background) [self call:body args:a view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
     for (VTab *t in AllTabs(NO)) if (t.web.web) {
         [self call:body args:a view:t.web.web world:e.world frame:nil done:nil];
@@ -6522,8 +7217,8 @@ static double ProcessCPUSeconds(pid_t pid) {
         NSData *bytes = [text dataUsingEncoding:NSUTF8StringEncoding]; unsigned char h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(bytes.bytes, (CC_LONG)bytes.length, h);
         NSMutableString *key = [NSMutableString stringWithString:e.ident]; for (int i = 0; i < 8; i++) [key appendFormat:@"%02x", h[i]];
         if ([op isEqualToString:@"scripting.removeCSS"])
-            [code appendString:@"for (const s of document.querySelectorAll('style[data-flint-css]')) if (s.dataset.flintCss === key) { s.remove(); break; } return null;"];
-        else [code appendString:@"const s = document.createElement('style'); s.dataset.flintCss = key; s.textContent = css; (document.head || document.documentElement).appendChild(s); return null;"];
+            [code appendString:@"for (const s of document.querySelectorAll('style[data-iris-css]')) if (s.dataset.irisCss === key) { s.remove(); break; } return null;"];
+        else [code appendString:@"const s = document.createElement('style'); s.dataset.irisCss = key; s.textContent = css; (document.head || document.documentElement).appendChild(s); return null;"];
         jsArgs = @{@"css": text, @"key": key};
         w = WKContentWorld.pageWorld;   // a style is part of the page whichever world adds it
     } else {
@@ -6557,7 +7252,7 @@ static double ProcessCPUSeconds(pid_t pid) {
         if (!shim) { run(); continue; }
         // the extension's own world must have chrome.* before its code runs (a page loaded before the extension, or one
         // its content scripts don't match, has a bare world): give it the API first, as Chrome always does
-        [v evaluateJavaScript:@"!!globalThis.__flintExtLoaded" inFrame:fi inContentWorld:w completionHandler:^(id has, NSError *err) {
+        [v evaluateJavaScript:@"!!globalThis.__irisExtLoaded" inFrame:fi inContentWorld:w completionHandler:^(id has, NSError *err) {
             if ([has boolValue]) { run(); return; }
             [v evaluateJavaScript:shim inFrame:fi inContentWorld:w completionHandler:^(id r2, NSError *e2) { run(); }];
         }];
@@ -6590,7 +7285,7 @@ static double ProcessCPUSeconds(pid_t pid) {
     NSData *data = nil; NSString *mime = @"text/html";
     if (e) {
         NSString *path = u.path.length ? u.path : @"/";
-        if ([path isEqualToString:@"/__flint_background.html"]) data = [self backgroundHTML:e];
+        if ([path isEqualToString:@"/__iris_background.html"]) data = [self backgroundHTML:e];
         else {
             NSString *file = [[e.dir stringByAppendingPathComponent:path] stringByStandardizingPath];
             if ([file hasPrefix:e.dir]) { data = [NSData dataWithContentsOfFile:file]; mime = MIMEFor(file.pathExtension); }
@@ -6778,14 +7473,14 @@ static NSString *const kPopupMeasureJS = @"(()=>{const d=document.documentElemen
     NSString *page = [action[@"default_popup"] isKindOfClass:NSString.class] ? action[@"default_popup"] : nil;
     if (!page) {   // like Chrome: tell the extension it was clicked; if it doesn't listen, open its options
         VTab *cur = NormalWin().current;
-        [self toBackground:e body:@"return globalThis.__flintActionClicked ? __flintActionClicked(tab) : false" args:@{@"tab": TabInfo(cur) ?: @{}} done:^(id r, NSError *err) {
+        [self toBackground:e body:@"return globalThis.__irisActionClicked ? __irisActionClicked(tab) : false" args:@{@"tab": TabInfo(cur) ?: @{}} done:^(id r, NSError *err) {
             if ([r boolValue]) return;
             if (![self openOptions:e]) [gWin showToast:[NSString stringWithFormat:@"%@ has no popup or options", e.name]];
         }];
         return;
     }
     [_popover close];
-    WKWebView *v = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 380, 600) configuration:FlintConfig()];
+    WKWebView *v = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 380, 600) configuration:IrisConfig()];
     if (@available(macOS 13.3, *)) v.inspectable = YES;
     @try { [v setValue:@NO forKey:@"drawsBackground"]; } @catch (NSException *x) {}
     v.navigationDelegate = self;   // sized to its content once it has loaded, as Chrome does
@@ -6802,11 +7497,11 @@ static NSString *const kPopupMeasureJS = @"(()=>{const d=document.documentElemen
 
 @end
 
-#pragma mark - Flint's own pages (flint://history, flint://bookmarks)
+#pragma mark - Iris's own pages (iris://history, iris://bookmarks)
 
-// Built-in pages are plain HTML files (Resources/pages, or pages/ beside Flint.app while developing),
-// served on the flint: scheme with the current theme's colours filled in. They talk to Flint through
-// flintInternal, which answers only main frames whose origin is flint: — websites, extensions and
+// Built-in pages are plain HTML files (Resources/pages, or pages/ beside Iris.app while developing),
+// served on the iris: scheme with the current theme's colours filled in. They talk to Iris through
+// irisInternal, which answers only main frames whose origin is iris: — websites, extensions and
 // frames embedded in other pages can't reach it.
 
 static NSString *CSSColor(NSColor *c) {
@@ -6814,7 +7509,7 @@ static NSString *CSSColor(NSColor *c) {
     return [NSString stringWithFormat:@"rgba(%d,%d,%d,%.3f)", (int)lround(s.redComponent * 255), (int)lround(s.greenComponent * 255), (int)lround(s.blueComponent * 255), s.alphaComponent];
 }
 
-// Flint's own pages share the window's colours and its shape language: struck shards, the spark, compressed headings.
+// Iris's own pages share the window's colours and its shape language: struck shards, the spark, compressed headings.
 static NSString *ThemeCSS(void) {
     NSString *vars = [NSString stringWithFormat:@":root{color-scheme:%@;--bg:%@;--card:%@;--pill:%@;--text:%@;--dim:%@;--faint:%@;--line:%@;--hover:%@;--active:%@;--accent:%@;--border:%@;--toast:%@;--onaccent:%@;--ember:%@}",
             ThemeIsLight() ? @"light" : @"dark", CSSColor(vContentBg), CSSColor(vCard), CSSColor(vPill), CSSColor(vText), CSSColor(vDim), CSSColor(vFaint),
@@ -7020,11 +7715,11 @@ static void Respond(id<WKURLSchemeTask> task, NSInteger status, NSString *type, 
     }
     // pages only open as a whole tab, never framed inside a website
     NSURL *top = task.request.mainDocumentURL;
-    if (top && ![top.scheme isEqualToString:@"flint"]) { Respond(task, 403, @"text/plain", nil, nil); return; }
+    if (top && ![top.scheme isEqualToString:@"iris"]) { Respond(task, 403, @"text/plain", nil, nil); return; }
     NSString *path = InternalPagePath(host);
     NSString *html = path ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] : nil;
     if (!html) {
-        html = [NSString stringWithFormat:@"<!doctype html><meta charset=utf-8><title>Not found</title><style>/*THEME*/html{background:var(--bg);color:var(--dim);font:15px -apple-system,system-ui;display:grid;place-items:center;height:100%%}</style><p>Flint has no page called “%@”.</p>",
+        html = [NSString stringWithFormat:@"<!doctype html><meta charset=utf-8><title>Not found</title><style>/*THEME*/html{background:var(--bg);color:var(--dim);font:15px -apple-system,system-ui;display:grid;place-items:center;height:100%%}</style><p>Iris has no page called “%@”.</p>",
                 [[host stringByReplacingOccurrencesOfString:@"<" withString:@""] stringByReplacingOccurrencesOfString:@"&" withString:@""]];
     }
     // scripts run only with this response's nonce: markup that slips into a page (a reader article, a bookmark name) can't run code
@@ -7032,14 +7727,14 @@ static void Respond(id<WKURLSchemeTask> task, NSInteger status, NSString *type, 
     NSString *nonce = [[NSData dataWithBytes:rnd length:sizeof rnd] base64EncodedStringWithOptions:0];
     html = [html stringByReplacingOccurrencesOfString:@"/*THEME*/" withString:ThemeCSS()];
     html = [html stringByReplacingOccurrencesOfString:@"{{NONCE}}" withString:nonce];
-    NSString *img = [host isEqualToString:@"reader"] ? @"flint: data: https: http:" : @"flint: data:";
+    NSString *img = [host isEqualToString:@"reader"] ? @"iris: data: https: http:" : @"iris: data:";
     Respond(task, path ? 200 : 404, @"text/html; charset=utf-8", [html dataUsingEncoding:NSUTF8StringEncoding],
             @{@"Content-Security-Policy": [NSString stringWithFormat:@"default-src 'none'; img-src %@; media-src https:; style-src 'unsafe-inline'; script-src 'nonce-%@'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", img, nonce]});
 }
 
 - (void)webView:(WKWebView *)w stopURLSchemeTask:(id<WKURLSchemeTask>)task {}
 
-// The download manager page (flint://downloads): a list it polls, and the controls it calls.
+// The download manager page (iris://downloads): a list it polls, and the controls it calls.
 static NSString *DLCategory(NSString *ext) {
     ext = ext.lowercaseString;
     NSDictionary *m = @{@"video": @[@"mp4", @"mkv", @"mov", @"avi", @"webm", @"m4v", @"flv", @"wmv", @"mpg", @"mpeg", @"ts"],
@@ -7129,11 +7824,11 @@ static void DownloadOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply
 
 static NSURL *WebURL(id s) {
     NSURL *u = [s isKindOfClass:NSString.class] ? [NSURL URLWithString:s] : nil;
-    return [@[@"http", @"https", @"flint", @"file"] containsObject:u.scheme.lowercaseString ?: @""] ? u : nil;
+    return [@[@"http", @"https", @"iris", @"file"] containsObject:u.scheme.lowercaseString ?: @""] ? u : nil;
 }
 
 - (void)userContentController:(WKUserContentController *)ucc didReceiveScriptMessage:(WKScriptMessage *)m replyHandler:(void (^)(id, NSString *))reply {
-    if (!m.frameInfo.isMainFrame || ![m.frameInfo.securityOrigin.protocol isEqualToString:@"flint"] || ![m.body isKindOfClass:NSDictionary.class]) { reply(nil, @"denied"); return; }
+    if (!m.frameInfo.isMainFrame || ![m.frameInfo.securityOrigin.protocol isEqualToString:@"iris"] || ![m.body isKindOfClass:NSDictionary.class]) { reply(nil, @"denied"); return; }
     NSDictionary *b = m.body;
     VWindow *win = WinOfWeb(m.webView) ?: gWin;
     NSString *op = [b[@"op"] isKindOfClass:NSString.class] ? b[@"op"] : @"";
@@ -7222,7 +7917,7 @@ static NSURL *WebURL(id s) {
         NSString *html = [b[@"html"] isKindOfClass:NSString.class] ? b[@"html"] : @"";
         NSSavePanel *p = [NSSavePanel savePanel];
         NSDateFormatter *f = [NSDateFormatter new]; f.dateFormat = @"yyyy-MM-dd";
-        p.nameFieldStringValue = [NSString stringWithFormat:@"Flint Bookmarks %@.html", [f stringFromDate:NSDate.date]];
+        p.nameFieldStringValue = [NSString stringWithFormat:@"Iris Bookmarks %@.html", [f stringFromDate:NSDate.date]];
         p.directoryURL = gWin.downloadFolder;
         [p beginSheetModalForWindow:m.webView.window ?: gWin.window completionHandler:^(NSModalResponse r) {
             BOOL ok = r == NSModalResponseOK && [[html dataUsingEncoding:NSUTF8StringEncoding] writeToURL:p.URL atomically:YES];
@@ -7239,7 +7934,7 @@ static NSURL *WebURL(id s) {
     }
     if ([op isEqualToString:@"bm.tabs"]) {
         NSMutableArray *out = [NSMutableArray array];
-        for (VTab *t in win.tabs) if (WebURL(t.url) && ![t.url hasPrefix:@"flint:"]) [out addObject:@{@"name": t.title ?: @"", @"url": t.url}];
+        for (VTab *t in win.tabs) if (WebURL(t.url) && ![t.url hasPrefix:@"iris:"]) [out addObject:@{@"name": t.title ?: @"", @"url": t.url}];
         reply(out, nil); return;
     }
     reply(nil, @"unknown op");
@@ -7247,30 +7942,30 @@ static NSURL *WebURL(id s) {
 
 @end
 
-static void FlintInternalInstall(WKWebViewConfiguration *c, WKUserContentController *ucc) {
-    if (![c urlSchemeHandlerForURLScheme:@"flint"]) [c setURLSchemeHandler:VInternal.shared forURLScheme:@"flint"];
+static void IrisInternalInstall(WKWebViewConfiguration *c, WKUserContentController *ucc) {
+    if (![c urlSchemeHandlerForURLScheme:@"iris"]) [c setURLSchemeHandler:VInternal.shared forURLScheme:@"iris"];
     static NSHashTable *done;
     if (!done) done = [NSHashTable weakObjectsHashTable];
-    if (ucc && ![done containsObject:ucc]) { [done addObject:ucc]; [ucc addScriptMessageHandlerWithReply:VInternal.shared contentWorld:WKContentWorld.pageWorld name:@"flintInternal"]; }
+    if (ucc && ![done containsObject:ucc]) { [done addObject:ucc]; [ucc addScriptMessageHandlerWithReply:VInternal.shared contentWorld:WKContentWorld.pageWorld name:@"irisInternal"]; }
 }
 
 @implementation VWindow (Internal)
 - (void)openInternal:(NSString *)name {
-    NSString *prefix = [NSString stringWithFormat:@"flint://%@", name];
+    NSString *prefix = [NSString stringWithFormat:@"iris://%@", name];
     for (VTab *t in self.tabs) if ([t.url hasPrefix:prefix]) { [self selectTab:t]; return; }
     [self newTab:[NSURL URLWithString:prefix] select:YES];
 }
 - (void)showHistory:(id)s { [self openInternal:@"history"]; }
 - (void)showBookmarks:(id)s { [self openInternal:@"bookmarks"]; }
 - (void)showDownloadManager:(id)s { [self openInternal:@"downloads"]; }
-// flint://settings#<section>: switch to the open settings tab (and its section), or open one
+// iris://settings#<section>: switch to the open settings tab (and its section), or open one
 - (void)showSettingsSection:(NSString *)section {
-    for (VTab *t in self.tabs) if ([t.url hasPrefix:@"flint://settings"]) {
+    for (VTab *t in self.tabs) if ([t.url hasPrefix:@"iris://settings"]) {
         [self selectTab:t];
         [t.web.web evaluateJavaScript:[NSString stringWithFormat:@"location.hash='#%@'", section] completionHandler:nil];
         return;
     }
-    [self newTab:[NSURL URLWithString:[@"flint://settings#" stringByAppendingString:section]] select:YES];
+    [self newTab:[NSURL URLWithString:[@"iris://settings#" stringByAppendingString:section]] select:YES];
 }
 - (void)bookmarkAllTabs:(id)s {
     NSMutableArray *kids = [NSMutableArray array];
@@ -7395,6 +8090,7 @@ static void ShelfIcon(VTab *t, NSRect r, CGFloat radius) {
 @interface VShelfStrip : NSView
 @property (weak) VTabShelf *shelf;
 @property NSInteger hover;
+@property NSInteger btnHover;   // over a card's close (1) or pin (2) button
 @property NSInteger pinnedCount;   // the first cards are your pinned tabs, set apart from the timeline
 @end
 static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
@@ -7408,14 +8104,26 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
 }
 - (NSRect)card:(NSInteger)i { return NSMakeRect(6 + i * (kCardW + kCardGap) + (self.pinnedCount > 0 && i >= self.pinnedCount ? 22 : 0), kCardTop, kCardW, kCardH); }
-- (NSRect)closeRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 29, NSMinY(c) + 7, 22, 22); }
-- (NSRect)pinRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 55, NSMinY(c) + 7, 22, 22); }
+// Close and pin: 28 pt discs inside the card's corner, and each answers a little beyond its edge (a 36 pt target).
+- (NSRect)closeRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 34, NSMinY(c) + 6, 28, 28); }
+- (NSRect)pinRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 66, NSMinY(c) + 6, 28, 28); }
+- (NSInteger)buttonAt:(NSPoint)p card:(NSInteger)i {
+    if (i < 0 || i >= (NSInteger)self.shelf.items.count) return 0;
+    NSRect cr = [self closeRect:i], pr = [self pinRect:i];
+    if (NSPointInRect(p, NSMakeRect(NSMinX(cr) - 2, NSMinY(cr) - 5, NSWidth(cr) + 7, NSHeight(cr) + 9))) return 1;   // up to the card's edge
+    if (NSPointInRect(p, NSMakeRect(NSMinX(pr) - 4, NSMinY(pr) - 5, NSWidth(pr) + 6, NSHeight(pr) + 9))) return 2;
+    return 0;
+}
 - (NSInteger)indexAt:(NSPoint)p {   // items.count = the New tab card at the end
     for (NSInteger i = 0; i <= (NSInteger)self.shelf.items.count; i++) { NSRect c = [self card:i]; c.size.height += 44; if (NSPointInRect(p, NSInsetRect(c, -4, -4))) return i; }
     return -1;
 }
-- (void)mouseMoved:(NSEvent *)e { NSInteger h = [self indexAt:[self convertPoint:e.locationInWindow fromView:nil]]; if (h != self.hover) { self.hover = h; self.needsDisplay = YES; } }
-- (void)mouseExited:(NSEvent *)e { self.hover = -1; self.needsDisplay = YES; }
+- (void)mouseMoved:(NSEvent *)e {
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    NSInteger h = [self indexAt:p], b = [self buttonAt:p card:h];
+    if (h != self.hover || b != self.btnHover) { self.hover = h; self.btnHover = b; self.needsDisplay = YES; }
+}
+- (void)mouseExited:(NSEvent *)e { self.hover = -1; self.btnHover = 0; self.needsDisplay = YES; }
 - (void)drawRect:(NSRect)dirty {
     NSArray<VTab *> *items = self.shelf.items;
     VWindow *w = self.shelf.owner;
@@ -7461,13 +8169,20 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
         }
         if (hov) {
             NSRect cr = [self closeRect:i], pr = [self pinRect:i];
-            for (NSValue *v in @[[NSValue valueWithRect:cr], [NSValue valueWithRect:pr]]) { [HexA(0x0a0b0d, 0.85) setFill]; [[NSBezierPath bezierPathWithOvalInRect:v.rectValue] fill]; }
-            NSImage *x = Tinted(Symbol(@"xmark", 8, NSFontWeightBold), Hex(0xe7e8eb)); DrawImage(x, CenterIn(x.size, cr));
-            NSImage *pn = Tinted(Symbol(t.pinned ? @"pin.slash" : @"pin", 9, NSFontWeightSemibold), Hex(0xe7e8eb)); DrawImage(pn, CenterIn(pn.size, pr));
+            NSArray *btns = @[@[[NSValue valueWithRect:cr], @"xmark", @10.5, @1], @[[NSValue valueWithRect:pr], t.pinned ? @"pin.slash" : @"pin", @11.5, @2]];
+            for (NSArray *b in btns) {
+                NSRect r = [b[0] rectValue]; BOOL on = self.btnHover == [b[3] integerValue];
+                NSBezierPath *disc = [NSBezierPath bezierPathWithOvalInRect:r];
+                [HexA(0x0a0b0d, on ? 0.92 : 0.72) setFill]; [disc fill];   // dark glass, firmer under the pointer
+                [[NSColor colorWithWhite:1 alpha:on ? 0.28 : 0.14] setStroke]; NSBezierPath *rim = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(r, 0.5, 0.5)]; rim.lineWidth = 1; [rim stroke];
+                NSImage *ic = Tinted(Symbol(b[1], [b[2] doubleValue], NSFontWeightSemibold), on ? NSColor.whiteColor : Hex(0xd6d8dc));
+                DrawImage(ic, CenterIn(ic.size, r));
+            }
         }
         NSString *title = t.isHome ? @"New Tab" : (t.title.length ? t.title : t.url ?: @"");
         [title drawInRect:NSMakeRect(NSMinX(c) + 1, NSMaxY(c) + 7, kCardW - 2, 16) withAttributes:@{NSFontAttributeName: UIFont(12, cur ? NSFontWeightMedium : NSFontWeightRegular), NSForegroundColorAttributeName: cur ? vText : (asleep ? vFaint : vDim), NSParagraphStyleAttributeName: ps}];
-        [(t.pinned && !cur ? @"pinned" : ShelfMeta(t, cur)) drawInRect:NSMakeRect(NSMinX(c) + 1, NSMaxY(c) + 25, kCardW - 2, 14) withAttributes:@{NSFontAttributeName: MMono(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps}];
+        BOOL fresh = t.openedFresh > 0 && !cur;   // opened behind and not looked at yet
+        [(t.pinned && !cur ? @"pinned" : fresh ? @"new · not opened yet" : ShelfMeta(t, cur)) drawInRect:NSMakeRect(NSMinX(c) + 1, NSMaxY(c) + 25, kCardW - 2, 14) withAttributes:@{NSFontAttributeName: MMono(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: fresh ? vEmber : vFaint, NSParagraphStyleAttributeName: ps}];
     }
     if (self.pinnedCount > 0) {   // the pinned group: labelled, and a hairline before the timeline
         [@"PINNED" drawAtPoint:NSMakePoint(NSMinX([self card:0]), kCardTop - 22) withAttributes:@{NSFontAttributeName: MMono(10, NSFontWeightMedium), NSForegroundColorAttributeName: vFaint, NSKernAttributeName: @1.2}];
@@ -7498,8 +8213,9 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     VWindow *w = self.shelf.owner;
     if (i == (NSInteger)self.shelf.items.count) { [w showShelf:NO]; [w newTab:nil select:YES]; [NSApp activateIgnoringOtherApps:YES]; [w.window makeKeyAndOrderFront:nil]; return; }
     VTab *t = self.shelf.items[(NSUInteger)i];
-    if (NSPointInRect(p, NSInsetRect([self closeRect:i], -2, -2))) { [w closeTab:t]; [self.shelf reload]; return; }
-    if (NSPointInRect(p, NSInsetRect([self pinRect:i], -2, -2))) { [w togglePin:t]; [self.shelf reload]; return; }
+    NSInteger b = [self buttonAt:p card:i];
+    if (b == 1) { self.btnHover = 0; [w closeTab:t]; [self.shelf reload]; return; }
+    if (b == 2) { self.btnHover = 0; [w togglePin:t]; [self.shelf reload]; return; }
     [w showShelf:NO];
     [w selectTab:t];
     [NSApp activateIgnoringOtherApps:YES]; [w.window makeKeyAndOrderFront:nil];
@@ -7646,13 +8362,16 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
         if (q.length && ![(t.title ?: @"").lowercaseString containsString:q] && ![(t.url ?: @"").lowercaseString containsString:q]) continue;
         [(t.pinned ? pins : rest) addObject:t];
     }
-    // the timeline: the longest-unvisited on the left, the tab you're on at the right end
+    // the timeline: the longest-unvisited on the left, then the tab you're on; tabs opened in the background
+    // (⌘-click) and not looked at yet go to its right, in the order you opened them
     NSMutableArray *order = [NSMutableArray array];
     for (NSUInteger i = 0; i < rest.count; i++) [order addObject:@[rest[i], @(i)]];
     VTab *cur = w.current;
     [order sortUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
         VTab *x = a[0], *y = b[0];
-        double kx = x == cur ? DBL_MAX : x.hiddenAt, ky = y == cur ? DBL_MAX : y.hiddenAt;
+        int tx = x == cur ? 1 : x.openedFresh > 0 ? 2 : 0, ty = y == cur ? 1 : y.openedFresh > 0 ? 2 : 0;
+        if (tx != ty) return tx < ty ? NSOrderedAscending : NSOrderedDescending;
+        double kx = tx == 2 ? x.openedFresh : x.hiddenAt, ky = ty == 2 ? y.openedFresh : y.hiddenAt;
         if (kx != ky) return kx < ky ? NSOrderedAscending : NSOrderedDescending;
         return [a[1] compare:b[1]];
     }];
@@ -7701,6 +8420,10 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 // The hint at the bottom edge of the page: hover or click it and the tabs come up.
 @interface VShelfHandle : NSView
 @property BOOL hover;
+@property CFTimeInterval flashStart;   // a tab just opened in the background: the hint lights up and a spark runs to the right,
+@property (strong) NSTimer *flashTimer; // where the new tab now sits in the strip
+@property (readonly) BOOL flashing;
+- (void)flashNewTab;
 @end
 @implementation VShelfHandle
 - (BOOL)isFlipped { return YES; }
@@ -7713,14 +8436,44 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 }
 - (void)mouseEntered:(NSEvent *)e { self.hover = YES; self.needsDisplay = YES; if (![Defaults() boolForKey:kShelfNoHover]) [WinFor(self) showShelf:YES]; }
 - (void)mouseExited:(NSEvent *)e { self.hover = NO; self.needsDisplay = YES; }
+static const CFTimeInterval kFlashLen = 1.35;
+- (BOOL)flashing { return self.flashTimer != nil; }
+- (void)flashNewTab {
+    self.flashStart = CACurrentMediaTime();
+    if (self.hidden) { self.hidden = NO; }
+    if (!self.flashTimer) {
+        __weak VShelfHandle *ws = self;
+        self.flashTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) {
+            VShelfHandle *me = ws; if (!me) { [t invalidate]; return; }
+            me.needsDisplay = YES;
+            if (CACurrentMediaTime() - me.flashStart > kFlashLen) { [t invalidate]; me.flashTimer = nil; [WinFor(me) layout]; }
+        }];
+        [NSRunLoop.mainRunLoop addTimer:self.flashTimer forMode:NSRunLoopCommonModes];
+    }
+    self.needsDisplay = YES;
+}
 - (void)drawRect:(NSRect)r {
-    NSRect p = NSMakeRect(round(NSMidX(self.bounds) - 28), NSHeight(self.bounds) - 9, 56, 5);
-    RoundRect(p, 2.5, [Hex(0x787a80) colorWithAlphaComponent:self.hover ? 0.9 : 0.5]);
+    CGFloat e = 0, run = 0;
+    if (self.flashTimer) {
+        CGFloat t = MIN(1, (CACurrentMediaTime() - self.flashStart) / kFlashLen);
+        e = t < 0.16 ? 1 - pow(1 - t / 0.16, 3) : pow(1 - (t - 0.16) / 0.84, 2);   // quick rise, long soft fade
+        run = 1 - pow(1 - MIN(1, t / 0.7), 3);
+    }
+    CGFloat w = 56 + 26 * e, h = 5 + 1 * e;
+    NSRect p = NSMakeRect(round(NSMidX(self.bounds) - w / 2), NSHeight(self.bounds) - 9 - (h - 5) / 2, w, h);
+    NSColor *base = [Hex(0x787a80) colorWithAlphaComponent:self.hover ? 0.9 : 0.5];
+    if (e > 0.001) {
+        for (int k = 3; k >= 1; k--)   // a soft halo in your highlight colour
+            RoundRect(NSInsetRect(p, -2.2 * k, -1.6 * k), h / 2 + 2.2 * k, [vEmber colorWithAlphaComponent:0.075 * e]);
+        RoundRect(p, h / 2, [base blendedColorWithFraction:e ofColor:vEmber] ?: base);
+        CGFloat sx = NSMidX(p) + (NSWidth(p) / 2 - 7) * run;   // the spark heads right, where the new tab is
+        RoundRect(NSMakeRect(sx - 7, NSMinY(p), 14, h), h / 2, [NSColor.whiteColor colorWithAlphaComponent:0.55 * e]);
+    } else RoundRect(p, 2.5, base);
 }
 - (void)mouseDown:(NSEvent *)e { VWindow *w = WinFor(self); [w showShelf:YES]; ((VTabShelf *)w.shelf).sticky = YES; }
 @end
 
-// Hovering the bottom edge of a Flint window brings its tabs up, even while another app is in front
+// Hovering the bottom edge of a Iris window brings its tabs up, even while another app is in front
 // (as long as nothing covers that edge); moving well away puts them back. Esc closes them.
 static void ShelfTrack(NSPoint screen) {
     NSInteger topNumber = [NSWindow windowNumberAtPoint:screen belowWindowWithWindowNumber:0];
@@ -7778,13 +8531,18 @@ static void InstallShelfMonitor(void) {
         s.search.stringValue = @"";
         CaptureThumb(self.current);
         [s reload]; f = [self shelfFrame];
+        [CATransaction begin]; [CATransaction setDisableActions:YES];   // start from just below its place, not wherever it last was
         s.frame = NSOffsetRect(f, 0, 14); s.alphaValue = 0; s.hidden = NO;
-        [s layoutShelf]; [s scrollToNewest];
+        [s layoutShelf]; [s scrollToNewest]; [s displayIfNeeded];
+        [CATransaction commit];
         self.shelfHandle.hidden = YES;
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
-            ctx.duration = 0.18; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-            s.animator.frame = f; s.animator.alphaValue = 1;
-        }];
+        dispatch_async(dispatch_get_main_queue(), ^{   // next turn: the start position is on screen before it moves
+            if (!s.shown) return;
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+                ctx.duration = 0.18; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+                s.animator.frame = f; s.animator.alphaValue = 1;
+            }];
+        });
     } else {
         s.sticky = NO;
         if (s.search.currentEditor) [self.window makeFirstResponder:self.current.web.web ?: self.window.contentView];
@@ -7803,6 +8561,86 @@ static void InstallShelfMonitor(void) {
     [self showShelf:YES]; s.sticky = YES;
     [self.window makeFirstResponder:s.search];
 }
+@end
+
+
+// The loading line: a hairline along the bottom of the top band, from one edge of the window to the other, right
+// where the page begins. It grows with the page's real progress (and creeps on its own while a page goes quiet,
+// so it never sits still), brightest at its tip, with a glint running along it; done, it reaches the far edge and fades.
+@interface VLoadLine : NSView
+@property (strong) CAGradientLayer *fill, *tip, *glint;
+@property double real, shown;
+@property CFTimeInterval started;
+@property BOOL active;
+@property (strong) NSTimer *tick;
+- (void)loading:(BOOL)on progress:(double)p;
+@end
+@implementation VLoadLine
+- (instancetype)initWithFrame:(NSRect)r {
+    if (!(self = [super initWithFrame:r])) return nil;
+    self.wantsLayer = YES; self.layer.masksToBounds = NO;
+    self.fill = [CAGradientLayer layer]; self.fill.startPoint = CGPointMake(0, 0.5); self.fill.endPoint = CGPointMake(1, 0.5); self.fill.masksToBounds = YES;
+    self.tip = [CAGradientLayer layer]; self.tip.startPoint = CGPointMake(0, 0.5); self.tip.endPoint = CGPointMake(1, 0.5);
+    self.glint = [CAGradientLayer layer]; self.glint.startPoint = CGPointMake(0, 0.5); self.glint.endPoint = CGPointMake(1, 0.5);
+    [self.fill addSublayer:self.tip]; [self.fill addSublayer:self.glint];
+    [self.layer addSublayer:self.fill];
+    self.fill.hidden = YES;
+    return self;
+}
+- (NSView *)hitTest:(NSPoint)p { return nil; }   // never in the way of a click
+- (void)paint {
+    NSColor *ink = [Defaults() integerForKey:kAccent] == 0 ? vText : vAccent;   // quiet, in your accent if you chose one
+    self.fill.colors = @[(id)[ink colorWithAlphaComponent:0.45].CGColor, (id)[ink colorWithAlphaComponent:0.8].CGColor];
+    self.tip.colors = @[(id)[ink colorWithAlphaComponent:0].CGColor, (id)[ink colorWithAlphaComponent:1].CGColor];
+    self.glint.colors = @[(id)[NSColor colorWithWhite:1 alpha:0].CGColor, (id)[NSColor colorWithWhite:1 alpha:ThemeIsLight() ? 0.6 : 0.45].CGColor, (id)[NSColor colorWithWhite:1 alpha:0].CGColor];
+}
+- (void)place:(double)f duration:(CFTimeInterval)d {
+    CGFloat W = NSWidth(self.bounds), H = NSHeight(self.bounds), w = round(W * f);
+    [CATransaction begin]; [CATransaction setAnimationDuration:d];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithControlPoints:0.25 :0.8 :0.3 :1]];
+    if (d == 0) [CATransaction setDisableActions:YES];
+    self.fill.frame = CGRectMake(0, 0, w, H);
+    self.tip.frame = CGRectMake(MAX(0, w - 120), 0, 120, H);
+    [CATransaction commit];
+}
+- (void)advance {
+    double t = CACurrentMediaTime() - self.started;
+    double creep = 0.85 * (1 - exp(-t / 4.0));   // a page that's gone quiet still shows life, never past 85%
+    double target = MAX(MAX(0.03, self.real), creep);
+    if (target > self.shown + 0.002) { self.shown = target; [self place:self.shown duration:0.4]; }
+}
+- (void)loading:(BOOL)on progress:(double)p {
+    [self paint];
+    self.real = MAX(0, MIN(1, p));
+    if (on && !self.active) {   // a fresh load starts at the left edge
+        self.active = YES; self.started = CACurrentMediaTime(); self.shown = 0;
+        [self.fill removeAllAnimations];
+        [CATransaction begin]; [CATransaction setDisableActions:YES]; self.fill.opacity = 1; self.fill.hidden = NO; self.glint.frame = CGRectMake(-160, 0, 160, NSHeight(self.bounds)); [CATransaction commit];
+        [self place:0 duration:0];
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"position.x"];
+        a.fromValue = @(-80); a.toValue = @(NSWidth(self.bounds) + 80); a.duration = 1.5; a.repeatCount = HUGE_VALF;
+        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.glint addAnimation:a forKey:@"run"];
+        __weak VLoadLine *ws = self;
+        self.tick = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm) { [ws advance]; }];
+        [NSRunLoop.mainRunLoop addTimer:self.tick forMode:NSRunLoopCommonModes];
+    }
+    if (on) { [self advance]; return; }
+    if (!self.active) return;
+    self.active = NO; [self.tick invalidate]; self.tick = nil;
+    // done: on to the far edge, then fade
+    [CATransaction begin];
+    [CATransaction setCompletionBlock:^{
+        if (self.active) return;
+        [CATransaction begin]; [CATransaction setAnimationDuration:0.35];
+        [CATransaction setCompletionBlock:^{ if (!self.active) { self.fill.hidden = YES; [self.glint removeAllAnimations]; } }];
+        self.fill.opacity = 0;
+        [CATransaction commit];
+    }];
+    [self place:1 duration:0.22];
+    [CATransaction commit];
+}
+- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; if (self.active) [self place:self.shown duration:0]; }
 @end
 
 #pragma mark - Monolith panels: Lens, and the address popup
@@ -7884,12 +8722,17 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
 - (void)present:(NSRect)frame {
     self.shown = YES;
     if (self.superview) [self.superview addSubview:self positioned:NSWindowAbove relativeTo:nil];
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
     self.frame = NSOffsetRect(frame, 0, -6); self.alphaValue = 0; self.hidden = NO;
-    PanelShadow(self);
-    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
-        ctx.duration = 0.14; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-        self.animator.frame = frame; self.animator.alphaValue = 1;
-    }];
+    PanelShadow(self); [self displayIfNeeded];
+    [CATransaction commit];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self.shown) return;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = 0.14; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            self.animator.frame = frame; self.animator.alphaValue = 1;
+        }];
+    });
 }
 - (void)dismiss {
     if (!self.shown) return;
@@ -8033,9 +8876,9 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     NSString *site = [host hasPrefix:@"www."] ? [host substringFromIndex:4] : host;
 
     if (self.mode == 1) {   // ---- the lock: this site ----
-        VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:web ? host : (t.isHome ? @"New Tab" : t.title ?: @"Flint")];
+        VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:web ? host : (t.isHome ? @"New Tab" : t.title ?: @"Iris")];
         h.icon = t.favicon;
-        h.meta = !web ? @"Flint page" : [u.scheme isEqualToString:@"https"] ? @"Secure connection · WebKit" : @"Not secure · this page isn't encrypted";
+        h.meta = !web ? @"Iris page" : [u.scheme isEqualToString:@"https"] ? @"Secure connection · WebKit" : @"Not secure · this page isn't encrypted";
         y += 40 + 14;
         if (web) {
             CGFloat sw = floor((cw - 8) / 2);
@@ -8081,7 +8924,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         y += 40 + 14;
         CGFloat sw = floor((cw - 8) / 2);
         VPItem *s1 = [self add:VPStat rect:NSMakeRect(x, y, sw, 62) title:[NSString stringWithFormat:@"%ld", (long)t.blocked]]; s1.meta = @"On this page";
-        VPItem *s2 = [self add:VPStat rect:NSMakeRect(x + sw + 8, y, cw - sw - 8, 62) title:gRuleCount >= 1000 ? [NSString stringWithFormat:@"%.0fk", gRuleCount / 1000.0] : [NSString stringWithFormat:@"%lu", (unsigned long)gRuleCount]]; s2.meta = @"Hosts in the lists";
+        VPItem *s2 = [self add:VPStat rect:NSMakeRect(x + sw + 8, y, cw - sw - 8, 62) title:gRuleCount >= 1000 ? [NSString stringWithFormat:@"%.0fk", gRuleCount / 1000.0] : [NSString stringWithFormat:@"%lu", (unsigned long)gRuleCount]]; s2.meta = @"Rules in the lists";
         y += 62 + 16;
         if (web) {
             VPItem *bs = [self add:VPToggle rect:NSMakeRect(x, y, cw, 40) title:[@"Block on " stringByAppendingString:site]]; bs.on = global && !allowed;
@@ -8112,7 +8955,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     }
 
     // ---- Lens: the browser (the page's own settings live behind the lock and the shield) ----
-    VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw - 128, 40) title:@"Flint"];
+    VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw - 128, 40) title:@"Iris"];
     h.icon = Tinted(Symbol(@"camera.aperture", 16, NSFontWeightMedium), vText);
     h.meta = w.isPrivate ? @"Private window" : [NSString stringWithFormat:@"%lu tabs in this window", (unsigned long)w.tabs.count];
     VPItem *av = [self add:VPAvatar rect:NSMakeRect(W - P - 118, y + 5, 118, 30) title:w.isPrivate ? @"Private" : ProfileName(w.profile)];
@@ -8497,12 +9340,12 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
     w.appearance = ThemeAppearance();
     w.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
     w.delegate = self;
-    w.title = priv ? @"Flint · Private" : _profile.length ? [@"Flint · " stringByAppendingString:ProfileName(_profile)] : @"Flint";
+    w.title = priv ? @"Iris · Private" : _profile.length ? [@"Iris · " stringByAppendingString:ProfileName(_profile)] : @"Iris";
     // Monolith: no title bar of our own. The page reaches the window's edges; the empty ground around it moves the window.
     w.acceptsMouseMovedEvents = YES;
     if (firstNormal) {
-        w.frameAutosaveName = @"FlintMain";
-        if (![w setFrameUsingName:@"FlintMain"]) [w center];
+        w.frameAutosaveName = @"IrisMain";
+        if (![w setFrameUsingName:@"IrisMain"]) [w center];
     } else if ([state[@"frame"] isKindOfClass:NSString.class] && NSWidth(NSRectFromString(state[@"frame"])) > 300) {
         [w setFrame:NSRectFromString(state[@"frame"]) display:NO];
     } else if (previous.window) {
@@ -8542,6 +9385,7 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
     [root addSubview:self.toolbar positioned:NSWindowAbove relativeTo:self.content];
     self.lights = [[VLights alloc] initWithFrame:NSMakeRect(12, 7, 62, 22)];
     self.shelfHandle = [[VShelfHandle alloc] initWithFrame:NSZeroRect];
+    self.loadLine = [[VLoadLine alloc] initWithFrame:NSZeroRect];
     self.shelf = [[VTabShelf alloc] initWithOwner:self];
     for (NSView *v in @[self.lights, self.shelfHandle, self.shelf]) [root addSubview:v positioned:NSWindowAbove relativeTo:nil];
     InstallShelfMonitor();
@@ -8683,7 +9527,7 @@ static NSString *CreateProfile(NSString *name) {
         t.favicon = [VFavicons.shared iconForURL:t.url];
         VPage *p = [self makePage:t];
         [p open:t.url record:NO];
-        if (!sel) t.hiddenAt = NSDate.date.timeIntervalSince1970;
+        if (!sel) { t.hiddenAt = t.openedFresh = NSDate.date.timeIntervalSince1970; [self tabOpenedBehind]; }
     }
     if (sel || !self.current) [self selectTab:t];
     else [self refreshChrome];
@@ -8696,6 +9540,7 @@ static NSString *CreateProfile(NSString *name) {
     if (!t) return;
     VTab *was = self.current;
     if (was) t.deferred = NO;   // you chose it: it loads
+    t.openedFresh = 0;
     if (was != t) [self autoPiPLeaving:was entering:t];   // asked while the old page is still on screen
     if (self.current && self.current != t) { self.current.hiddenAt = NSDate.date.timeIntervalSince1970; CaptureThumb(self.current); }
     self.current = t;
@@ -8765,7 +9610,11 @@ static NSString *CreateProfile(NSString *name) {
             if (gWindows.count > 1) { [self.sidebar reload]; dispatch_async(dispatch_get_main_queue(), ^{ [self.window performClose:nil]; }); return; }
             [self newTab:nil select:YES]; return;
         }
-        [self selectTab:partner && [self.tabs containsObject:partner] ? partner : self.tabs[MIN(i, self.tabs.count - 1)]];
+        // back to the tab you were on just before (the one left of it in the strip), so closing a page you opened from
+        // another — a sign-in pop-up, a link — returns you where you came from
+        VTab *back = nil;
+        for (VTab *x in self.tabs) if (!x.openedFresh && x.hiddenAt > 0 && (!back || x.hiddenAt > back.hiddenAt)) back = x;
+        [self selectTab:partner && [self.tabs containsObject:partner] ? partner : back ?: self.tabs[MIN(i, self.tabs.count - 1)]];
     } else if (partner) [self placePages];
     [self.sidebar reload];
     [self scheduleSave];
@@ -8806,7 +9655,7 @@ static NSString *CreateProfile(NSString *name) {
     [m addItem:NSMenuItem.separatorItem];
     add(@"Close Tab", @selector(menuClose:));
     add(@"Close Other Tabs", @selector(menuCloseOthers:));
-    add(@"Close Tabs Below", @selector(menuCloseBelow:));
+    add(@"Close Older Tabs", @selector(menuCloseBelow:)).enabled = [self olderThan:t].count > 0;   // left of it in the strip
     [m addItem:NSMenuItem.separatorItem];
     NSMenuItem *ro = add(@"Reopen Closed Tab", @selector(reopenClosed:)); ro.enabled = self.closed.count > 0;
     PopMenu(m, p, v);
@@ -8824,9 +9673,20 @@ static NSString *CreateProfile(NSString *name) {
 - (void)menuSleep:(NSMenuItem *)i { [self sleep:i.representedObject]; }
 - (void)menuClose:(NSMenuItem *)i { [self closeTab:i.representedObject]; }
 - (void)menuCloseOthers:(NSMenuItem *)i { for (VTab *t in self.tabs.copy) if (t != i.representedObject && !t.pinned) [self closeTab:t]; [self selectTab:i.representedObject]; }
+// The strip is a timeline, so "older" means the tabs left of this one: looked at longer ago. Pinned tabs and
+// tabs you haven't opened yet are never in it.
+- (NSArray<VTab *> *)olderThan:(VTab *)t {
+    NSMutableArray *out = [NSMutableArray array];
+    for (VTab *x in self.tabs) {
+        if (x == t || x == self.current || x.pinned || x.openedFresh > 0) continue;
+        if (t == self.current || (t.openedFresh == 0 && x.hiddenAt < t.hiddenAt) || t.openedFresh > 0) [out addObject:x];
+    }
+    return out;
+}
 - (void)menuCloseBelow:(NSMenuItem *)i {
-    NSUInteger at = [self.tabs indexOfObject:i.representedObject];
-    for (VTab *t in [self.tabs subarrayWithRange:NSMakeRange(at + 1, self.tabs.count - at - 1)]) if (!t.pinned) [self closeTab:t];
+    NSArray *older = [self olderThan:i.representedObject];
+    for (VTab *t in older) [self closeTab:t];
+    if (older.count > 1) [self showToast:[NSString stringWithFormat:@"Closed %lu older tabs · ⇧⌘T brings them back", (unsigned long)older.count]];
 }
 
 #pragma mark Session
@@ -8924,6 +9784,13 @@ static NSString *CreateProfile(NSString *name) {
 
 - (void)layout {
     if (!self.lights) return;   // AppKit can ask for a layout while the window is still being built
+    // Layout is never animated: at launch the views would otherwise glide in from wherever they started
+    [NSAnimationContext beginGrouping]; NSAnimationContext.currentContext.duration = 0; NSAnimationContext.currentContext.allowsImplicitAnimation = NO;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    [self layoutNow];
+    [CATransaction commit]; [NSAnimationContext endGrouping];
+}
+- (void)layoutNow {
     NSView *root = self.window.contentView;
     CGFloat W = NSWidth(root.bounds), H = NSHeight(root.bounds);
     BOOL fs = (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
@@ -8932,10 +9799,10 @@ static NSString *CreateProfile(NSString *name) {
     if (titleContainer && !fs && [NSStringFromClass(titleContainer.class) containsString:@"Titlebar"]) titleContainer.hidden = YES;
     self.bookmarksBar.hidden = YES; self.sideScroll.hidden = YES; self.railDock.hidden = YES; self.sideHandle.hidden = YES;
     if (self.toolbar.superview != root) { [self.toolbar removeFromSuperview]; [root addSubview:self.toolbar positioned:NSWindowAbove relativeTo:self.content]; }
-    for (NSView *v in @[self.lights, self.shelfHandle, self.shelf]) if (v.superview != root) [root addSubview:v positioned:NSWindowAbove relativeTo:nil];
+    for (NSView *v in @[self.lights, self.shelfHandle, self.shelf, self.loadLine]) if (v.superview != root) [root addSubview:v positioned:NSWindowAbove relativeTo:nil];
     NSView *np = self.nowPlaying;
     if (self.pageFull) {   // a video went full screen: the page gets everything
-        self.toolbar.hidden = YES; self.lights.hidden = YES; self.shelfHandle.hidden = YES; np.hidden = YES;
+        self.toolbar.hidden = YES; self.lights.hidden = YES; self.shelfHandle.hidden = YES; np.hidden = YES; self.loadLine.hidden = YES;
         [self showShelf:NO];
         self.content.frame = root.bounds; [self placePages];
         self.content.layer.borderWidth = 0; self.content.layer.cornerRadius = 0; self.capTL.hidden = self.capBR.hidden = YES;
@@ -8952,10 +9819,11 @@ static NSString *CreateProfile(NSString *name) {
     [self.toolbar layoutBar];
     self.lights.hidden = fs;
     self.lights.frame = NSMakeRect(12, 7, 62, 22);
+    self.loadLine.hidden = NO; self.loadLine.frame = NSMakeRect(0, top - 2, W, 2);   // right where the page begins, edge to edge
     VTabShelf *sh = (VTabShelf *)self.shelf;
-    if (sh.shown) sh.frame = [self shelfFrame];
+    sh.frame = sh.shown ? [self shelfFrame] : NSOffsetRect([self shelfFrame], 0, 14);   // waiting just below its place, so it always rises from the bottom
     self.shelfHandle.frame = NSMakeRect(round(W / 2 - 50), H - 18, 100, 18);
-    self.shelfHandle.hidden = sh.shown || [Defaults() boolForKey:kShelfNoHint];
+    self.shelfHandle.hidden = sh.shown || ([Defaults() boolForKey:kShelfNoHint] && !((VShelfHandle *)self.shelfHandle).flashing);
     if (np) {
         [np setValue:@YES forKey:@"floating"];
         np.frame = NSMakeRect(10, H - 10 - 64, 300, 64);
@@ -8980,29 +9848,10 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     self.capTL.hidden = self.capBR.hidden = YES;
 }
 
-// While the page loads, a spark sweeps the top edge of the page frame, growing with progress.
+// While the page loads: the line along the bottom of the top band (VLoadLine), edge to edge.
 - (void)updateEmber {
-    CAGradientLayer *e = nil;
-    for (CALayer *l in self.content.layer.sublayers) if ([l.name isEqualToString:@"ember"]) e = (CAGradientLayer *)l;
-    if (!e) return;
     VPage *w = self.current.web;
-    BOOL on = w.loading && !self.pageFull;
-    [CATransaction begin]; [CATransaction setDisableActions:YES];
-    CGFloat W = NSWidth(self.content.bounds), H = NSHeight(self.content.bounds);
-    e.frame = CGRectMake(14, H - 2, W - 28, 2);
-    NSColor *ink = [Defaults() integerForKey:kAccent] == 0 ? vText : vAccent;   // loading: a quiet line, in the accent if you chose one
-    e.colors = @[(id)[ink colorWithAlphaComponent:0].CGColor, (id)[ink colorWithAlphaComponent:0.35].CGColor, (id)[ink colorWithAlphaComponent:0.7].CGColor, (id)[ink colorWithAlphaComponent:0.35].CGColor, (id)[ink colorWithAlphaComponent:0].CGColor];
-    e.locations = @[@0, @0.35, @0.5, @0.65, @1];
-    e.shadowOpacity = 0;
-    CGPathRef sp = CGPathCreateWithRect(CGRectMake(0, 0, W - 28, 2), NULL); e.shadowPath = sp; CGPathRelease(sp);   // explicit shape: no per-frame shadow pass
-    e.hidden = !on;
-    [CATransaction commit];
-    if (on && ![e animationForKey:@"sweep"]) {
-        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"locations"];
-        a.fromValue = @[@-0.6, @-0.25, @-0.1, @0.05, @0.4]; a.toValue = @[@0.6, @0.95, @1.1, @1.25, @1.6];
-        a.duration = 1.1; a.repeatCount = HUGE_VALF; a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        [e addAnimation:a forKey:@"sweep"];
-    } else if (!on) [e removeAllAnimations];
+    [(VLoadLine *)self.loadLine loading:w.loading && !self.pageFull progress:w.progress];
 }
 
 - (void)applyTheme {
@@ -9062,11 +9911,11 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     NSMutableAttributedString *a = [NSMutableAttributedString new];
     if (t.isHome || !u) return a;
     if (extName) { [a appendAttributedString:[[NSAttributedString alloc] initWithString:extName attributes:strong]]; return a; }
-    if ([u.scheme isEqualToString:@"flint"]) {
+    if ([u.scheme isEqualToString:@"iris"]) {
         NSString *orig = nil; for (NSURLQueryItem *q in [NSURLComponents componentsWithURL:u resolvingAgainstBaseURL:NO].queryItems) if ([q.name isEqualToString:@"u"]) orig = q.value;
-        NSString *name = u.host.capitalizedString ?: @"Flint";
+        NSString *name = u.host.capitalizedString ?: @"Iris";
         [a appendAttributedString:[[NSAttributedString alloc] initWithString:name attributes:strong]];
-        NSString *rest = orig ? HostOf([NSURL URLWithString:orig]) : @"Flint";
+        NSString *rest = orig ? HostOf([NSURL URLWithString:orig]) : @"Iris";
         if (rest.length) [a appendAttributedString:[[NSAttributedString alloc] initWithString:[@"  ·  " stringByAppendingString:rest] attributes:quiet]];
         return a;
     }
@@ -9096,14 +9945,14 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     tb.reloadBtn.symbolName = w.loading ? @"xmark" : @"arrow.clockwise";
     tb.reloadBtn.toolTip = w.loading ? @"Stop" : @"Reload (⌘R)";
     NSString *scheme = [NSURL URLWithString:t.url ?: @""].scheme;
-    tb.infoBtn.symbolName = t.isHome ? @"magnifyingglass" : [scheme isEqualToString:@"chrome-extension"] ? @"puzzlepiece.extension" : [scheme isEqualToString:@"flint"] ? @"sparkle" : [scheme isEqualToString:@"https"] ? @"lock.fill" : @"exclamationmark.triangle";
+    tb.infoBtn.symbolName = t.isHome ? @"magnifyingglass" : [scheme isEqualToString:@"chrome-extension"] ? @"puzzlepiece.extension" : [scheme isEqualToString:@"iris"] ? @"sparkle" : [scheme isEqualToString:@"https"] ? @"lock.fill" : @"exclamationmark.triangle";
     tb.starBtn.hidden = t.isHome || !ToolbarShows(@"star");
     tb.pipBtn.hidden = !(t.web && (t.hasVideo || t.inPiP));
     tb.pipBtn.symbolName = t.inPiP ? @"pip.exit" : @"pip.enter";
     tb.pipBtn.toolTip = t.inPiP ? @"Return video to the page (⌃⌘P)" : @"Picture in Picture (⌃⌘P)";
     tb.pipBtn.active = t.inPiP; tb.pipBtn.needsDisplay = YES;
-    [tb placePillButtons];    tb.readerBtn.enabled = [t.url hasPrefix:@"http"] || [t.url hasPrefix:@"flint://reader"];
-    tb.readerBtn.active = [t.url hasPrefix:@"flint://reader"];
+    [tb placePillButtons];    tb.readerBtn.enabled = [t.url hasPrefix:@"http"] || [t.url hasPrefix:@"iris://reader"];
+    tb.readerBtn.active = [t.url hasPrefix:@"iris://reader"];
     tb.shareBtn.enabled = [t.url hasPrefix:@"http"];
     for (VButton *b in @[tb.readerBtn, tb.shareBtn, tb.homeBtn]) b.needsDisplay = YES;
     tb.starBtn.symbolName = [VBookmarks.shared find:t.url] ? @"star.fill" : @"star";
@@ -9118,7 +9967,7 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     for (VButton *b in @[tb.backBtn, tb.fwdBtn, tb.reloadBtn, tb.infoBtn, tb.starBtn, tb.shieldBtn]) b.needsDisplay = YES;
     tb.needsDisplay = YES;
     self.sidebar.needsDisplay = YES;
-    self.window.title = t.title.length ? t.title : @"Flint";
+    self.window.title = t.title.length ? t.title : @"Iris";
 }
 
 #pragma mark Address bar
@@ -9544,7 +10393,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     VTab *t = self.current;
     NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
     BOOL on = [Defaults() boolForKey:kBlock];
-    NSString *head = !on ? @"Blocking is off" : [NSString stringWithFormat:@"Blocking ads and trackers · %lu hosts", (unsigned long)gRuleCount];
+    NSString *head = !on ? @"Blocking is off" : [NSString stringWithFormat:@"Blocking ads, trackers and pop-ups · %lu rules", (unsigned long)gRuleCount];
     (void)t;
     [m addItemWithTitle:head action:nil keyEquivalent:@""].enabled = NO;
     [m addItemWithTitle:[@"Filter lists: " stringByAppendingString:VBlocker.shared.status] action:nil keyEquivalent:@""].enabled = NO;
@@ -9576,7 +10425,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 - (void)toggleBlockingGlobal:(id)s {
     BOOL on = ![Defaults() boolForKey:kBlock];
     [Defaults() setBool:on forKey:kBlock];
-    FlintSetBlocking(on);
+    IrisSetBlocking(on);
     [self.current.web reload];
     [self refreshChrome];
 }
@@ -9588,7 +10437,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     [Defaults() setObject:a forKey:kAllowlist];
     [self showToast:wasAllowed ? [NSString stringWithFormat:@"Blocking back on for %@…", site] : [NSString stringWithFormat:@"Blocking off for %@…", site]];
     VPage *w = self.current.web;
-    FlintReloadBlocklistsThen(^{ [w reload]; });
+    IrisReloadBlocklistsThen(^{ [w reload]; });
 }
 - (void)updateListsNow:(id)s {
     [self showToast:@"Updating filter lists…"];
@@ -9651,6 +10500,14 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 - (void)openExtension:(NSMenuItem *)m { [FExtHost.shared openPopup:m.representedObject from:self.toolbar.menuBtn]; }
 
 // A page that already exists (a popup the site opened) gets its own tab.
+// A tab opened without switching to it (⌘-click, middle-click, "Open in Background"): the hint at the bottom edge
+// lights up in your highlight colour, or the strip shows the new card if it's already up.
+- (void)tabOpenedBehind {
+    if ([[self valueForKey:@"pageFull"] boolValue]) return;   // a video filling the window: nothing lights up over it
+    VTabShelf *sh = (VTabShelf *)self.shelf;
+    if (sh.shown) { [sh reload]; [sh scrollToNewest]; return; }
+    [(VShelfHandle *)self.shelfHandle flashNewTab];
+}
 - (void)newTabWithPage:(VPage *)p url:(NSURL *)u select:(BOOL)sel {
     VTab *t = [VTab new]; t.owner = self;
     t.url = u.absoluteString; t.title = u.host ?: @"New Tab";
@@ -9658,12 +10515,12 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     p.tab = t; t.web = p;
     NSUInteger at = self.current ? [self.tabs indexOfObject:self.current] + 1 : self.tabs.count;
     [self.tabs insertObject:t atIndex:MIN(at, self.tabs.count)];
-    if (sel) [self selectTab:t]; else { t.hiddenAt = NSDate.date.timeIntervalSince1970; [self refreshChrome]; }
+    if (sel) [self selectTab:t]; else { t.hiddenAt = t.openedFresh = NSDate.date.timeIntervalSince1970; [self refreshChrome]; [self tabOpenedBehind]; }
     [self.sidebar reload];
     [self scheduleSave];
 }
 
-- (void)openLinkInBackground:(NSMenuItem *)m { [self newTab:[NSURL URLWithString:m.representedObject] select:NO]; [self showToast:@"Opened in a background tab"]; }
+- (void)openLinkInBackground:(NSMenuItem *)m { [self newTab:[NSURL URLWithString:m.representedObject] select:NO]; }
 - (void)bookmarkURL:(NSMenuItem *)m {
     NSString *u = m.representedObject; if (!u) return;
     if (![VBookmarks.shared find:u]) [VBookmarks.shared toggle:u title:HostOf([NSURL URLWithString:u])];
@@ -9795,7 +10652,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 
 #pragma mark - Page tools: reader, PDF, web archive, share, open file, inspector
 
-// Pulls the main article out of a page (a small Readability-style pass), run in Flint's own world so
+// Pulls the main article out of a page (a small Readability-style pass), run in Iris's own world so
 // the page can't interfere. Returns {title, byline, site, lang, dir, html, words}.
 static NSString *ReaderExtractJS(void) {
     return @"const doc=document;const W=s=>(s||'').replace(/\\s+/g,' ').trim();"
@@ -9811,7 +10668,7 @@ static NSString *ReaderExtractJS(void) {
     "if(s>bestScore){bestScore=s;best=e}}"
     "const arts=[...doc.querySelectorAll('article')].filter(a=>textLen(a)>600).sort((a,b)=>textLen(b)-textLen(a));"
     "if(arts[0]&&(!best||arts[0].contains(best)||textLen(arts[0])>textLen(best)*.9))best=arts[0];"
-    "if(!best||textLen(best)<250)return {error:'Flint couldn\\'t find an article on this page.'};"
+    "if(!best||textLen(best)<250)return {error:'Iris couldn\\'t find an article on this page.'};"
     "const root=best.cloneNode(true);"
     "for(const img of root.querySelectorAll('img')){const real=img.getAttribute('data-src')||img.getAttribute('data-lazy-src')||img.getAttribute('data-original');if(real)img.setAttribute('src',real)}"
     "const live=best.querySelectorAll('img'),copy=root.querySelectorAll('img');copy.forEach((c,i)=>{const l=live[i];if(l&&l.currentSrc&&!/^data:/.test(l.currentSrc))c.setAttribute('src',l.currentSrc);"
@@ -9904,19 +10761,19 @@ static NSString *ReaderExtractJS(void) {
 - (void)toggleReader:(id)s {
     VPage *p = self.current.web; if (!p) return;
     NSURL *u = p.web.URL;
-    if ([u.scheme isEqualToString:@"flint"] && [u.host isEqualToString:@"reader"]) {   // already reading: back to the page
+    if ([u.scheme isEqualToString:@"iris"] && [u.host isEqualToString:@"reader"]) {   // already reading: back to the page
         if (p.web.canGoBack) [p.web goBack];
         else { NSString *orig = nil; for (NSURLQueryItem *q in [NSURLComponents componentsWithURL:u resolvingAgainstBaseURL:NO].queryItems) if ([q.name isEqualToString:@"u"]) orig = q.value; if (orig) [self openURL:[NSURL URLWithString:orig] newTab:NO]; }
         return;
     }
     if (![u.scheme hasPrefix:@"http"]) { [self showToast:@"Reader works on web articles"]; return; }
-    [p.web callAsyncJavaScript:ReaderExtractJS() arguments:@{} inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"flint"] completionHandler:^(id r, NSError *e) {
+    [p.web callAsyncJavaScript:ReaderExtractJS() arguments:@{} inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"iris"] completionHandler:^(id r, NSError *e) {
         if (![r isKindOfClass:NSDictionary.class] || r[@"error"]) { [self showToast:[r isKindOfClass:NSDictionary.class] ? r[@"error"] : @"Couldn't open Reader on this page"]; return; }
         if (!gReader) gReader = [NSMutableDictionary dictionary];
         if (gReader.count > 30) [gReader removeAllObjects];
         NSString *token = [NSUUID UUID].UUIDString;
         gReader[token] = r;
-        NSURLComponents *c = [NSURLComponents componentsWithString:@"flint://reader/"];
+        NSURLComponents *c = [NSURLComponents componentsWithString:@"iris://reader/"];
         c.queryItems = @[[NSURLQueryItem queryItemWithName:@"id" value:token], [NSURLQueryItem queryItemWithName:@"u" value:u.absoluteString]];
         [p.web loadRequest:[NSURLRequest requestWithURL:c.URL]];
     }];
@@ -9999,7 +10856,8 @@ static id Inspector(VPage *p) { @try { return [p.web valueForKey:@"_inspector"];
 static NSString *MediaQueryJS(void) {
     return @"(()=>{const ms=navigator.mediaSession,m=ms&&ms.metadata;const v=[...document.querySelectorAll('video,audio')].find(x=>x.currentSrc&&x.duration>0)||null;"
             "if(!m&&!v)return null;const art=m&&m.artwork&&m.artwork.length?m.artwork[m.artwork.length-1].src:'';"
-            "return{title:(m&&m.title)||document.title||'',artist:(m&&m.artist)||'',art:art,playing:v?!v.paused:(ms&&ms.playbackState==='playing'),pos:v?v.currentTime:0,dur:v&&isFinite(v.duration)?v.duration:0}})()";
+            "const pip=!!document.pictureInPictureElement||[...document.querySelectorAll('video')].some(x=>x.webkitPresentationMode==='picture-in-picture');"
+            "return{title:(m&&m.title)||document.title||'',artist:(m&&m.artist)||'',art:art,playing:v?!v.paused:(ms&&ms.playbackState==='playing'),pos:v?v.currentTime:0,dur:v&&isFinite(v.duration)?v.duration:0,pip:pip}})()";
 }
 // Video thumbnails often come letterboxed (black bands above and below, or at the sides); cut those off so the
 // artwork fills its square with the picture itself.
@@ -10129,7 +10987,7 @@ static NSRect NowPlayingFrame(NSRect root, NSSize sz) {
 - (void)control:(VButton *)b {
     VTab *t = self.owner.mediaTab; if (!t.web) return;
     NSString *a = b.tag == 1 ? @"prev" : b.tag == 2 ? @"toggle" : @"next";
-    [t.web.web callAsyncJavaScript:MediaControlJS() arguments:@{@"a": a} inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"flint"] completionHandler:^(id r, NSError *err) {
+    [t.web.web callAsyncJavaScript:MediaControlJS() arguments:@{@"a": a} inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"iris"] completionHandler:^(id r, NSError *err) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self.owner updateNowPlaying]; });
     }];
 }
@@ -10145,10 +11003,10 @@ static NSRect NowPlayingFrame(NSRect root, NSSize sz) {
     NSString *host = old.web.web.URL.host ?: @"";
     if (old.web && old.audible && !old.muted && ![host hasPrefix:@"music."] && ![host containsString:@"spotify"] && ![host containsString:@"soundcloud"])
         [old.web.web callAsyncJavaScript:@"const v=[...document.querySelectorAll('video')].find(v=>!v.paused&&!v.muted&&v.readyState>2&&v.videoWidth>0&&v.getBoundingClientRect().width>=200);"
-                                          "if(!v||document.pictureInPictureElement||v.disablePictureInPicture)return false;await v.requestPictureInPicture();window.__flintAutoPiP=true;return true;"
+                                          "if(!v||document.pictureInPictureElement||v.disablePictureInPicture)return false;await v.requestPictureInPicture();window.__irisAutoPiP=true;return true;"
                                 arguments:@{} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
     if (t.web)
-        [t.web.web callAsyncJavaScript:@"if(window.__flintAutoPiP&&document.pictureInPictureElement){window.__flintAutoPiP=false;await document.exitPictureInPicture()}"
+        [t.web.web callAsyncJavaScript:@"if(window.__irisAutoPiP&&document.pictureInPictureElement){window.__irisAutoPiP=false;await document.exitPictureInPicture()}"
                              arguments:@{} inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
 }
 // Polled about once a second while there is music to show; it stops when the tab goes away.
@@ -10163,11 +11021,19 @@ static NSRect NowPlayingFrame(NSRect root, NSSize sz) {
         if (!np.hidden) { np.hidden = YES; [self layout]; }
         return;
     }
-    [t.web.web evaluateJavaScript:MediaQueryJS() inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"flint"] completionHandler:^(id r, NSError *e) {
+    [t.web.web evaluateJavaScript:MediaQueryJS() inFrame:nil inContentWorld:[WKContentWorld worldWithName:@"iris"] completionHandler:^(id r, NSError *e) {
         NSDictionary *info = [r isKindOfClass:NSDictionary.class] ? r : nil;
-        BOOL show = info && [info[@"title"] length];
+        BOOL pip = [info[@"pip"] boolValue];
+        if (t.inPiP != pip) { t.inPiP = pip; [self refreshChrome]; }
+        BOOL show = info && [info[@"title"] length] && !pip;   // floating in Picture in Picture already: no second player on top
         if (np.hidden == show) { np.hidden = !show; [self layout]; }
-        if (!show) return;
+        if (!show) {
+            if (pip) {   // look again once it comes back from Picture in Picture
+                [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(updateNowPlaying) object:nil];
+                [self performSelector:@selector(updateNowPlaying) withObject:nil afterDelay:1.0];
+            }
+            return;
+        }
         np.info = info;
         np.toolTip = [info[@"artist"] length] ? [NSString stringWithFormat:@"%@ — %@", info[@"title"], info[@"artist"]] : info[@"title"];
         np.play.symbolName = [info[@"playing"] boolValue] ? @"pause.fill" : @"play.fill"; np.play.needsDisplay = YES;
@@ -10373,18 +11239,18 @@ static NSRect NowPlayingFrame(NSRect root, NSSize sz) {
 }
 @end
 
-#pragma mark - The CPU rule: Flint averages at most one core over any 10 seconds
+#pragma mark - The CPU rule: Iris averages at most one core over any 10 seconds
 
-// One rule, always on: Flint plus every process it starts (page and extension engines, the network process)
+// One rule, always on: Iris plus every process it starts (page and extension engines, the network process)
 // average at most one processor core over any 10 seconds. Short bursts run at full speed (a page draws in a
 // few seconds), because fans answer heat built up over time, not a moment of work. Measured every 100 ms;
-// while the 10-second average is under the cap nothing is touched; over it, Flint's helper processes are paced the way the `cpulimit` tool does it: in each 100 ms they run for
+// while the 10-second average is under the cap nothing is touched; over it, Iris's helper processes are paced the way the `cpulimit` tool does it: in each 100 ms they run for
 // a share of the time and pause for the rest, and that share is steered by what they actually used (a page
 // runs on several cores at once, so a fixed split can't hold a cap). The graphics process and any page that
-// is playing sound are paced last, so video and music stay smooth. Everything is resumed if Flint quits or
+// is playing sound are paced last, so video and music stay smooth. Everything is resumed if Iris quits or
 // crashes.
 
-static pid_t gGovPids[256];            // processes Flint may have paused (read by the crash handler)
+static pid_t gGovPids[256];            // processes Iris may have paused (read by the crash handler)
 static volatile sig_atomic_t gGovCount;
 static void GovResumeAll(void) { for (int i = 0; i < gGovCount; i++) if (gGovPids[i] > 0) kill(gGovPids[i], SIGCONT); }
 static void GovCrash(int sig) { GovResumeAll(); signal(sig, SIG_DFL); raise(sig); }
@@ -10394,9 +11260,9 @@ static pid_t WebPid(WKWebView *v) {
     return v && [v respondsToSelector:s] ? ((pid_t (*)(id, SEL))objc_msgSend)(v, s) : 0;
 }
 
-// Every process macOS counts as Flint's (WebKit's engine, network and graphics processes are launched on
-// Flint's behalf, so the system records Flint as "responsible" for them, which is how Activity Monitor groups them).
-static NSArray<NSNumber *> *FlintHelperPids(void) {
+// Every process macOS counts as Iris's (WebKit's engine, network and graphics processes are launched on
+// Iris's behalf, so the system records Iris as "responsible" for them, which is how Activity Monitor groups them).
+static NSArray<NSNumber *> *IrisHelperPids(void) {
     static pid_t (*responsible)(pid_t); static BOOL tried;
     if (!tried) { tried = YES; responsible = (pid_t (*)(pid_t))dlsym(RTLD_DEFAULT, "responsibility_get_pid_responsible_for_pid"); }
     if (!responsible) return @[];
@@ -10431,13 +11297,13 @@ static volatile BOOL gGovRunning;
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
     for (VTab *t in AllTabs(YES)) if (t.audible || now - t.lastInput < 8) { pid_t p = WebPid(t.web.web); if (p > 0) [spare addObject:@(p)]; }
     NSMutableArray *first = [NSMutableArray array];
-    for (NSNumber *p in FlintHelperPids()) {
+    for (NSNumber *p in IrisHelperPids()) {
         NSString *name = ProcName(p.intValue);
         if (![name hasPrefix:@"com.apple.WebKit.WebContent"]) continue;
         if (![spare containsObject:p]) [first addObject:p];
     }
     NSMutableArray *measured = [NSMutableArray array];
-    for (NSNumber *p in FlintHelperPids()) if ([ProcName(p.intValue) hasPrefix:@"com.apple.WebKit"] && ![first containsObject:p]) [measured addObject:p];
+    for (NSNumber *p in IrisHelperPids()) if ([ProcName(p.intValue) hasPrefix:@"com.apple.WebKit"] && ![first containsObject:p]) [measured addObject:p];
     return @{@"first": first, @"last": measured};
 }
 
@@ -10448,7 +11314,7 @@ static volatile BOOL gGovRunning;
     dispatch_once(&once, ^{ int sigs[] = {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP, SIGTERM}; for (int i = 0; i < 7; i++) signal(sigs[i], GovCrash); atexit(GovResumeAll); });
     [NSThread detachNewThreadWithBlock:^{
         [NSThread currentThread].qualityOfService = NSQualityOfServiceUtility;
-        const double period = 0.1, cap = 1.0;   // the rule: one core, averaged over 10 s, Flint and everything it runs
+        const double period = 0.1, cap = 1.0;   // the rule: one core, averaged over 10 s, Iris and everything it runs
         double frac = 1.0, lastSelf = SelfCPUSeconds();
         double ring[100] = {0}, ringSum = 0; int ri = 0;   // the last 10 s of use, one slot per period
         NSMutableDictionary<NSNumber *, NSNumber *> *last = [NSMutableDictionary dictionary];
@@ -10464,7 +11330,7 @@ static volatile BOOL gGovRunning;
                 NSSet *live = [NSSet setWithArray:[first arrayByAddingObjectsFromArray:late]];
                 for (NSNumber *p in last.allKeys) if (![live containsObject:p]) [last removeObjectForKey:p];
             }
-            // total use over the last period, Flint itself included
+            // total use over the last period, Iris itself included
             double dt = MAX(0.02, now - lastT); lastT = now;
             double me = SelfCPUSeconds(), total = (me - lastSelf) / dt; lastSelf = me;
             for (NSNumber *p in [first arrayByAddingObjectsFromArray:late]) {
@@ -10496,7 +11362,7 @@ static volatile BOOL gGovRunning;
 @end
 #pragma mark - Test harness: commands from control.txt, screenshots into shots/
 
-// Development aid. Write lines to control.txt beside Flint.app; each runs once, in order:
+// Development aid. Write lines to control.txt beside Iris.app; each runs once, in order:
 //   open URL | tab URL | select N | close | back | forward | reload | scroll DY | top | find TEXT
 //   zoom Z | block on|off | wait SECONDS | shot NAME | source NAME | js EXPR | status | size W H
 //   window (a fresh window runs the rest) | win N | closewindow | bookmarksbar on|off | sidebar WIDTH
@@ -10608,7 +11474,7 @@ static void CtlOut(NSString *s) {
         else if ([cmd isEqualToString:@"procs"]) {   // engine process per tab / extension background, to match CPU samples
             SEL pidSel = NSSelectorFromString(@"_webProcessIdentifier");
             pid_t (^pidOf)(WKWebView *) = ^pid_t(WKWebView *v) { return v && [v respondsToSelector:pidSel] ? ((pid_t (*)(id, SEL))objc_msgSend)(v, pidSel) : 0; };
-            NSMutableString *o = [NSMutableString stringWithFormat:@"procs flint=%d throttleHard=%d battery=%d\n", getpid(), ThrottleHard(), OnBattery()];
+            NSMutableString *o = [NSMutableString stringWithFormat:@"procs iris=%d throttleHard=%d battery=%d\n", getpid(), ThrottleHard(), OnBattery()];
             for (VTab *t in AllTabs(YES)) if (t.web) [o appendFormat:@"  tab pid=%d %@\n", pidOf(t.web.web), HostOf([NSURL URLWithString:t.url ?: @""])];
             for (FExt *e in FExtHost.shared.extensions) if ([e isKindOfClass:FExt.class] && e.background) [o appendFormat:@"  ext pid=%d %@\n", pidOf(e.background), e.name];
             CtlOut(o);
@@ -10678,11 +11544,11 @@ static void CtlOut(NSString *s) {
 @end
 #pragma mark - Theme
 
-static void FlintApplyTheme(void) {
+static void IrisApplyTheme(void) {
     InitPalette();
     NSApp.appearance = [Defaults() integerForKey:kTheme] == 0 ? nil : ThemeAppearance();
     for (VWindow *bw in gWindows) [bw applyTheme];
-    for (VTab *t in AllTabs(YES)) if ([t.url hasPrefix:@"flint://"] && t.web) [t.web reload];   // built-in pages carry the theme's colours
+    for (VTab *t in AllTabs(YES)) if ([t.url hasPrefix:@"iris://"] && t.web) [t.web reload];   // built-in pages carry the theme's colours
     for (NSWindow *w in NSApp.windows) if (![w.windowController isKindOfClass:VWindow.class]) { w.appearance = ThemeAppearance(); w.backgroundColor = vBg; if (w.contentView) RedrawTree(w.contentView); }
 }
 
@@ -10700,7 +11566,7 @@ static void FlintApplyTheme(void) {
 
 @implementation VApp
 
-// Development builds wait in .staged/ next to Flint.app instead of restarting Flint mid-use. Flint shows
+// Development builds wait in .staged/ next to Iris.app instead of restarting Iris mid-use. Iris shows
 // an "Update" pill while one is waiting; clicking it asks the watcher to swap the app in and reopen it.
 static NSString *StageDir(void) { return [NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".staged"]; }
 static void RunBuildScript(NSString *stamp);
@@ -10735,21 +11601,21 @@ static void RunBuildScript(NSString *stamp);
     [Defaults() synchronize];
     dispatch_async(DevQueue(), ^{
         [@"install" writeToFile:[StageDir() stringByAppendingPathComponent:@"install"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        RunBuildScript(nil);   // with an install request waiting, the script quits Flint, swaps the app in and reopens it
+        RunBuildScript(nil);   // with an install request waiting, the script quits Iris, swaps the app in and reopens it
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         if (!gUpdating) return;
         gUpdating = NO;
         for (VWindow *w in gWindows) [w.toolbar layoutBar];
-        [gWin showToast:@"The update didn't go through — see build.log in the Flint folder"];
+        [gWin showToast:@"The update didn't go through — see build.log in the Iris folder"];
     });
 }
 
-// Flint builds itself: while it's open it watches its own source next to the app, compiles changes in the
+// Iris builds itself: while it's open it watches its own source next to the app, compiles changes in the
 // background into .staged/, and the Update pill appears. No Terminal window needed.
 static NSString *BuildStamp(void) {
     NSString *d = StageDir().stringByDeletingLastPathComponent; NSFileManager *fm = NSFileManager.defaultManager;
-    NSMutableArray *files = [@[@"Flint.m", @"ext-shim.js", @"flint", @".rebuild", @"Flint.icns"] mutableCopy];
+    NSMutableArray *files = [@[@"Iris.m", @"ext-shim.js", @"iris", @".rebuild", @"Iris.icns"] mutableCopy];
     for (NSString *f in [[fm contentsOfDirectoryAtPath:[d stringByAppendingPathComponent:@"pages"] error:nil] sortedArrayUsingSelector:@selector(compare:)]) [files addObject:[@"pages" stringByAppendingPathComponent:f]];
     NSMutableString *s = [NSMutableString string];
     for (NSString *f in files) {
@@ -10762,7 +11628,7 @@ static BOOL gBuilding;
 static NSString *gSeenStamp; static NSTimeInterval gSeenAt;
 // Runs the build script (a fresh copy, so editing it mid-build is safe). Call on DevQueue.
 static void RunBuildScript(NSString *stamp) {
-    NSString *d = StageDir().stringByDeletingLastPathComponent, *script = [d stringByAppendingPathComponent:@"flint"], *copy = [d stringByAppendingPathComponent:@".flint-run"];
+    NSString *d = StageDir().stringByDeletingLastPathComponent, *script = [d stringByAppendingPathComponent:@"iris"], *copy = [d stringByAppendingPathComponent:@".iris-run"];
     if (![NSFileManager.defaultManager fileExistsAtPath:script]) return;
     [NSFileManager.defaultManager removeItemAtPath:copy error:nil];
     [NSFileManager.defaultManager copyItemAtPath:script toPath:copy error:nil];
@@ -10790,7 +11656,7 @@ static void RunBuildScript(NSString *stamp) {
 - (void)watchOwnSource {
     dispatch_async(DevQueue(), ^{
         NSString *d = StageDir().stringByDeletingLastPathComponent;
-        if (gBuilding || ![NSFileManager.defaultManager fileExistsAtPath:[d stringByAppendingPathComponent:@"flint"]]) return;
+        if (gBuilding || ![NSFileManager.defaultManager fileExistsAtPath:[d stringByAppendingPathComponent:@"iris"]]) return;
         NSString *st = BuildStamp();
         NSString *built = [NSString stringWithContentsOfFile:[d stringByAppendingPathComponent:@".built-stamp"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
         if ([st isEqualToString:built]) { gSeenStamp = nil; return; }
@@ -10808,14 +11674,14 @@ static void RunBuildScript(NSString *stamp) {
     InitPalette();
     if ([Defaults() integerForKey:kTheme] != 0) NSApp.appearance = ThemeAppearance();
     // the Dock keeps an old icon for ad-hoc builds; hand it the current one directly
-    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"Flint" ofType:@"icns"]];
+    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"Iris" ofType:@"icns"]];
     if (icon) NSApp.applicationIconImage = icon;
     // "Follow macOS": recolour when the system switches between light and dark
     [NSDistributedNotificationCenter.defaultCenter addObserverForName:@"AppleInterfaceThemeChangedNotification" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-        if ([Defaults() integerForKey:kTheme] == 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ FlintApplyTheme(); });
+        if ([Defaults() integerForKey:kTheme] == 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ IrisApplyTheme(); });
     }];
-    FlintSetBlocking([Defaults() boolForKey:kBlock]);
-    FlintReloadBlocklists();
+    IrisSetBlocking([Defaults() boolForKey:kBlock]);
+    IrisReloadBlocklists();
     self.win = [VWindow new];
     [self buildMenu];
     [self.win showWindow:nil];
@@ -10836,11 +11702,11 @@ static void RunBuildScript(NSString *stamp) {
     [VBlocker.shared prepare:nil];
     [self.win startControl];
     [FExtHost.shared start];
-    [VGovernor start];   // the CPU rule: Flint and its helpers stay under 95% of one core
+    [VGovernor start];   // the CPU rule: Iris and its helpers stay under 95% of one core
     [self fillMissingIcons];
 }
 
-// Bookmarks and restored tabs that have never been visited in Flint still get their site icons.
+// Bookmarks and restored tabs that have never been visited in Iris still get their site icons.
 - (void)fillMissingIcons {
     NSMutableOrderedSet<NSString *> *urls = [NSMutableOrderedSet orderedSet];
     for (VTab *t in gWin.tabs) if (!t.favicon && [t.url hasPrefix:@"http"]) [urls addObject:t.url];
@@ -10862,8 +11728,8 @@ static void RunBuildScript(NSString *stamp) {
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
     NSUInteger open = 0; for (VTab *t in AllTabs(YES)) if (!t.isHome) open++;
     if ([Defaults() boolForKey:kConfirmQuit] && open > 1 && !self.quitConfirmed) {
-        NSAlert *a = [NSAlert new]; a.messageText = [NSString stringWithFormat:@"Quit Flint with %lu tabs open?", (unsigned long)open];
-        a.informativeText = @"They'll be restored next time if Flint is set to continue where you left off.";
+        NSAlert *a = [NSAlert new]; a.messageText = [NSString stringWithFormat:@"Quit Iris with %lu tabs open?", (unsigned long)open];
+        a.informativeText = @"They'll be restored next time if Iris is set to continue where you left off.";
         [a addButtonWithTitle:@"Quit"]; [a addButtonWithTitle:@"Cancel"];
         if ([a runModal] != NSAlertFirstButtonReturn) return NSTerminateCancel;
     }
@@ -10879,7 +11745,7 @@ static void RunBuildScript(NSString *stamp) {
 - (BOOL)application:(NSApplication *)a openFile:(NSString *)f { [gWin openURL:[NSURL fileURLWithPath:f] newTab:YES]; return YES; }
 - (void)application:(NSApplication *)a openURLs:(NSArray<NSURL *> *)urls { for (NSURL *u in urls) [gWin openURL:u newTab:YES]; }
 
-// Settings is a page, flint://settings, in the window you're using (a new window if none is open).
+// Settings is a page, iris://settings, in the window you're using (a new window if none is open).
 - (void)showSettings:(id)s {
     VWindow *w = gWin;
     if (!w.window.isVisible) { w = [VWindow new]; [w showWindow:nil]; }
@@ -10906,18 +11772,18 @@ static void RunBuildScript(NSString *stamp) {
     id W = nil;   // window actions resolve at call time through gWin
     (void)W;
 
-    NSMenu *app = [[NSMenu alloc] initWithTitle:@"Flint"];
-    [self item:@"About Flint" action:@selector(orderFrontStandardAboutPanel:) key:nil mods:0 in:app target:NSApp];
+    NSMenu *app = [[NSMenu alloc] initWithTitle:@"Iris"];
+    [self item:@"About Iris" action:@selector(orderFrontStandardAboutPanel:) key:nil mods:0 in:app target:NSApp];
     [app addItem:NSMenuItem.separatorItem];
     [self item:@"Settings…" action:@selector(showSettings:) key:@"," mods:C in:app target:self];
     [self item:@"Open Proton Pass" action:@selector(openFirstExtension:) key:@"p" mods:C | O in:app target:self];
     [self item:@"Extensions Folder…" action:@selector(showExtensions:) key:nil mods:0 in:app target:self];
     [app addItem:NSMenuItem.separatorItem];
-    [self item:@"Hide Flint" action:@selector(hide:) key:@"h" mods:C in:app target:NSApp];
+    [self item:@"Hide Iris" action:@selector(hide:) key:@"h" mods:C in:app target:NSApp];
     [self item:@"Hide Others" action:@selector(hideOtherApplications:) key:@"h" mods:C | O in:app target:NSApp];
     [self item:@"Show All" action:@selector(unhideAllApplications:) key:nil mods:0 in:app target:NSApp];
     [app addItem:NSMenuItem.separatorItem];
-    [self item:@"Quit Flint" action:@selector(terminate:) key:@"q" mods:C in:app target:NSApp];
+    [self item:@"Quit Iris" action:@selector(terminate:) key:@"q" mods:C in:app target:NSApp];
     [bar addItemWithTitle:@"" action:nil keyEquivalent:@""].submenu = app;
 
     NSMenu *file = [[NSMenu alloc] initWithTitle:@"File"];
@@ -11071,7 +11937,7 @@ static void RunBuildScript(NSString *stamp) {
 
 // New windows from the menu or the Dock.
 // ⌘N opens a window in the profile you're using, as Chrome does
-// Clicking Flint in the Dock always brings a browser window forward: un-minimised if need be, or a new one if none is open.
+// Clicking Iris in the Dock always brings a browser window forward: un-minimised if need be, or a new one if none is open.
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visible {
     VWindow *front = gWin && [gWindows containsObject:gWin] ? gWin : gWindows.lastObject;
     if (!front) { [self newWindow:nil]; return NO; }
@@ -11106,8 +11972,70 @@ static void RunBuildScript(NSString *stamp) {
 
 static void OnException(NSException *e) { DLog(@"EXCEPTION %@ %@\n%@", e.name, e.reason, e.callStackSymbols); }
 
+// Iris was called Flint (bundle com.y.flint, data in Application Support/Vela). On the first launch under the
+// new name, copy everything across — settings, tabs, bookmarks, extensions, cookies and site data — before
+// WebKit or the settings are touched. The old copies stay where they were, untouched.
+static id RenameFlintValues(id v, BOOL *changed) {
+    if ([v isKindOfClass:NSString.class]) {
+        NSString *s = v;
+        if ([s hasPrefix:@"flint:"] || [s hasPrefix:@"flint-"]) { *changed = YES; return [@"iris" stringByAppendingString:[s substringFromIndex:5]]; }
+        return s;
+    }
+    if ([v isKindOfClass:NSArray.class]) {
+        NSMutableArray *out = [NSMutableArray array];
+        for (id x in (NSArray *)v) [out addObject:RenameFlintValues(x, changed)];
+        return out;
+    }
+    if ([v isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *out = [NSMutableDictionary dictionary];
+        BOOL urlChanged = NO;
+        for (id k in (NSDictionary *)v) {
+            BOOL c = NO; out[k] = RenameFlintValues(((NSDictionary *)v)[k], &c);
+            if (c) { *changed = YES; if ([k isEqual:@"url"]) urlChanged = YES; }
+        }
+        if (urlChanged) [out removeObjectForKey:@"state"];   // a saved page state still points at the old address
+        return out;
+    }
+    return v;
+}
+static void MigrateFromFlint(void) {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    if ([d boolForKey:@"migratedFromFlint"]) return;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *lib = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
+    NSString *as = [lib stringByAppendingPathComponent:@"Application Support"];
+    NSArray *pairs = @[@[@"WebKit/com.y.flint", @"WebKit/com.y.iris"], @[@"HTTPStorages/com.y.flint", @"HTTPStorages/com.y.iris"],
+                       @[@"HTTPStorages/com.y.flint.binarycookies", @"HTTPStorages/com.y.iris.binarycookies"], @[@"Application Support/Vela", @"Application Support/Iris"]];
+    for (NSArray *p in pairs) {
+        NSString *from = [lib stringByAppendingPathComponent:p[0]], *to = [lib stringByAppendingPathComponent:p[1]];
+        if ([fm fileExistsAtPath:from] && ![fm fileExistsAtPath:to]) {
+            [fm createDirectoryAtPath:to.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+            NSError *e = nil; if (![fm copyItemAtPath:from toPath:to error:&e]) NSLog(@"migrate %@: %@", p[0], e);
+        }
+    }
+    NSString *ext = [as stringByAppendingPathComponent:@"Flint/Extensions"], *extTo = [as stringByAppendingPathComponent:@"Iris/Extensions"];
+    if ([fm fileExistsAtPath:ext]) {
+        [fm createDirectoryAtPath:extTo.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm removeItemAtPath:extTo error:nil];
+        [fm copyItemAtPath:ext toPath:extTo error:nil];
+    }
+    NSDictionary *old = [d persistentDomainForName:@"com.y.flint"];
+    NSString *mine = NSBundle.mainBundle.bundleIdentifier ?: @"com.y.iris";
+    if (old.count && ![d persistentDomainForName:mine].count) {
+        BOOL c = NO;
+        NSMutableDictionary *m = RenameFlintValues(old, &c);
+        id frame = m[@"NSWindow Frame FlintMain"];
+        if (frame) { m[@"NSWindow Frame IrisMain"] = frame; [m removeObjectForKey:@"NSWindow Frame FlintMain"]; }
+        [m removeObjectForKey:@"ruleFingerprint"];   // blocking rules are compiled again into Iris's own store
+        [d setPersistentDomain:m forName:mine];
+    }
+    [d setBool:YES forKey:@"migratedFromFlint"];
+    [d synchronize];
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        MigrateFromFlint();
         NSApplication *app = NSApplication.sharedApplication;
         app.activationPolicy = NSApplicationActivationPolicyRegular;
         NSSetUncaughtExceptionHandler(&OnException);
@@ -11119,7 +12047,7 @@ int main(int argc, const char *argv[]) {
     return 0;
 }
 
-#pragma mark - Settings as a page (flint://settings)
+#pragma mark - Settings as a page (iris://settings)
 
 // The page asks for the whole settings layout (sections → groups → rows, with current values) and sends back
 // changes and button presses by row id. Every row is described here once, with the code that applies it, so the
@@ -11178,15 +12106,15 @@ static NSArray *SettingsSchema(VWindow *win) {
     double zcur = [Defaults() objectForKey:kDefaultZoom] ? [Defaults() doubleForKey:kDefaultZoom] : 1.0;
     NSInteger zi = 2; for (NSUInteger k = 0; k < zs.count; k++) if (fabs([zs[k] doubleValue] - zcur) < 0.01) zi = (NSInteger)k;
     NSUInteger ownZoom = [Defaults() dictionaryForKey:kZoom].count;
-    [S addObject:SSection(@"general", @"General", @"How Flint starts and how it treats your tabs.", @"gear", @[
-        SGroup(@"Default browser", @[ isDefault ? SValue(@"Flint is your default browser", @"Links you click in other apps open here.", @"✓")
-            : SButton(@"makeDefault", @"Flint isn't your default browser", @"Links you click in other apps open here.", @"Make Default", ^(NSDictionary *a, void (^done)(NSString *)) {
+    [S addObject:SSection(@"general", @"General", @"How Iris starts and how it treats your tabs.", @"gear", @[
+        SGroup(@"Default browser", @[ isDefault ? SValue(@"Iris is your default browser", @"Links you click in other apps open here.", @"✓")
+            : SButton(@"makeDefault", @"Iris isn't your default browser", @"Links you click in other apps open here.", @"Make Default", ^(NSDictionary *a, void (^done)(NSString *)) {
                 NSURL *me = NSBundle.mainBundle.bundleURL;
                 [NSWorkspace.sharedWorkspace setDefaultApplicationAtURL:me toOpenURLsWithScheme:@"http" completionHandler:^(NSError *e) {
                     [NSWorkspace.sharedWorkspace setDefaultApplicationAtURL:me toOpenURLsWithScheme:@"https" completionHandler:^(NSError *e2) { dispatch_async(dispatch_get_main_queue(), ^{ done(nil); }); }];
                 }];
             }) ]),
-        SGroup(@"Startup", @[ SSelect(@"startup", @"When Flint opens", nil, @[@"Continue where you left off", @"Open a new tab"], [Defaults() integerForKey:kStartup], ^(NSInteger i) { [Defaults() setInteger:i forKey:kStartup]; }) ]),
+        SGroup(@"Startup", @[ SSelect(@"startup", @"When Iris opens", nil, @[@"Continue where you left off", @"Open a new tab"], [Defaults() integerForKey:kStartup], ^(NSInteger i) { [Defaults() setInteger:i forKey:kStartup]; }) ]),
         SGroup(@"Tabs", @[
             SSelect(@"sleep", @"Put background tabs to sleep", @"Sleeping tabs free their memory and wake instantly when you return to them.", @[@"After 5 minutes", @"After 10 minutes", @"After 30 minutes", @"After 1 hour", @"Never"], (NSInteger)si,
                     ^(NSInteger i) { [Defaults() setInteger:[mins[(NSUInteger)i] integerValue] forKey:kSleepMins]; }),
@@ -11207,7 +12135,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     for (NSArray *a in Accents()) { NSColor *c = [Hex((uint32_t)[a[1] unsignedIntValue]) colorUsingColorSpace:NSColorSpace.sRGBColorSpace]; [accents addObject:@{@"label": a[0], @"color": [NSString stringWithFormat:@"#%02x%02x%02x", (int)lround(c.redComponent * 255), (int)lround(c.greenComponent * 255), (int)lround(c.blueComponent * 255)]}]; }
     NSMutableDictionary *accentRow = SRow(@"swatches", @"accent", @"Accent colour", @"Used for the loading bar, the active tab and highlights.");
     accentRow[@"options"] = accents; accentRow[@"value"] = @([Defaults() integerForKey:kAccent]);
-    gSSet[@"accent"] = ^(id v) { [Defaults() setInteger:[v integerValue] forKey:kAccent]; FlintApplyTheme(); };
+    gSSet[@"accent"] = ^(id v) { [Defaults() setInteger:[v integerValue] forKey:kAccent]; IrisApplyTheme(); };
     NSMutableArray *tb = [NSMutableArray array];
     for (NSArray *b in @[@[@"back", @"Back"], @[@"forward", @"Forward"], @[@"home", @"Home"], @[@"newtab", @"New tab"], @[@"reload", @"Reload"], @[@"star", @"Bookmark star"],
                           @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"shield", @"Ad blocking shield"], @[@"dlalways", @"Downloads, always"]]) {
@@ -11216,10 +12144,10 @@ static NSArray *SettingsSchema(VWindow *win) {
     }
     NSArray *fonts = @[@0, @9, @10, @11, @12, @14, @16];
     NSUInteger mi = [fonts indexOfObject:@([Defaults() integerForKey:kMinFont])]; if (mi == NSNotFound) mi = 0;
-    [S addObject:SSection(@"appearance", @"Appearance", @"Make Flint look the way you want. Changes apply instantly.", @"brush", @[
+    [S addObject:SSection(@"appearance", @"Appearance", @"Make Iris look the way you want. Changes apply instantly.", @"brush", @[
         SGroup(@"Theme", @[
-            SSelect(@"theme", @"Theme", @"Carbon is near-black, like Flint's icon. Pages follow light or dark where they support it.", @[@"Follow macOS", @"Graphite", @"Carbon", @"Light"], [Defaults() integerForKey:kTheme],
-                    ^(NSInteger i) { [Defaults() setInteger:i forKey:kTheme]; FlintApplyTheme(); }),
+            SSelect(@"theme", @"Theme", @"Carbon is near-black. Pages follow light or dark where they support it.", @[@"Follow macOS", @"Graphite", @"Carbon", @"Light"], [Defaults() integerForKey:kTheme],
+                    ^(NSInteger i) { [Defaults() setInteger:i forKey:kTheme]; IrisApplyTheme(); }),
             accentRow ]),
         SGroup(@"Tabs", @[
             SKey(kShelfNoHover, @"Show tabs when the pointer reaches the bottom edge", @"⌘S brings them up at any time. Bookmarks open from the address.", YES, ^{ RelayoutAll(); }),
@@ -11255,9 +12183,9 @@ static NSArray *SettingsSchema(VWindow *win) {
     // ── Privacy & Security
     NSMutableDictionary *manage = SButton(@"manageData", @"Cookies and website data", @"See which sites store data on this Mac and remove it.", @"Manage…", ^(NSDictionary *a, void (^done)(NSString *)) { done(nil); });
     manage[@"dataManager"] = @YES;
-    [S addObject:SSection(@"privacy", @"Privacy & Security", @"Flint sends nothing to advertisers, and your data stays on this Mac.", @"hand", @[
+    [S addObject:SSection(@"privacy", @"Privacy & Security", @"Iris sends nothing to advertisers, and your data stays on this Mac.", @"hand", @[
         SGroup(@"Tracking", @[
-            SKey(kBlock, @"Block ads and trackers", @"Requests to known ad and tracking servers are never made.", NO, ^{ FlintSetBlocking([Defaults() boolForKey:kBlock]); for (VWindow *w in gWindows) [w refreshChrome]; }),
+            SKey(kBlock, @"Block ads and trackers", @"Requests to known ad and tracking servers are never made.", NO, ^{ IrisSetBlocking([Defaults() boolForKey:kBlock]); for (VWindow *w in gWindows) [w refreshChrome]; }),
             SKey(kStrip, @"Remove tracking tags from links", @"Strips utm_, fbclid, gclid and similar parameters before a page loads.", NO, nil),
             SKey(kCookieReject, @"Reject cookie banners", @"Answers consent pop-ups with “Reject all” on sites that offer it. Turning the shield off for a site skips it there.", NO, nil),
             SValue(@"Prevent cross-site tracking", @"WebKit's Intelligent Tracking Prevention limits cookies that follow you between sites.", @"Always on"),
@@ -11268,7 +12196,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         SGroup(@"Your data", @[
             SButton(@"clearData", @"Browsing history", @"Used for address-bar suggestions; never leaves this Mac.", @"Clear History…", ^(NSDictionary *a, void (^done)(NSString *)) { [win clearBrowsingData:nil]; done(nil); }),
             manage,
-            SKey(kClearOnQuit, @"Clear cookies and website data when Flint quits", @"You'll be signed out of sites each time.", NO, nil) ])
+            SKey(kClearOnQuit, @"Clear cookies and website data when Iris quits", @"You'll be signed out of sites each time.", NO, nil) ])
     ])];
 
     // ── Site settings
@@ -11290,7 +12218,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     NSArray *allow = [Defaults() arrayForKey:kAllowlist] ?: @[];
     if (!allow.count) [allowRows addObject:SNote(@"Blocking is on for every site", nil)];
     for (NSString *h in allow) [allowRows addObject:SButton([@"allow." stringByAppendingString:h], h, @"Blocking turned off", @"Turn Back On", ^(NSDictionary *a, void (^done)(NSString *)) {
-        NSMutableArray *l = [[Defaults() arrayForKey:kAllowlist] ?: @[] mutableCopy]; [l removeObject:h]; [Defaults() setObject:l forKey:kAllowlist]; FlintReloadBlocklists(); done(nil); })];
+        NSMutableArray *l = [[Defaults() arrayForKey:kAllowlist] ?: @[] mutableCopy]; [l removeObject:h]; [Defaults() setObject:l forKey:kAllowlist]; IrisReloadBlocklists(); done(nil); })];
     [S addObject:SSection(@"sites", @"Site Settings", @"Choices you've made for individual sites. Change them from the lock icon in the address bar.", @"sliders", @[
         SGroup(@"JavaScript", js), SGroup(@"Location, camera and microphone", cam), SGroup(@"Ad blocking", allowRows) ])];
 
@@ -11302,7 +12230,7 @@ static NSArray *SettingsSchema(VWindow *win) {
             NSMutableSet *s = [ListsOn() mutableCopy]; if ([v boolValue]) [s addObject:k]; else [s removeObject:k];
             [Defaults() setObject:s.allObjects forKey:kListsOn]; [VBlocker.shared updateLists:NO done:nil]; })];
     }
-    [S addObject:SSection(@"blocking", @"Ad Blocking", @"Filter lists Flint uses to recognise ad and tracker servers. They update themselves weekly.", @"shield", @[
+    [S addObject:SSection(@"blocking", @"Ad Blocking", @"Filter lists Iris uses to recognise ad and tracker servers. They update themselves weekly.", @"shield", @[
         SGroup(@"Lists", lists),
         SGroup(@"Updates", @[ SValue(@"Status", nil, VBlocker.shared.status ?: @""),
             SButton(@"updateLists", @"Update the lists now", nil, @"Update Now", ^(NSDictionary *a, void (^done)(NSString *)) { [win updateListsNow:nil]; done(@"Updating filter lists…"); }) ]) ])];
@@ -11313,13 +12241,13 @@ static NSArray *SettingsSchema(VWindow *win) {
         SGroup(@"Video", @[
             SSelect(@"codec", @"Video format", arm ? @"Apple silicon decodes H.264, VP9 and (on newer chips) AV1 in hardware, so Automatic is usually best here. Applies to pages you open or reload."
                                                    : @"This Mac's Intel chip decodes H.264 in hardware; VP9 and AV1 fall back to the processor, which costs battery, heat and fan noise. H.264 tops out at 1080p on YouTube. Applies to pages you open or reload.",
-                    @[@"Automatic", @"Avoid AV1", @"H.264 only"], [Defaults() integerForKey:kCodec], ^(NSInteger i) { [Defaults() setInteger:i forKey:kCodec]; FlintCodecChanged(); }),
-            SKey(kCodec30, @"Limit videos to 30 fps", @"Turns down 60 fps streams: half the frames to decode. Sports and games look less smooth.", NO, ^{ FlintCodecChanged(); }) ]),
+                    @[@"Automatic", @"Avoid AV1", @"H.264 only"], [Defaults() integerForKey:kCodec], ^(NSInteger i) { [Defaults() setInteger:i forKey:kCodec]; IrisCodecChanged(); }),
+            SKey(kCodec30, @"Limit videos to 30 fps", @"Turns down 60 fps streams: half the frames to decode. Sports and games look less smooth.", NO, ^{ IrisCodecChanged(); }) ]),
         SGroup(@"Engine", @[
             SSelect(@"bgThrottle", @"Background tabs", @"Saving power slows a hidden tab's timers further the longer it stays hidden, as Safari does. Music and calls keep playing.",
                     @[@"Standard", @"Save power on battery", @"Always save power"], [Defaults() integerForKey:kBgThrottle], ^(NSInteger i) { [Defaults() setInteger:i forKey:kBgThrottle]; [gApp applyThrottleNow]; }),
-            SKey(kSingleProcess, @"One process for all tabs", @"Saves a lot of memory with many tabs open. If one tab crashes, all of them reload. Takes effect when Flint restarts.", NO, nil),
-            SValue(@"Processor use", @"Flint and its helpers average at most one core over any 10 seconds; short bursts run at full speed, and sound and video are never slowed.", @"Always on") ]),
+            SKey(kSingleProcess, @"One process for all tabs", @"Saves a lot of memory with many tabs open. If one tab crashes, all of them reload. Takes effect when Iris restarts.", NO, nil),
+            SValue(@"Processor use", @"Iris and its helpers average at most one core over any 10 seconds; short bursts run at full speed, and sound and video are never slowed.", @"Always on") ]),
         SGroup(@"Launch", @[
             SKey(kRestorePaused, @"Restored video starts paused", @"The tab you were on comes back without playing by itself.", NO, nil),
             SKey(kResumeMedia, @"Videos resume where you left off", @"After a restart, a reopened tab or a sleeping tab waking, the video picks up at the same moment.", NO, nil),
@@ -11351,11 +12279,11 @@ static NSArray *SettingsSchema(VWindow *win) {
                            @"fields": @[@{@"name": @"url", @"placeholder": @"https://chromewebstore.google.com/detail/…", @"value": @""}]};
     NSMutableArray *add = [NSMutableArray arrayWithObjects:install,
         SButton(@"extFolder", @"Extensions folder", @"Unpacked extensions placed here load at launch.", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:ExtRoot()]]; done(nil); }), nil];
-    if (gSettingsNeedRelaunch) [add addObject:SButton(@"relaunch", @"Restart Flint to apply extension changes", @"Your tabs come back.", @"Relaunch Now", ^(NSDictionary *a, void (^done)(NSString *)) {
+    if (gSettingsNeedRelaunch) [add addObject:SButton(@"relaunch", @"Restart Iris to apply extension changes", @"Your tabs come back.", @"Relaunch Now", ^(NSDictionary *a, void (^done)(NSString *)) {
         for (VWindow *w in gWindows) if (!w.isPrivate) { [w saveSession]; break; }
         [NSTask launchedTaskWithLaunchPath:@"/bin/sh" arguments:@[@"-c", [NSString stringWithFormat:@"sleep 1.2; open \"%@\"", NSBundle.mainBundle.bundlePath]]];
         [NSApp terminate:nil]; })];
-    [S addObject:SSection(@"extensions", @"Extensions", @"Chrome extensions running on Flint's own extension layer.", @"puzzle", @[ SGroup(@"Installed", exts), SGroup(@"Add", add) ])];
+    [S addObject:SSection(@"extensions", @"Extensions", @"Chrome extensions running on Iris's own extension layer.", @"puzzle", @[ SGroup(@"Installed", exts), SGroup(@"Add", add) ])];
 
     // ── Downloads
     NSString *dir = [Defaults() stringForKey:kDownloadDir];
@@ -11364,7 +12292,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     NSArray *conns = @[@1, @2, @4, @6, @8, @12, @16], *actives = @[@1, @2, @3, @4, @5, @6, @8];
     NSUInteger ai = [actives indexOfObject:@([Defaults() integerForKey:kDLActive])]; if (ai == NSNotFound) ai = 2;
     NSUInteger ci = [conns indexOfObject:@([Defaults() integerForKey:kDLConns])]; if (ci == NSNotFound) ci = 4;
-    [S addObject:SSection(@"downloads", @"Downloads", @"Where files go, and how Flint fetches them.", @"download", @[
+    [S addObject:SSection(@"downloads", @"Downloads", @"Where files go, and how Iris fetches them.", @"download", @[
         SGroup(@"Location", @[
             SButton(@"chooseDownloads", dir.length ? dir.stringByAbbreviatingWithTildeInPath : @"~/Downloads", @"Current download folder", @"Change…", ^(NSDictionary *a, void (^done)(NSString *)) {
                 NSOpenPanel *p = [NSOpenPanel openPanel]; p.canChooseDirectories = YES; p.canChooseFiles = NO; p.canCreateDirectories = YES; p.prompt = @"Use Folder";
@@ -11392,7 +12320,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         NSMutableDictionary *row = SButton([@"prof." stringByAppendingString:pid.length ? pid : @"main"], p[@"name"], detail, @"Rename…", ^(NSDictionary *a, void (^done)(NSString *)) {
             if ([a[@"remove"] boolValue] && pid.length) {
                 BOOL others = NO; for (VWindow *w in gWindows) if (w.isPrivate || ![w.profile isEqualToString:pid]) others = YES;
-                if (!others) OpenProfileWindow(@"");   // never close Flint's last window
+                if (!others) OpenProfileWindow(@"");   // never close Iris's last window
                 for (VWindow *w in gWindows.copy) if (!w.isPrivate && [w.profile isEqualToString:pid]) [w.window performClose:nil];
                 NSMutableArray *all = [[Defaults() arrayForKey:kProfiles] ?: @[] mutableCopy];
                 [all filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *x, NSDictionary *b) { return ![x[@"id"] isEqualToString:pid]; }]];
@@ -11412,7 +12340,7 @@ static NSArray *SettingsSchema(VWindow *win) {
                 for (NSDictionary *x in [Defaults() arrayForKey:kProfiles] ?: @[]) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[@"name"] = n; [all addObject:m]; }
                 [Defaults() setObject:all forKey:kProfiles];
             }
-            for (VWindow *w in gWindows) if (!w.isPrivate && [w.profile isEqualToString:pid]) w.window.title = pid.length ? [@"Flint · " stringByAppendingString:n] : @"Flint";
+            for (VWindow *w in gWindows) if (!w.isPrivate && [w.profile isEqualToString:pid]) w.window.title = pid.length ? [@"Iris · " stringByAppendingString:n] : @"Iris";
             RelayoutAll(); done(@"Profile renamed");
         });
         row[@"prompt"] = @{@"title": @"Profile", @"text": pid.length ? @"Deleting a profile closes its windows and erases its sign-ins, cookies and history." : @"The first profile can be renamed but not deleted.",
@@ -11450,7 +12378,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         SGroup(@"Your profiles", profRows), SGroup(nil, @[ newProf ]) ])];
 
     // ── Bookmarks & Import
-    NSMutableDictionary *helium = SButton(@"reimport", @"Helium", @"Replaces Flint's bookmarks with Helium's, including folders and icons.", @"Import…", ^(NSDictionary *a, void (^done)(NSString *)) {
+    NSMutableDictionary *helium = SButton(@"reimport", @"Helium", @"Replaces Iris's bookmarks with Helium's, including folders and icons.", @"Import…", ^(NSDictionary *a, void (^done)(NSString *)) {
         [NSFileManager.defaultManager removeItemAtPath:SupportFile(@"bookmarks.json") error:nil];
         [Defaults() removeObjectForKey:@"iconsImported"];
         [VBookmarks.shared performSelector:@selector(load)];
@@ -11458,7 +12386,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         for (VWindow *w in gWindows) [w.bookmarksBar reload];
         done([NSString stringWithFormat:@"Imported %lu bookmarks", (unsigned long)VBookmarks.shared.allURLs.count]);
     });
-    helium[@"confirm"] = @{@"title": @"Import bookmarks from Helium?", @"text": @"Flint's current bookmarks will be replaced.", @"ok": @"Import"};
+    helium[@"confirm"] = @{@"title": @"Import bookmarks from Helium?", @"text": @"Iris's current bookmarks will be replaced.", @"ok": @"Import"};
     [S addObject:SSection(@"bookmarks", @"Bookmarks & Import", @"Bring your bookmarks and site icons over from another browser.", @"bookmark", @[
         SGroup(@"Your bookmarks", @[ SValue(@"Saved bookmarks", nil, [NSString stringWithFormat:@"%lu", (unsigned long)VBookmarks.shared.allURLs.count]),
             SButton(@"bmManager", @"Bookmark manager", @"Edit, sort, import and export. ⌥⌘B", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [win showBookmarks:nil]; done(nil); }) ]),
@@ -11469,11 +12397,11 @@ static NSArray *SettingsSchema(VWindow *win) {
     for (NSArray *g in @[
         @[@"Tabs", @[@[@"New tab", @"⌘T"], @[@"Close tab", @"⌘W"], @[@"Reopen closed tab", @"⇧⌘T"], @[@"Next / previous tab", @"⌃⇥  ⌃⇧⇥"], @[@"Go to tab 1–9", @"⌘1 … ⌘9"], @[@"Pin tab", @"⇧⌘P"], @[@"Duplicate tab", @"⇧⌘K"], @[@"Mute tab", @"⌃⌘M"], @[@"Split view", @"⌃⌘S"]]],
         @[@"Pages", @[@[@"Address bar", @"⌘L"], @[@"Reload / hard reload", @"⌘R  ⇧⌘R"], @[@"Back / forward", @"⌘[  ⌘]"], @[@"Find on page", @"⌘F  ⌘G  ⇧⌘G"], @[@"Zoom in / out / reset", @"⌘+  ⌘−  ⌘0"], @[@"Bookmark page", @"⌘D"], @[@"Save page", @"⇧⌘S"], @[@"View source", @"⌥⌘U"], @[@"Picture in Picture", @"⌃⌘P"], @[@"Reader", @"⌃⌘R"]]],
-        @[@"Flint", @[@[@"Show tabs", @"⌘S"], @[@"Lens", @"⌘."], @[@"Bookmarks under the address", @"⇧⌘B"], @[@"History", @"⌘Y"], @[@"Bookmarks", @"⌥⌘B"], @[@"Downloads", @"⌥⌘L"], @[@"Settings", @"⌘,"], @[@"Full screen", @"⌃⌘F"], @[@"Clear browsing data", @"⇧⌘⌫"]]]]) {
+        @[@"Iris", @[@[@"Show tabs", @"⌘S"], @[@"Lens", @"⌘."], @[@"Bookmarks under the address", @"⇧⌘B"], @[@"History", @"⌘Y"], @[@"Bookmarks", @"⌥⌘B"], @[@"Downloads", @"⌥⌘L"], @[@"Settings", @"⌘,"], @[@"Full screen", @"⌃⌘F"], @[@"Clear browsing data", @"⇧⌘⌫"]]]]) {
         NSMutableArray *rows = [NSMutableArray array]; for (NSArray *r in g[1]) [rows addObject:SValue(r[0], nil, r[1])];
         [sg addObject:SGroup(g[0], rows)];
     }
-    [S addObject:SSection(@"shortcuts", @"Shortcuts", @"The keyboard does almost everything in Flint.", @"command", sg)];
+    [S addObject:SSection(@"shortcuts", @"Shortcuts", @"The keyboard does almost everything in Iris.", @"command", sg)];
 
     // ── Advanced
     NSMutableDictionary *reset = SButton(@"resetSettings", @"Restore default settings", @"Your bookmarks, history, tabs and extensions are kept.", @"Reset…", ^(NSDictionary *a, void (^done)(NSString *)) {
@@ -11481,25 +12409,25 @@ static NSArray *SettingsSchema(VWindow *win) {
                               kConfirmQuit, kMinFont, kSearch, kStartup, kBlock, kStrip, kCookieReject, kAutoPiP, kCodec, kCodec30, kBgThrottle, kSingleProcess, kRestorePaused, kResumeMedia, kLazyRestore, kSleepMins,
                               kShowBookmarks, kScripts, kAskDownload, kDefaultZoom, kZoom, kAllowlist, kHomeTopSites, kDLAccel, kDLConns, kDLActive, kDLLimit])
             [Defaults() removeObjectForKey:k];
-        FlintApplyTheme(); FlintReloadBlocklists(); RelayoutAll();
+        IrisApplyTheme(); IrisReloadBlocklists(); RelayoutAll();
         done(@"Settings restored");
     });
     reset[@"confirm"] = @{@"title": @"Restore default settings?", @"text": @"Theme, search engine, privacy, site and download choices go back to their defaults.", @"ok": @"Reset", @"danger": @YES};
     [S addObject:SSection(@"advanced", @"Advanced", @"For when a site needs convincing, or you're building one.", @"wrench", @[
-        SGroup(@"Compatibility", @[ SSelect(@"ua", @"Identify Flint as", @"Some sites only work properly for certain browsers. Applies to pages you open next.", @[@"Safari (recommended)", @"Chrome", @"Firefox"], [Defaults() integerForKey:kUserAgent],
+        SGroup(@"Compatibility", @[ SSelect(@"ua", @"Identify Iris as", @"Some sites only work properly for certain browsers. Applies to pages you open next.", @[@"Safari (recommended)", @"Chrome", @"Firefox"], [Defaults() integerForKey:kUserAgent],
                                             ^(NSInteger i) { [Defaults() setInteger:i forKey:kUserAgent]; }) ]),
         SGroup(@"Developers", @[ SValue(@"Web Inspector", @"Right-click any page and choose Inspect Element.", @"On"),
-            SButton(@"showLog", @"Debug log", @"Written to ~/Documents/Flint/flint.log while developing.", @"Show", ^(NSDictionary *a, void (^done)(NSString *)) {
-                NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Flint/flint.log"];
+            SButton(@"showLog", @"Debug log", @"Written to ~/Documents/Iris/iris.log while developing.", @"Show", ^(NSDictionary *a, void (^done)(NSString *)) {
+                NSString *p = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Iris/iris.log"];
                 if ([NSFileManager.defaultManager fileExistsAtPath:p]) [NSWorkspace.sharedWorkspace selectFile:p inFileViewerRootedAtPath:@""];
                 done(nil); }) ]),
         SGroup(@"Reset", @[ reset ]) ])];
 
     // ── About
     NSString *v = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0.4";
-    [S addObject:SSection(@"about", @"About Flint", nil, @"info", @[
+    [S addObject:SSection(@"about", @"About Iris", nil, @"info", @[
         SGroup(nil, @[ SValue(@"Version", nil, v), SNote(@"Engine", @"WebKit, the engine inside Safari: fast, light on battery, and maintained by Apple."),
-                       SNote(@"Extensions", @"Flint's own Chrome-compatible extension layer."), SNote(@"Window", @"Native AppKit, no web view for the interface."), SValue(@"Licence", nil, @"MIT") ]) ])];
+                       SNote(@"Extensions", @"Iris's own Chrome-compatible extension layer."), SNote(@"Window", @"Native AppKit, no web view for the interface."), SValue(@"Licence", nil, @"MIT") ]) ])];
     return S;
 }
 

@@ -82,7 +82,7 @@ kbd{font:11px ui-monospace,Menlo;padding:1px 5px;border-radius:4px;border:1px so
 </div>
 <script nonce="{{NONCE}}">
 'use strict';
-const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
+const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
 const $ = s => document.querySelector(s);
 const main = $('#main'), q = $('#q'), meta = $('#meta');
 let all = [], shown = [], rendered = 0, selected = new Set(), lastClicked = -1, menuEl = null;
@@ -162,7 +162,7 @@ function row(e, i, terms) {
     const s = document.createElement('span'); s.className = 'ic letter'; s.textContent = (host || '?')[0];
     s.style.background = 'hsl(' + hue(host) + ' 45% 42%)'; img.replaceWith(s);
   };
-  img.src = 'flint://favicon/?u=' + encodeURIComponent(e.u);
+  img.src = 'iris://favicon/?u=' + encodeURIComponent(e.u);
   return r;
 }
 

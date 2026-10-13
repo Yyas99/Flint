@@ -1,9 +1,9 @@
-// Flint's extension API: the chrome.* / browser.* surface Chrome extensions expect, bridged to Flint
-// (native) through webkit.messageHandlers.flintExt. Runs in each extension's content world (content
+// Iris's extension API: the chrome.* / browser.* surface Chrome extensions expect, bridged to Iris
+// (native) through webkit.messageHandlers.irisExt. Runs in each extension's content world (content
 // scripts), in extension pages (chrome-extension://…) and, for externally_connectable sites, in the page.
 (() => {
-  const CFG = __FLINT_CFG__;
-  const H = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.flintExt;
+  const CFG = __IRIS_CFG__;
+  const H = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.irisExt;
   if (!H) return;
 
   // ── externally connectable web pages (e.g. account.proton.me talking to Proton Pass) ──────────────
@@ -18,7 +18,7 @@
       if (cb) { p.then(cb, () => cb()); return; }
       return p;
     };
-    rt.connect = () => { throw new Error('runtime.connect from web pages is not supported in Flint yet'); };
+    rt.connect = () => { throw new Error('runtime.connect from web pages is not supported in Iris yet'); };
     return;
   }
 
@@ -26,13 +26,13 @@
   if (!ID) { if (location.protocol !== 'chrome-extension:') return; ID = location.host; }
   const E = CFG.exts[ID];
   if (!E) return;
-  const IS_BG = CFG.mode === 'page' && location.pathname === '/__flint_background.html';
+  const IS_BG = CFG.mode === 'page' && location.pathname === '/__iris_background.html';
   const IS_CONTENT = CFG.mode === 'content';
   const G = globalThis;
-  if (G.__flintExtLoaded) return;
-  G.__flintExtLoaded = true;
+  if (G.__irisExtLoaded) return;
+  G.__irisExtLoaded = true;
 
-  // development only (Flint's extdebug switch): forward the extension's errors and warnings to Flint's log
+  // development only (Iris's extdebug switch): forward the extension's errors and warnings to Iris's log
   if (CFG.debug) {
     const show = x => { try { return x instanceof Error || (x && x.stack) ? String(x) + ' @ ' + String(x.stack || '').split('\n')[0] : typeof x === 'object' ? JSON.stringify(x) : String(x); } catch (e) { return String(x); } };
     const dbg = (...a) => { try { H.postMessage({ ext: ID, op: 'debug.log', args: [a.map(show).join(' ').slice(0, 600)] }); } catch (e) {} };
@@ -104,7 +104,7 @@
     return port;
   }
   // Native → JS entry points (called with callAsyncJavaScript)
-  G.__flintOnMessage = (msg, sender, external) => new Promise(resolve => {
+  G.__irisOnMessage = (msg, sender, external) => new Promise(resolve => {
     const target = external ? onMessageExternal : onMessage;
     let done = false, pending = false;
     const sendResponse = r => { if (!done) { done = true; resolve(r === undefined ? null : clone(r)); } };
@@ -116,19 +116,19 @@
     }
     if (!pending && !done) resolve(null);
   });
-  G.__flintOnConnect = (id, name, sender, external) => {
+  G.__irisOnConnect = (id, name, sender, external) => {
     const port = portObject(id, name, sender, ID, false);
     (external ? onConnectExternal : onConnect)._fire(port);
     return true;
   };
-  G.__flintPortEvent = (id, kind, data) => {
+  G.__irisPortEvent = (id, kind, data) => {
     const p = ports.get(id); if (!p) return false;
     if (kind === 'message') p.onMessage._fire(data, p); else p._disconnect();
     return true;
   };
-  G.__flintStorageChanged = (changes, area) => { storageOnChanged._fire(changes, area); (storage[area] && storage[area].onChanged._fire(changes)); return true; };
-  G.__flintTabEvent = (kind, a, b, c) => { const e = G.__flintTabEventsRef && G.__flintTabEventsRef[kind]; if (e) e._fire(a, b, c); return true; };
-  G.__flintInstalled = (details) => { onInstalled._fire(details); onStartup._fire(); return true; };
+  G.__irisStorageChanged = (changes, area) => { storageOnChanged._fire(changes, area); (storage[area] && storage[area].onChanged._fire(changes)); return true; };
+  G.__irisTabEvent = (kind, a, b, c) => { const e = G.__irisTabEventsRef && G.__irisTabEventsRef[kind]; if (e) e._fire(a, b, c); return true; };
+  G.__irisInstalled = (details) => { onInstalled._fire(details); onStartup._fire(); return true; };
 
   const getURL = p => `chrome-extension://${ID}/${String(p || '').replace(/^\//, '')}`;
   const runtime = {
@@ -137,7 +137,7 @@
     getURL,
     getManifest: () => clone(E.manifest),
     getPlatformInfo: api(null, () => Promise.resolve({ os: 'mac', arch: 'x86-64', nacl_arch: 'x86-64' })),
-    getBrowserInfo: api(null, () => Promise.resolve({ name: 'Chrome', vendor: 'Flint', version: '140.0', buildID: '1' })),
+    getBrowserInfo: api(null, () => Promise.resolve({ name: 'Chrome', vendor: 'Iris', version: '140.0', buildID: '1' })),
     sendMessage: api(null, (...a) => {
       let msg = a.length >= 2 && typeof a[0] === 'string' && a[0] === ID ? a[1] : a[0];
       return call('runtime.sendMessage', [msg]);
@@ -152,7 +152,7 @@
     getBackgroundPage: nop(undefined)
   };
 
-  // ── storage (shared by every part of the extension; kept by Flint on disk) ──────────────────────
+  // ── storage (shared by every part of the extension; kept by Iris on disk) ──────────────────────
   const storageOnChanged = ev();
   const area = name => ({
     get: api(null, keys => call('storage.get', [name, keys === undefined ? null : keys])),
@@ -188,7 +188,7 @@
   if (!IS_CONTENT) {
     // ── tabs / windows ────────────────────────────────────────────────────────────────────────────
     const tabEvents = { updated: ev(), activated: ev(), removed: ev(), created: ev(), replaced: ev(), highlighted: ev(), moved: ev(), attached: ev(), detached: ev() };
-    G.__flintTabEventsRef = tabEvents;
+    G.__irisTabEventsRef = tabEvents;
     chrome.tabs = {
       TAB_ID_NONE: -1,
       query: api('tabs.query'), get: api('tabs.get'), create: api('tabs.create'), update: api('tabs.update'),
@@ -208,7 +208,7 @@
     // ── alarms (timers live in the background page) ──────────────────────────────────────────────
     const alarms = new Map();
     const alarmsOnAlarm = ev();
-    G.__flintAlarmsOnAlarm = alarmsOnAlarm;
+    G.__irisAlarmsOnAlarm = alarmsOnAlarm;
     const clearAlarm = n => { const a = alarms.get(n); if (!a) return false; clearTimeout(a.t); clearInterval(a.i); alarms.delete(n); return true; };
     chrome.alarms = {
       create: (name, info) => {
@@ -263,7 +263,7 @@
     };
     chrome.action = action; chrome.browserAction = action;
     // toolbar click on an extension without a popup: Chrome fires action.onClicked in the background
-    G.__flintActionClicked = tab => { if (!action.onClicked.hasListeners()) return false; action.onClicked._fire(tab); return true; };
+    G.__irisActionClicked = tab => { if (!action.onClicked.hasListeners()) return false; action.onClicked._fire(tab); return true; };
     // ── context menus: items in the page's right-click menu; clicks come back through onClicked / onclick ──
     const menuClicks = new Map(), menusOnClicked = ev();
     let menuSeq = 0;
@@ -286,11 +286,11 @@
       ItemType: { NORMAL: 'normal', CHECKBOX: 'checkbox', RADIO: 'radio', SEPARATOR: 'separator' }
     };
     chrome.menus = chrome.contextMenus;
-    G.__flintMenuClicked = (info, tab) => { menusOnClicked._fire(info, tab); const f = menuClicks.get(info.menuItemId); if (f) { try { f(info, tab); } catch (e) { console.error(e); } } return true; };
+    G.__irisMenuClicked = (info, tab) => { menusOnClicked._fire(info, tab); const f = menuClicks.get(info.menuItemId); if (f) { try { f(info, tab); } catch (e) { console.error(e); } } return true; };
     chrome.notifications = { create: nop('n'), clear: nop(true), getAll: nop({}), onClicked: ev(), onClosed: ev(), onButtonClicked: ev() };
     chrome.webNavigation = { onCommitted: ev(), onCompleted: ev(), onBeforeNavigate: ev(), onDOMContentLoaded: ev(), onHistoryStateUpdated: ev(), getFrame: nop(null), getAllFrames: nop([]) };
     chrome.webRequest = { onBeforeRequest: ev(), onBeforeSendHeaders: ev(), onHeadersReceived: ev(), onCompleted: ev(), onErrorOccurred: ev(), onAuthRequired: ev(), onBeforeRedirect: ev(), onResponseStarted: ev(), onSendHeaders: ev() };
-    // ── declarativeNetRequest: rules run by WebKit's content blocker (see Flint's FDNR) ────────────────
+    // ── declarativeNetRequest: rules run by WebKit's content blocker (see Iris's FDNR) ────────────────
     const dnr = op => api(null, (o) => call('dnr.' + op, [o === undefined ? null : o]));
     chrome.declarativeNetRequest = {
       updateDynamicRules: dnr('updateDynamicRules'), getDynamicRules: dnr('getDynamicRules'),
@@ -325,7 +325,7 @@
   G.chrome = chrome;
   G.browser = chrome;
 
-  // Extension pages call their servers with the extension's host permissions: Flint makes the
+  // Extension pages call their servers with the extension's host permissions: Iris makes the
   // request natively, so the page's origin and CORS don't get in the way.
   if (!IS_CONTENT) {
     const nativeFetch = G.fetch.bind(G);
@@ -353,7 +353,7 @@
     G.registration = { scope: getURL(''), active: { state: 'activated' }, showNotification: () => Promise.resolve(), getNotifications: () => Promise.resolve([]) };
     G.importScripts = (...urls) => {
       // like a worker: relative paths resolve against the service worker script itself (js/service-worker.js →
-      // "config.js" is js/config.js), not the background page Flint hosts it in
+      // "config.js" is js/config.js), not the background page Iris hosts it in
       const sw = E.manifest.background && E.manifest.background.service_worker;
       const base = (document.currentScript && document.currentScript.src) || (sw ? new URL('/' + sw.replace(/^\//, ''), location.href).href : location.href);
       for (const u of urls) {
@@ -371,7 +371,7 @@
 
   if (IS_CONTENT) {
     // match patterns → which content scripts run in this frame
-    G.__flintMatch = (patterns, url) => (patterns || []).some(p => {
+    G.__irisMatch = (patterns, url) => (patterns || []).some(p => {
       if (p === '<all_urls>') return /^(https?|file|ftp|wss?):/.test(url);
       const m = /^(\*|https?|file|ftp|wss?):\/\/([^/]*)(\/.*)$/.exec(p); if (!m) return false;
       const esc = s => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');

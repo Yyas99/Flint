@@ -1,9 +1,9 @@
 # built app and the staged update
-Flint.app/
+Iris.app/
 .staged/
 
 # build and watcher state
-.flint-run
+.iris-run
 .built-stamp
 .buildlock
 .rebuild
@@ -15,7 +15,7 @@ update-notes.txt
 
 # local logs, test screenshots and the test link (they hold browsing addresses)
 shots/
-flint.log
+iris.log
 control.txt
 control.out
 c.tmp
