@@ -77,6 +77,7 @@ static NSString *const kRestorePaused = @"restoredVideoPaused";
 static NSString *const kResumeMedia = @"resumeVideoPosition";
 static NSString *const kProfiles = @"profiles";              // [{id, name}]: profiles besides the first one
 static NSString *const kMainProfileName = @"mainProfileName"; // what the first profile is called (default "Personal")
+static NSString *const kMainProfileColor = @"mainProfileColor"; // its colour (index into ProfileColors)
 static NSString *const kLazyRestore   = @"loadOpenTabOnClick";
 static NSString *const kUserAgent     = @"userAgent";         // 0 Safari, 1 Chrome, 2 Firefox
 static NSString *const kConfirmQuit   = @"confirmQuit";
@@ -536,6 +537,32 @@ static NSArray<NSDictionary *> *Profiles(void) {
     NSMutableArray *a = [NSMutableArray arrayWithObject:@{@"id": @"", @"name": [Defaults() stringForKey:kMainProfileName] ?: @"Personal"}];
     for (NSDictionary *p in [Defaults() arrayForKey:kProfiles] ?: @[]) if ([p isKindOfClass:NSDictionary.class] && [p[@"id"] length]) [a addObject:p];
     return a;
+}
+// Calm, distinct colours (no reds or yellows): a profile is recognised at a glance by its dot and its window's tint.
+static NSArray<NSArray *> *ProfileColors(void) {
+    return @[@[@"Graphite", @0x8E8E93], @[@"Ocean", @0x5B8DEF], @[@"Teal", @0x3BA99C], @[@"Violet", @0x8B7CF6], @[@"Sage", @0x7FA36B], @[@"Slate", @0x64748B]];
+}
+static NSInteger ProfileColorIndex(NSString *pid) {
+    if (!pid.length) return [Defaults() objectForKey:kMainProfileColor] ? [Defaults() integerForKey:kMainProfileColor] : 0;
+    NSArray *all = Profiles();
+    for (NSUInteger i = 0; i < all.count; i++) if ([all[i][@"id"] isEqualToString:pid]) return all[i][@"color"] ? [all[i][@"color"] integerValue] : (NSInteger)(i % ProfileColors().count);
+    return 0;
+}
+static NSColor *ProfileColor(NSString *pid) {
+    NSArray *c = ProfileColors(); NSInteger i = ProfileColorIndex(pid);
+    return Hex((uint32_t)[c[(NSUInteger)MAX(0, MIN((NSInteger)c.count - 1, i))][1] unsignedIntValue]);
+}
+// The profile's avatar: its initial on its colour.
+static NSImage *ProfileAvatar(NSString *pid, NSString *name, CGFloat size) {
+    NSColor *c = ProfileColor(pid);
+    NSString *initial = name.length ? [[name substringToIndex:[name rangeOfComposedCharacterSequenceAtIndex:0].length] uppercaseString] : @"•";
+    return [NSImage imageWithSize:NSMakeSize(size, size) flipped:NO drawingHandler:^BOOL(NSRect r) {
+        [c setFill]; [[NSBezierPath bezierPathWithOvalInRect:r] fill];
+        NSDictionary *a = @{NSFontAttributeName: UIFont(size * 0.56, NSFontWeightSemibold), NSForegroundColorAttributeName: NSColor.whiteColor};
+        NSSize s = [initial sizeWithAttributes:a];
+        [initial drawAtPoint:NSMakePoint(round((size - s.width) / 2), round((size - s.height) / 2)) withAttributes:a];
+        return YES;
+    }];
 }
 static NSString *ProfileName(NSString *pid) {
     for (NSDictionary *p in Profiles()) if ([p[@"id"] isEqualToString:pid ?: @""]) return p[@"name"];
@@ -1969,8 +1996,13 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
     if (!NSIsEmptyRect(self.privateBadge)) {   // private windows say so, quietly
         RoundRect(self.privateBadge, 8, vPill);
         VWindow *ow = WinFor(self);
-        NSImage *eye = Tinted(Symbol(ow.isPrivate ? @"eye.slash" : @"person.crop.circle", 10, NSFontWeightMedium), vDim);
-        DrawImage(eye, CenterIn(eye.size, NSMakeRect(NSMinX(self.privateBadge) + 7, NSMinY(self.privateBadge), 16, NSHeight(self.privateBadge))));
+        if (ow.isPrivate) {
+            NSImage *eye = Tinted(Symbol(@"eye.slash", 10, NSFontWeightMedium), vDim);
+            DrawImage(eye, CenterIn(eye.size, NSMakeRect(NSMinX(self.privateBadge) + 7, NSMinY(self.privateBadge), 16, NSHeight(self.privateBadge))));
+        } else {   // the profile's avatar, and a hairline in its colour around the badge
+            DrawImage(ProfileAvatar(ow.profile, ProfileName(ow.profile), 15), NSMakeRect(NSMinX(self.privateBadge) + 5, NSMidY(self.privateBadge) - 7.5, 15, 15));
+            ShardStroke(self.privateBadge, 8, [ProfileColor(ow.profile) colorWithAlphaComponent:0.45], 1);
+        }
         NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
         [(ow.isPrivate ? @"Private" : ProfileName(ow.profile)) drawInRect:NSMakeRect(NSMinX(self.privateBadge) + 26, NSMinY(self.privateBadge) + 4, NSWidth(self.privateBadge) - 32, 16)
                  withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ps}];
@@ -2604,6 +2636,10 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
 - (void)drawRect:(NSRect)dirty {
     [vBg setFill]; NSRectFill(NSIntersectionRect(dirty, self.bounds));
     VWindow *win = WinFor(self);
+    if (!win.isPrivate && Profiles().count > 1) {   // which profile this window is, without reading anything
+        [[ProfileColor(win.profile) colorWithAlphaComponent:ThemeIsLight() ? 0.07 : 0.06] setFill];
+        NSRectFillUsingOperation(NSIntersectionRect(dirty, self.bounds), NSCompositingOperationSourceOver);
+    }
     NSArray *pins = self.pinned, *loose = self.loose;
     // pinned: struck tiles; the open one carries the spark along its foot
     for (NSUInteger i = 0; i < pins.count; i++) {
@@ -4264,6 +4300,13 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     if (a.targetFrame.isMainFrame) {
         NSString *h = HostOf(u);
         prefs.allowsContentJavaScript = [Defaults() boolForKey:kScripts] && !(h.length && [[Defaults() arrayForKey:kJSOff] containsObject:h]);
+        // The tab coming back at launch: WebKit itself refuses playback (Safari's "Never Auto-Play") for this one
+        // page until you click or press a key in it, so nothing can start before Flint's own hold arrives.
+        if (self.tab.launchRestored && [u.scheme hasPrefix:@"http"]) {
+            SEL s = NSSelectorFromString(@"_setAutoplayPolicy:");
+            if ([prefs respondsToSelector:s]) { ((void (*)(id, SEL, NSUInteger))objc_msgSend)(prefs, s, 3); DLog(@"launch: WebKit autoplay denied for %@", HostOf(u)); }   // _WKWebsiteAutoplayPolicyDeny
+            else DLog(@"launch: WebKit autoplay policy unavailable, script hold only");
+        }
     }
     // "Continue to the HTTP site" from the HTTPS-only page
     // "visit anyway" on the certificate warning: only a click on that warning, for that host, counts
@@ -4848,12 +4891,6 @@ static NSString *ConsentScript(void) {
     if ([b[@"op"] isEqual:@"get"]) {
         BOOL off = ![Defaults() boolForKey:kBlock] || [[Defaults() arrayForKey:kAllowlist] containsObject:site] || [[Defaults() arrayForKey:kAllowlist] containsObject:[@"www." stringByAppendingString:site]];
         reply(off ? @[] : ([Defaults() dictionaryForKey:kCosmetic][site] ?: @[]), nil); return;
-    }
-    if ([b[@"op"] isEqual:@"launchPause"]) {   // the tab you had open, loading at launch: don't start its video by itself
-        VTab *tab = nil; for (VTab *t in AllTabs(YES)) if (t.web.web == m.webView) tab = t;
-        BOOL yes = tab.launchRestored && m.frameInfo.isMainFrame; if (yes) tab.launchRestored = NO;
-        DLog(@"launch: restored tab %@ video %@", HostOf(m.webView.URL), yes ? @"held paused" : @"left alone");
-        reply(@(yes), nil); return;
     }
     if ([b[@"op"] isEqual:@"consentOn"]) {
         NSArray *allow = [Defaults() arrayForKey:kAllowlist];
@@ -7096,7 +7133,9 @@ static VWindow *OpenProfileWindow(NSString *pid) {
 static NSString *CreateProfile(NSString *name) {
     NSString *pid = NSUUID.UUID.UUIDString;
     NSMutableArray *a = [[Defaults() arrayForKey:kProfiles] ?: @[] mutableCopy];
-    [a addObject:@{@"id": pid, @"name": name.length ? name : [NSString stringWithFormat:@"Profile %lu", (unsigned long)a.count + 2]}];
+    NSMutableSet *used = [NSMutableSet set]; for (NSDictionary *p in Profiles()) [used addObject:@(ProfileColorIndex(p[@"id"]))];
+    NSInteger color = 0; while (color < (NSInteger)ProfileColors().count - 1 && [used containsObject:@(color)]) color++;   // the first colour not taken
+    [a addObject:@{@"id": pid, @"name": name.length ? name : [NSString stringWithFormat:@"Profile %lu", (unsigned long)a.count + 2], @"color": @(color)}];
     [Defaults() setObject:a forKey:kProfiles];
     for (VWindow *w in gWindows) [w.toolbar layoutBar];
     return pid;
@@ -7106,7 +7145,7 @@ static NSString *CreateProfile(NSString *name) {
     for (NSDictionary *p in Profiles()) {
         NSMenuItem *i = [m addItemWithTitle:p[@"name"] action:@selector(openProfile:) keyEquivalent:@""];
         i.target = self; i.representedObject = p[@"id"]; i.state = [p[@"id"] isEqualToString:self.profile] && !self.isPrivate ? NSControlStateValueOn : NSControlStateValueOff;
-        i.image = Symbol(@"person.crop.circle", 13, NSFontWeightRegular);
+        i.image = ProfileAvatar(p[@"id"], p[@"name"], 16);
     }
     [m addItem:NSMenuItem.separatorItem];
     [m addItemWithTitle:@"New Profile…" action:@selector(newProfile:) keyEquivalent:@""].target = self;
@@ -9503,6 +9542,7 @@ static void RunBuildScript(NSString *stamp) {
         [menu removeAllItems];
         for (NSDictionary *p in Profiles()) {
             NSMenuItem *i = [menu addItemWithTitle:p[@"name"] action:@selector(openProfileItem:) keyEquivalent:@""]; i.target = self; i.representedObject = p[@"id"];
+            i.image = ProfileAvatar(p[@"id"], p[@"name"], 16);
             i.state = gWin && !gWin.isPrivate && [gWin.profile isEqualToString:p[@"id"]] ? NSControlStateValueOn : NSControlStateValueOff;
         }
         [menu addItem:NSMenuItem.separatorItem];
@@ -9864,7 +9904,7 @@ static NSArray *SettingsSchema(VWindow *win) {
             if (!pid.length) [Defaults() setObject:n forKey:kMainProfileName];
             else {
                 NSMutableArray *all = [NSMutableArray array];
-                for (NSDictionary *x in [Defaults() arrayForKey:kProfiles] ?: @[]) [all addObject:[x[@"id"] isEqualToString:pid] ? @{@"id": pid, @"name": n} : x];
+                for (NSDictionary *x in [Defaults() arrayForKey:kProfiles] ?: @[]) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[@"name"] = n; [all addObject:m]; }
                 [Defaults() setObject:all forKey:kProfiles];
             }
             for (VWindow *w in gWindows) if (!w.isPrivate && [w.profile isEqualToString:pid]) w.window.title = pid.length ? [@"Flint · " stringByAppendingString:n] : @"Flint";
@@ -9872,10 +9912,29 @@ static NSArray *SettingsSchema(VWindow *win) {
         });
         row[@"prompt"] = @{@"title": @"Profile", @"text": pid.length ? @"Deleting a profile closes its windows and erases its sign-ins, cookies and history." : @"The first profile can be renamed but not deleted.",
                            @"ok": @"Save", @"remove": pid.length ? @"Delete Profile" : @"", @"fields": @[@{@"name": @"name", @"placeholder": @"Name", @"value": p[@"name"]}]};
+        row[@"icon"] = PNGDataURL(ProfileAvatar(pid, p[@"name"], 40), 40);
         NSString *openId = [@"profopen." stringByAppendingString:pid.length ? pid : @"main"];
         gSAct[openId] = ^(NSDictionary *a, void (^done)(NSString *)) { OpenProfileWindow(pid); done(nil); };
         row[@"more"] = @[@{@"id": openId, @"label": @"Open"}];
         [profRows addObject:row];
+        // its colour: the avatar, the badge's outline and the window's tint
+        NSMutableArray *opts = [NSMutableArray array];
+        for (NSArray *c in ProfileColors()) { NSColor *x = [Hex((uint32_t)[c[1] unsignedIntValue]) colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+            [opts addObject:@{@"label": c[0], @"color": [NSString stringWithFormat:@"#%02x%02x%02x", (int)lround(x.redComponent * 255), (int)lround(x.greenComponent * 255), (int)lround(x.blueComponent * 255)]}]; }
+        NSString *colorId = [@"profcolor." stringByAppendingString:pid.length ? pid : @"main"];
+        NSMutableDictionary *sw = SRow(@"swatches", colorId, [NSString stringWithFormat:@"%@'s colour", p[@"name"]], nil);
+        sw[@"options"] = opts; sw[@"value"] = @(ProfileColorIndex(pid));
+        gSSet[colorId] = ^(id v) {
+            NSInteger ci = [v integerValue]; if (ci < 0 || ci >= (NSInteger)ProfileColors().count) return;
+            if (!pid.length) [Defaults() setInteger:ci forKey:kMainProfileColor];
+            else {
+                NSMutableArray *all = [NSMutableArray array];
+                for (NSDictionary *x in [Defaults() arrayForKey:kProfiles] ?: @[]) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[@"color"] = @(ci); [all addObject:m]; }
+                [Defaults() setObject:all forKey:kProfiles];
+            }
+            RelayoutAll();
+        };
+        [profRows addObject:sw];
     }
     NSMutableDictionary *newProf = SButton(@"profNew", @"New profile", @"For work, study or anything you keep apart. Bookmarks and extensions are shared.", @"Add…", ^(NSDictionary *a, void (^done)(NSString *)) {
         NSString *n = Trim([a[@"name"] description] ?: @"");
