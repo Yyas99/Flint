@@ -198,7 +198,25 @@ static void InitPalette(void) {
 }
 
 // Your accent where something is chosen, on, or current. With Silver (no accent) the active tab keeps its profile's colour.
+// iris://source?u=<address>: Iris's code viewer for a page or any file it loads
+static NSString *SourceViewerURL(NSString *u, NSString *ident) {
+    NSMutableCharacterSet *ok = NSCharacterSet.URLQueryAllowedCharacterSet.mutableCopy; [ok removeCharactersInString:@"&=+?#"];
+    NSString *s = [@"iris://source?u=" stringByAppendingString:[u stringByAddingPercentEncodingWithAllowedCharacters:ok] ?: @""];
+    return ident.length ? [s stringByAppendingFormat:@"&id=%@", ident] : s;
+}
+
 static BOOL AccentChosen(void) { return [Defaults() integerForKey:kAccent] != 0; }
+// YES when Iris itself handles http(s) links; then "Open in Default Browser" would just reopen here, so it's hidden.
+static BOOL IrisIsDefaultBrowser(void) {
+    static BOOL cached; static CFAbsoluteTime at;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (at == 0 || now - at > 10) {
+        NSURL *app = [NSWorkspace.sharedWorkspace URLForApplicationToOpenURL:[NSURL URLWithString:@"https://example.com"]];
+        cached = app && [app.URLByStandardizingPath.path isEqualToString:NSBundle.mainBundle.bundleURL.URLByStandardizingPath.path];
+        at = now;
+    }
+    return cached;
+}
 
 static void IrisEventLog(NSString *kind, NSString *detail);   // crashes/events.log (v6c_crash)
 static NSFont *UIFont(CGFloat s, NSFontWeight w) { return [NSFont systemFontOfSize:s weight:w] ?: [NSFont systemFontOfSize:s] ?: [NSFont userFontOfSize:s]; }   // never nil: a nil font in drawing attributes is a crash
@@ -388,6 +406,7 @@ static NSURL *StripTracking(NSURL *u) {
 @property (copy) NSString *url, *title;
 @property (strong) NSImage *favicon;
 @property BOOL pinned, loading, isHome, noBlock, audible, muted;
+@property NSTimeInterval heardAt;   // when the tab last started or stopped making sound
 @property BOOL hasVideo, inPiP;          // the page shows a video (the address bar offers picture in picture)
 @property double progress;
 @property (strong) NSArray *savedBack;     // history kept while asleep
@@ -2164,22 +2183,50 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
 
 @interface VAddressField : NSTextField
 @property (copy) void (^onFocus)(void);
+@property BOOL live;           // the user is mid-edit: clicks place the caret instead of selecting everything
+@property (strong) id clickTap;
 @end
 @implementation VAddressField
 - (BOOL)becomeFirstResponder {
     BOOL ok = [super becomeFirstResponder];
+    if (ok) self.live = YES;
     if (ok && self.onFocus) self.onFocus();
     return ok;
 }
+- (void)textDidEndEditing:(NSNotification *)n { self.live = NO; [super textDidEndEditing:n]; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
 // The first click into the address selects all of it (ready to type over, like every browser); once you're
-// editing, clicks place the caret and drag-select as usual.
-- (void)mouseDown:(NSEvent *)e {
-    if (self.currentEditor) { [super mouseDown:e]; return; }
-    [self.window makeFirstResponder:self];
+// editing, clicks place the caret and drag-select as usual. The click is caught before the window routes it,
+// because a field editor left installed (or a window that makes the field first responder on activation)
+// would otherwise swallow it and drop a caret where you clicked.
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (self.clickTap) { [NSEvent removeMonitor:self.clickTap]; self.clickTap = nil; }
+    if (!self.window) return;
+    __weak VAddressField *ws = self;
+    self.clickTap = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown handler:^NSEvent *(NSEvent *e) {
+        VAddressField *f = ws;
+        if (!f || e.window != f.window || f.isHiddenOrHasHiddenAncestor || !f.isEnabled) return e;
+        if (e.modifierFlags & NSEventModifierFlagControl) return e;
+        NSView *hit = [f.window.contentView.superview ?: f.window.contentView hitTest:e.locationInWindow];
+        if (!(hit == f || [hit isDescendantOf:f])) return e;
+        if (f.live && f.currentEditor && f.window.isKeyWindow && NSApp.isActive) return e;
+        [f focusAndSelectAll];
+        return nil;
+    }];
+}
+- (void)dealloc { if (_clickTap) [NSEvent removeMonitor:_clickTap]; }
+- (void)focusAndSelectAll {
+    if (!self.window.isKeyWindow) [self.window makeKeyAndOrderFront:nil];
+    if (!self.currentEditor || self.window.firstResponder != self.currentEditor) [self.window makeFirstResponder:self];
+    self.live = YES;
     [self.currentEditor selectAll:nil];
     __weak VAddressField *ws = self;   // focusing swaps in the full address a moment later: select that too
     dispatch_async(dispatch_get_main_queue(), ^{ [ws.currentEditor selectAll:nil]; });
+}
+- (void)mouseDown:(NSEvent *)e {
+    if (self.live && self.currentEditor) { [super mouseDown:e]; return; }
+    [self focusAndSelectAll];
 }
 - (void)rightMouseDown:(NSEvent *)e {   // not typing: Iris's own menu for the page's address
     if (self.currentEditor) { [super rightMouseDown:e]; return; }
@@ -3212,7 +3259,7 @@ static NSArray *DroppedLink(NSPasteboard *pb) {
     if (n[@"url"]) {
         add(@"Open in New Tab", @selector(openBookmarkInNewTab:), n[@"url"]);
         add(@"Open in Background Tab", @selector(openBookmarkInBackground:), n[@"url"]);
-        add(@"Open in Default Browser", @selector(openInDefaultBrowser:), n[@"url"]);
+        if (!IrisIsDefaultBrowser()) add(@"Open in Default Browser", @selector(openInDefaultBrowser:), n[@"url"]);
         [m addItem:NSMenuItem.separatorItem];
         add(@"Copy Link", @selector(copyText:), n[@"url"]);
         [m addItem:NSMenuItem.separatorItem];
@@ -4842,7 +4889,7 @@ static NSString *MenuURLLabel(NSString *u) {
         if (clean && ![clean.absoluteString isEqualToString:link]) add(@"Copy Clean Link", @selector(copyText:), W, clean.absoluteString);
         add(@"Bookmark Link", @selector(bookmarkURL:), W, link);
         add(@"Download Linked File", @selector(downloadURL:), W, link);
-        add(@"Open in Default Browser", @selector(openInDefaultBrowser:), W, link);
+        if (!IrisIsDefaultBrowser()) add(@"Open in Default Browser", @selector(openInDefaultBrowser:), W, link);
     }
     if (image) {
         NSURL *iu = [NSURL URLWithString:image];
@@ -4885,7 +4932,7 @@ static NSString *MenuURLLabel(NSString *u) {
         sep();
         keys(add(@"View Page Source", @selector(viewSource:), W, nil), @"u", NSEventModifierFlagCommand | NSEventModifierFlagOption);
         keys(add(@"Inspect Element", @selector(irisInspect:), self, nil), @"i", NSEventModifierFlagCommand | NSEventModifierFlagOption);
-        if (web) add(@"Open Page in Default Browser", @selector(openInDefaultBrowser:), W, page);
+        if (web && !IrisIsDefaultBrowser()) add(@"Open Page in Default Browser", @selector(openInDefaultBrowser:), W, page);
     }
     if (web) { sep(); add(@"Block Element…", @selector(blockElement:), W, nil); }
     if (!self.page.tab.owner.isPrivate) {   // extensions' own items (chrome.contextMenus)
@@ -4975,8 +5022,8 @@ static NSString *MenuURLLabel(NSString *u) {
         NSString *ident = i.identifier ?: @"";
         if ([ident isEqualToString:@"WKMenuItemIdentifierOpenLinkInNewWindow"]) {
             sawLink = YES; i.title = @"Open Link in New Tab";
-            if (link) insertAfter(i, @[make(@"Peek Link", @selector(peekLink:), link), make(@"Open Link in Split View", @selector(splitLink:), link), make(@"Open Link in Background Tab", @selector(openLinkInBackground:), link),
-                                       make(@"Open Link in Default Browser", @selector(openInDefaultBrowser:), link)]);
+            if (link) insertAfter(i, @[make(@"Peek Link", @selector(peekLink:), link), make(@"Open Link in Split View", @selector(splitLink:), link), make(@"Open Link in Background Tab", @selector(openLinkInBackground:), link)]);
+            if (link && !IrisIsDefaultBrowser()) insertAfter([menu itemWithTitle:@"Open Link in Background Tab"] ?: i, @[make(@"Open Link in Default Browser", @selector(openInDefaultBrowser:), link)]);
         } else if ([ident isEqualToString:@"WKMenuItemIdentifierCopyLink"]) {
             NSURL *u = link ? [NSURL URLWithString:link] : nil; NSURL *clean = u ? StripTracking(u) : nil;
             NSMutableArray *more = [NSMutableArray array];
@@ -5024,8 +5071,9 @@ static NSString *MenuURLLabel(NSString *u) {
         [items addObjectsFromArray:@[make(@"Bookmark This Page", @selector(toggleBookmark:), nil), make(@"Copy Page Link", @selector(copyText:), page)]];
         if (clean) [items addObject:make(@"Copy Clean Page Link", @selector(copyText:), clean.absoluteString)];
         [items addObjectsFromArray:@[NSMenuItem.separatorItem, make(@"Save Page As…", @selector(savePage:), nil), make(@"Print…", @selector(printPage:), nil),
-                                     make(@"Find on Page…", @selector(showFind:), nil), make(@"View Page Source", @selector(viewSource:), nil),
-                                     make(@"Open Page in Default Browser", @selector(openInDefaultBrowser:), page), NSMenuItem.separatorItem]];
+                                     make(@"Find on Page…", @selector(showFind:), nil), make(@"View Page Source", @selector(viewSource:), nil)]];
+        if (!IrisIsDefaultBrowser()) [items addObject:make(@"Open Page in Default Browser", @selector(openInDefaultBrowser:), page)];
+        [items addObject:NSMenuItem.separatorItem];
         for (NSMenuItem *i in items) [menu insertItem:i atIndex:at++];
     }
     if ([self.URL.scheme hasPrefix:@"http"] && !editable) {
@@ -5122,6 +5170,7 @@ static void *kKVO = &kKVO;
     }
     else if ([k isEqualToString:@"_isPlayingAudio"]) {
         BOOL playing = NO; @try { playing = [[_web valueForKey:@"_isPlayingAudio"] boolValue]; } @catch (NSException *x) {}
+        if (self.tab.audible != playing) self.tab.heardAt = NSDate.date.timeIntervalSince1970;
         self.tab.audible = playing; [PW.sidebar setNeedsDisplay:YES];
         if (playing && self.tab) PW.mediaTab = self.tab;
         [PW updateNowPlaying]; return;
@@ -5155,21 +5204,10 @@ static void *kKVO = &kKVO;
     if (!url.length) return;
     NSURL *u = [NSURL URLWithString:url]; if (!u) return;
     self.url = url; self.loading = YES; self.progress = 0.05; [self watchLoading];
-    if ([u.scheme isEqualToString:@"view-source"]) { [self showSource:[NSURL URLWithString:[url substringFromIndex:12]]]; return; }
+    if ([u.scheme isEqualToString:@"view-source"]) { [self open:SourceViewerURL([url substringFromIndex:12], nil) record:record]; return; }
     if (u.isFileURL) [_web loadFileURL:u allowingReadAccessToURL:u.URLByDeletingLastPathComponent];
     else [_web loadRequest:[NSURLRequest requestWithURL:u]];
     [PW pageChanged:self];
-}
-
-// view-source: isn't a WebKit scheme, so fetch the page and show it as text
-- (void)showSource:(NSURL *)u {
-    if (!u) return;
-    [[NSURLSession.sharedSession dataTaskWithURL:u completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        NSString *s = d ? ([[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"") : e.localizedDescription;
-        s = [[[s stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"] stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"] stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
-        NSString *html = [NSString stringWithFormat:@"<!doctype html><meta charset=utf-8><title>Source of %@</title><style>html{background:#1b1b1d;color:#d6d6da}pre{font:12px ui-monospace,Menlo;white-space:pre-wrap;word-break:break-all;padding:16px}</style><pre>%@</pre>", u.host, s];
-        dispatch_async(dispatch_get_main_queue(), ^{ [self->_web loadHTMLString:html baseURL:nil]; self.loading = NO; [PW pageChanged:self]; });
-    }] resume];
 }
 
 - (void)goBack {
@@ -7735,6 +7773,44 @@ static NSArray *ImportTree(NSString *source, NSString **err) {
 
 
 static NSMutableDictionary<NSString *, NSDictionary *> *gReader;   // reader articles, by one-time id (in memory only)
+static NSMutableDictionary<NSString *, NSDictionary *> *gSource;   // the page as it stands (live DOM), captured for the source viewer, by one-time id
+
+// Fetch what the server sends for an address, as this profile (its cookies, Iris's user agent), without running it.
+static void SourceFetch(NSURL *u, WKWebView *from, void (^done)(NSDictionary *)) {
+    WKWebsiteDataStore *store = from.configuration.websiteDataStore ?: WKWebsiteDataStore.defaultDataStore;
+    NSString *ua = nil; @try { ua = [from valueForKey:@"_userAgent"]; } @catch (NSException *e) {}
+    [store.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *all) {
+        NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:u cachePolicy:NSURLRequestReturnCacheDataElseLoad timeoutInterval:30];
+        r.HTTPShouldHandleCookies = NO;
+        if (ua.length) [r setValue:ua forHTTPHeaderField:@"User-Agent"];
+        [r setValue:@"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" forHTTPHeaderField:@"Accept"];
+        NSString *cookie = CookieHeader(all, u); if (cookie.length) [r setValue:cookie forHTTPHeaderField:@"Cookie"];
+        NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        cfg.HTTPCookieStorage = nil; cfg.HTTPShouldSetCookies = NO; cfg.URLCache = NSURLCache.sharedURLCache;
+        NSURLSession *s = [NSURLSession sessionWithConfiguration:cfg];
+        CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+        [[s dataTaskWithRequest:r completionHandler:^(NSData *d, NSURLResponse *resp, NSError *e) {
+            NSHTTPURLResponse *h = [resp isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)resp : nil;
+            NSMutableDictionary *out = [NSMutableDictionary dictionary];
+            out[@"status"] = @(h.statusCode); out[@"type"] = resp.MIMEType ?: @""; out[@"url"] = resp.URL.absoluteString ?: u.absoluteString;
+            out[@"bytes"] = @(d.length); out[@"ms"] = @((int)((CFAbsoluteTimeGetCurrent() - t0) * 1000));
+            if (!d) out[@"error"] = e.localizedDescription ?: @"Couldn't load";
+            NSString *mime = resp.MIMEType.lowercaseString ?: @"";
+            BOOL binary = [mime hasPrefix:@"image/"] || [mime hasPrefix:@"video/"] || [mime hasPrefix:@"audio/"] || [mime hasPrefix:@"font/"] || [mime isEqualToString:@"application/octet-stream"] || [mime isEqualToString:@"application/pdf"] || [mime containsString:@"zip"];
+            if (d && binary && ![mime containsString:@"svg"]) out[@"binary"] = @YES;
+            else if (d) {
+                NSData *body = d.length > 12 * 1024 * 1024 ? [d subdataWithRange:NSMakeRange(0, 12 * 1024 * 1024)] : d;
+                if (body.length < d.length) out[@"truncated"] = @YES;
+                NSStringEncoding enc = NSUTF8StringEncoding;
+                if (resp.textEncodingName.length) { CFStringEncoding ce = CFStringConvertIANACharSetNameToEncoding((__bridge CFStringRef)resp.textEncodingName); if (ce != kCFStringEncodingInvalidId) enc = CFStringConvertEncodingToNSStringEncoding(ce); }
+                NSString *text = [[NSString alloc] initWithData:body encoding:enc] ?: [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: [[NSString alloc] initWithData:body encoding:NSISOLatin1StringEncoding];
+                out[@"text"] = text ?: @"";
+            }
+            [s finishTasksAndInvalidate];
+            dispatch_async(dispatch_get_main_queue(), ^{ done(out); });
+        }] resume];
+    }];
+}
 
 @interface VInternal : NSObject <WKURLSchemeHandler, WKScriptMessageHandlerWithReply>
 + (instancetype)shared;
@@ -7793,7 +7869,8 @@ static void Respond(id<WKURLSchemeTask> task, NSInteger status, NSString *type, 
     html = [html stringByReplacingOccurrencesOfString:@"{{NONCE}}" withString:nonce];
     NSString *img = [host isEqualToString:@"reader"] ? @"iris: data: https: http:" : @"iris: data:";
     Respond(task, path ? 200 : 404, @"text/html; charset=utf-8", [html dataUsingEncoding:NSUTF8StringEncoding],
-            @{@"Content-Security-Policy": [NSString stringWithFormat:@"default-src 'none'; img-src %@; media-src https:; style-src 'unsafe-inline'; script-src 'nonce-%@'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", img, nonce]});
+            @{@"Content-Security-Policy": [NSString stringWithFormat:@"default-src 'none'; img-src %@; media-src https:; style-src 'unsafe-inline'; script-src 'nonce-%@'; %@base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                                           img, nonce, [host isEqualToString:@"source"] ? @"worker-src blob:; " : @""]});   // the code viewer formats big files off the main thread
 }
 
 - (void)webView:(WKWebView *)w stopURLSchemeTask:(id<WKURLSchemeTask>)task {}
@@ -7954,6 +8031,21 @@ static NSURL *WebURL(id s) {
     if ([op isEqualToString:@"reader.prefs"]) {
         if ([b[@"set"] isKindOfClass:NSDictionary.class]) [Defaults() setObject:b[@"set"] forKey:@"readerPrefs"];
         reply([Defaults() dictionaryForKey:@"readerPrefs"] ?: @{}, nil); return;
+    }
+    if ([op isEqualToString:@"source.get"]) {   // the live DOM captured when you chose View Source
+        NSString *ident = [b[@"id"] isKindOfClass:NSString.class] ? b[@"id"] : @"";
+        reply(gSource[ident] ?: @{}, nil); return;
+    }
+    if ([op isEqualToString:@"source.fetch"]) {   // what the server sent: web addresses only
+        NSURL *u = WebURL(b[@"url"]);
+        if (![@[@"http", @"https"] containsObject:u.scheme.lowercaseString ?: @""]) { reply(@{@"error": @"Only web addresses have a source to show"}, nil); return; }
+        SourceFetch(u, m.webView, ^(NSDictionary *r) { reply(r, nil); }); return;
+    }
+    if ([op isEqualToString:@"source.save"]) {
+        NSString *text = [b[@"text"] isKindOfClass:NSString.class] ? b[@"text"] : @"";
+        NSString *name = [b[@"name"] isKindOfClass:NSString.class] && [b[@"name"] length] ? b[@"name"] : @"source.html";
+        name = [[name stringByReplacingOccurrencesOfString:@"/" withString:@"-"] stringByReplacingOccurrencesOfString:@":" withString:@"-"];
+        [win saveData:[text dataUsingEncoding:NSUTF8StringEncoding] name:name]; reply(@YES, nil); return;
     }
     if ([op isEqualToString:@"toast"]) {
         if ([b[@"text"] isKindOfClass:NSString.class]) [gWin showToast:b[@"text"]];
@@ -9252,10 +9344,13 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     }
     y += 3 * 66 + 6;
     if (web) {
-        CGFloat bw = floor((cw - 8) / 2);
+        BOOL other = !IrisIsDefaultBrowser();
+        CGFloat bw = other ? floor((cw - 8) / 2) : cw;
         VPItem *src = [self add:VPPill rect:NSMakeRect(x, y, bw, 28) title:@"View source"]; src.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww viewSource:nil]; };
-        VPItem *ext = [self add:VPPill rect:NSMakeRect(x + bw + 8, y, bw, 28) title:@"Open in default browser"];
-        ext.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [NSWorkspace.sharedWorkspace openURL:u]; };
+        if (other) {
+            VPItem *ext = [self add:VPPill rect:NSMakeRect(x + bw + 8, y, bw, 28) title:@"Open in default browser"];
+            ext.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [NSWorkspace.sharedWorkspace openURL:u]; };
+        }
         y += 28 + 12;
     }
     [self add:VPText rect:NSMakeRect(x, y, cw, 14) title:@"⌘. opens Lens"];
@@ -10760,7 +10855,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
         add(@"Find on Page…", @selector(showFind:), self);
         add(@"Save Page to Downloads", @selector(savePage:), self);
         add(@"View Page Source", @selector(viewSource:), self);
-        add(@"Open in Default Browser", @selector(openInDefaultBrowser:), self).representedObject = w.url;
+        if (!IrisIsDefaultBrowser()) add(@"Open in Default Browser", @selector(openInDefaultBrowser:), self).representedObject = w.url;
         [m addItem:NSMenuItem.separatorItem];
     }
     NSArray *exts = FExtHost.shared.extensions;
@@ -10810,9 +10905,21 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     NSString *u = [m isKindOfClass:NSMenuItem.class] ? m.representedObject : nil; u = u ?: self.current.url;
     if (u) [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:u]];
 }
+// View Source opens Iris's code viewer beside the page: what the server sent, and the page as it stands now.
 - (void)viewSource:(id)s {
-    NSString *u = self.current.url; if (!u.length || self.current.isHome) return;
-    [self newTab:[NSURL URLWithString:[@"view-source:" stringByAppendingString:u]] select:YES];
+    VTab *t = self.current; NSString *u = t.url;
+    if (!u.length || t.isHome || [u hasPrefix:@"iris://source"]) return;
+    if (![u hasPrefix:@"http"]) { [self showToast:@"Only web pages have a source to show"]; return; }
+    NSString *ident = NSUUID.UUID.UUIDString;
+    void (^open)(id) = ^(id dom) {
+        if (!gSource) gSource = [NSMutableDictionary dictionary];
+        if (gSource.count > 20) [gSource removeAllObjects];
+        gSource[ident] = @{@"url": u, @"title": t.title ?: @"", @"dom": [dom isKindOfClass:NSString.class] ? dom : @""};
+        [self newTab:[NSURL URLWithString:SourceViewerURL(u, ident)] select:YES];
+    };
+    if (!t.web.web) { open(nil); return; }
+    [t.web.web evaluateJavaScript:@"(()=>{const d=document.doctype;return (d?'<!DOCTYPE '+d.name+(d.publicId?' PUBLIC \"'+d.publicId+'\"':'')+(d.systemId?' \"'+d.systemId+'\"':'')+'>\n':'')+(document.documentElement?document.documentElement.outerHTML:'')})()"
+                    inFrame:nil inContentWorld:WKContentWorld.defaultClientWorld completionHandler:^(id r, NSError *e) { open(r); }];
 }
 - (NSURL *)downloadFolder {
     NSString *d = [Defaults() stringForKey:kDownloadDir];
@@ -10888,6 +10995,9 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 
 - (void)showFind:(id)s {
     if (!self.current.web) return;
+    if ([self.current.url hasPrefix:@"iris://source"]) {   // the code viewer searches all of the file, not just what's on screen
+        [self.current.web.web evaluateJavaScript:@"window.irisFind&&irisFind()" completionHandler:nil]; return;
+    }
     self.findBar.hidden = NO;
     [self.content addSubview:self.findBar];
     [self.window makeFirstResponder:self.findBar.field];
@@ -11133,10 +11243,13 @@ static id Inspector(VPage *p) { @try { return [p.web valueForKey:@"_inspector"];
 #pragma mark - Now playing: a small player at the foot of the sidebar (YouTube Music, YouTube, any site with media)
 
 static NSString *MediaQueryJS(void) {
-    return @"(()=>{const ms=navigator.mediaSession,m=ms&&ms.metadata;const v=[...document.querySelectorAll('video,audio')].find(x=>x.currentSrc&&x.duration>0)||null;"
-            "if(!m&&!v)return null;const art=m&&m.artwork&&m.artwork.length?m.artwork[m.artwork.length-1].src:'';"
+    // the media you'd want controls for: something playing with sound, else something paused part-way with sound on.
+    // Muted autoplay (feeds, previews) never counts; a site's media session counts only while it says it's playing.
+    return @"(()=>{const ms=navigator.mediaSession,m=ms&&ms.metadata;const all=[...document.querySelectorAll('video,audio')].filter(x=>x.currentSrc&&x.duration>0&&!x.muted&&x.volume>0);"
+            "const v=all.find(x=>!x.paused)||all.find(x=>x.currentTime>1)||null;"
+            "if(!v&&!(m&&ms.playbackState==='playing'))return null;const art=m&&m.artwork&&m.artwork.length?m.artwork[m.artwork.length-1].src:'';"
             "const pip=!!document.pictureInPictureElement||[...document.querySelectorAll('video')].some(x=>x.webkitPresentationMode==='picture-in-picture');"
-            "return{title:(m&&m.title)||document.title||'',artist:(m&&m.artist)||'',art:art,playing:v?!v.paused:(ms&&ms.playbackState==='playing'),pos:v?v.currentTime:0,dur:v&&isFinite(v.duration)?v.duration:0,pip:pip}})()";
+            "return{title:(m&&m.title)||document.title||'',artist:(m&&m.artist)||'',art:art,playing:v?!v.paused:(ms&&ms.playbackState==='playing'),pos:v?v.currentTime:0,dur:v&&isFinite(v.duration)?v.duration:0,ended:v?v.ended:false,pip:pip}})()";
 }
 // Video thumbnails often come letterboxed (black bands above and below, or at the sides); cut those off so the
 // artwork fills its square with the picture itself.
@@ -11304,8 +11417,15 @@ static NSRect NowPlayingFrame(NSRect root, NSSize sz) {
         NSDictionary *info = [r isKindOfClass:NSDictionary.class] ? r : nil;
         BOOL pip = [info[@"pip"] boolValue];
         if (t.inPiP != pip) { t.inPiP = pip; [self refreshChrome]; }
-        BOOL show = info && [info[@"title"] length] && !pip;   // floating in Picture in Picture already: no second player on top
+        // The card is for media you're in the middle of: playing now, or paused part-way within the last 10 minutes.
+        // Finished, never started with sound, or left long ago: no card, and the polling stops until sound plays again.
+        BOOL playing = [info[@"playing"] boolValue];
+        double pos = [info[@"pos"] doubleValue], dur = [info[@"dur"] doubleValue];
+        BOOL resumable = info && !playing && ![info[@"ended"] boolValue] && pos > 1 && (dur <= 0 || dur - pos > 3)
+                         && NSDate.date.timeIntervalSince1970 - t.heardAt < 600;
+        BOOL show = info && [info[@"title"] length] && !pip && (playing || resumable);   // floating in Picture in Picture already: no second player on top
         if (np.hidden == show) { np.hidden = !show; [self layout]; }
+        if (!show && !pip && !playing && self.mediaTab == t) self.mediaTab = nil;
         if (!show) {
             if (pip) {   // look again once it comes back from Picture in Picture
                 [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(updateNowPlaying) object:nil];
@@ -12258,6 +12378,11 @@ static void RunBuildScript(NSString *stamp) {
     if (!w.window.isVisible) { w = [VWindow new]; [w showWindow:nil]; }
     [w showSettingsSection:@"general"];
 }
+- (void)showAbout:(id)s {
+    VWindow *w = gWin;
+    if (!w.window.isVisible) { w = [VWindow new]; [w showWindow:nil]; }
+    [w showSettingsSection:@"about"];
+}
 - (void)showSettingsSection:(NSNumber *)n {
     NSArray *ids = @[@"general", @"appearance", @"search", @"privacy", @"sites", @"blocking", @"performance", @"extensions", @"downloads", @"bookmarks", @"shortcuts", @"advanced", @"about"];
     NSInteger i = [n isKindOfClass:NSNumber.class] ? n.integerValue : 0;
@@ -12280,7 +12405,7 @@ static void RunBuildScript(NSString *stamp) {
     (void)W;
 
     NSMenu *app = [[NSMenu alloc] initWithTitle:@"Iris"];
-    [self item:@"About Iris" action:@selector(orderFrontStandardAboutPanel:) key:nil mods:0 in:app target:NSApp];
+    [self item:@"About Iris" action:@selector(showAbout:) key:nil mods:0 in:app target:self];
     [app addItem:NSMenuItem.separatorItem];
     [self item:@"Settings…" action:@selector(showSettings:) key:@"," mods:C in:app target:self];
     [self item:@"Open Proton Pass" action:@selector(openFirstExtension:) key:@"p" mods:C | O in:app target:self];
@@ -12933,10 +13058,21 @@ static NSArray *SettingsSchema(VWindow *win) {
         SGroup(@"Reset", @[ reset ]) ])];
 
     // ── About
+    // the page draws its own hero from these facts
     NSString *v = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0.4";
-    [S addObject:SSection(@"about", @"About Iris", nil, @"info", @[
-        SGroup(nil, @[ SValue(@"Version", nil, v), SNote(@"Engine", @"WebKit, the engine inside Safari: fast, light on battery, and maintained by Apple."),
-                       SNote(@"Extensions", @"Iris's own Chrome-compatible extension layer."), SNote(@"Window", @"Native AppKit, no web view for the interface."), SValue(@"Licence", nil, @"MIT") ]) ])];
+    NSString *build = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"";
+    NSDate *built = [[NSFileManager.defaultManager attributesOfItemAtPath:NSBundle.mainBundle.executablePath error:nil] fileModificationDate];
+    static NSDateFormatter *df; if (!df) { df = [NSDateFormatter new]; df.dateFormat = @"d MMM yyyy, HH:mm"; }
+    NSDictionary *wk = [NSBundle bundleForClass:WKWebView.class].infoDictionary;
+    NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+    static NSString *iconURL; if (!iconURL) iconURL = PNGDataURL(NSApp.applicationIconImage, 256) ?: @"";
+    NSMutableDictionary *about = [SSection(@"about", @"About Iris", nil, @"info", @[]) mutableCopy];
+    about[@"hero"] = @{@"version": v, @"build": [build isEqualToString:v] ? @"" : build, @"built": built ? [df stringFromDate:built] : @"",
+                       @"webkit": wk[@"CFBundleVersion"] ?: wk[@"CFBundleShortVersionString"] ?: @"",
+                       @"os": os.patchVersion ? [NSString stringWithFormat:@"%ld.%ld.%ld", (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion] : [NSString stringWithFormat:@"%ld.%ld", (long)os.majorVersion, (long)os.minorVersion],
+                       @"threads": @(NSProcessInfo.processInfo.activeProcessorCount), @"extensions": @(FExtHost.shared.extensions.count), @"rules": @(gRuleCount),
+                       @"repo": @"https://github.com/Yyas99/Iris", @"icon": iconURL};
+    [S addObject:about];
     return S;
 }
 
