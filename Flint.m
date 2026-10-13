@@ -1749,7 +1749,7 @@ static NSString *gUpdateNotes;
 @property NSInteger blocked;
 @property CGFloat leftInset;
 @property (strong) NSMutableArray<NSButton *> *extBtns;
-@property NSRect privateBadge;
+@property NSRect privateBadge, profileRect;
 @property (strong) VBadgeButton *profileBtn;
 - (void)layoutBar;
 - (NSView *)extensionButtonFor:(NSString *)ident;
@@ -1869,6 +1869,15 @@ static NSString *gUpdateNotes;
         self.updateBtn.needsDisplay = YES;
     }
     self.menuBtn.frame = NSMakeRect(right - 30, y, 30, 28); right -= 32;
+    // whose window this is: the profile's avatar beside ⋯ (where Chrome keeps it); with several profiles, its name too
+    VWindow *ow = WinFor(self);
+    if (ow && !ow.isPrivate) {
+        NSString *nm = ProfileName(ow.profile);
+        CGFloat pw = Profiles().count > 1 ? MIN(140, ceil([nm sizeWithAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium)}].width) + 36) : 28;
+        self.profileRect = NSMakeRect(right - pw, y + 2, pw, 24); right -= pw + 4;
+        self.profileBtn.toolTip = [NSString stringWithFormat:@"%@ profile: click to switch or add one", nm];
+    } else self.profileRect = NSZeroRect;
+    self.profileBtn.frame = self.profileRect; self.profileBtn.hidden = NSIsEmptyRect(self.profileRect);
     self.shieldBtn.hidden = !ToolbarShows(@"shield");
     if (!self.shieldBtn.hidden) { self.shieldBtn.frame = NSMakeRect(right - 34, y, 34, 28); right -= 36; }
     for (VButton *b in @[self.addTabBtn, self.shareBtn, self.readerBtn]) {
@@ -1887,14 +1896,11 @@ static NSString *gUpdateNotes;
     }
     right -= 4;
     x += 6;
-    // private windows say so; with more than one profile, every window shows whose it is (click to switch)
-    VWindow *ow = WinFor(self);
-    NSString *badge = ow.isPrivate ? @"Private" : Profiles().count > 1 ? ProfileName(ow.profile) : nil;
-    if (badge) {
-        CGFloat bw = MIN(150, ceil([badge sizeWithAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium)}].width) + 36);
+    // private windows say so
+    if (ow.isPrivate) {
+        CGFloat bw = ceil([@"Private" sizeWithAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium)}].width) + 36;
         self.privateBadge = NSMakeRect(x, y + 3, bw, 22); x += bw + 6;
     } else self.privateBadge = NSZeroRect;
-    self.profileBtn.frame = self.privateBadge; self.profileBtn.hidden = !badge || ow.isPrivate;
     // the address bar: full width, or a centred medium/compact bar
     CGFloat avail = MAX(120, right - x);
     NSInteger mode = [Defaults() integerForKey:kAddrWidth];
@@ -1995,17 +2001,20 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
     if (self.editing) ShardStroke(self.pill, 8, vLine, 1);
     if (!NSIsEmptyRect(self.privateBadge)) {   // private windows say so, quietly
         RoundRect(self.privateBadge, 8, vPill);
-        VWindow *ow = WinFor(self);
-        if (ow.isPrivate) {
-            NSImage *eye = Tinted(Symbol(@"eye.slash", 10, NSFontWeightMedium), vDim);
-            DrawImage(eye, CenterIn(eye.size, NSMakeRect(NSMinX(self.privateBadge) + 7, NSMinY(self.privateBadge), 16, NSHeight(self.privateBadge))));
-        } else {   // the profile's avatar, and a hairline in its colour around the badge
-            DrawImage(ProfileAvatar(ow.profile, ProfileName(ow.profile), 15), NSMakeRect(NSMinX(self.privateBadge) + 5, NSMidY(self.privateBadge) - 7.5, 15, 15));
-            ShardStroke(self.privateBadge, 8, [ProfileColor(ow.profile) colorWithAlphaComponent:0.45], 1);
+        NSImage *eye = Tinted(Symbol(@"eye.slash", 10, NSFontWeightMedium), vDim);
+        DrawImage(eye, CenterIn(eye.size, NSMakeRect(NSMinX(self.privateBadge) + 7, NSMinY(self.privateBadge), 16, NSHeight(self.privateBadge))));
+        [@"Private" drawInRect:NSMakeRect(NSMinX(self.privateBadge) + 26, NSMinY(self.privateBadge) + 4, NSWidth(self.privateBadge) - 32, 16)
+               withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: vDim}];
+    }
+    if (!NSIsEmptyRect(self.profileRect)) {   // the profile: its avatar; with several profiles, a pill with its name and a hairline in its colour
+        VWindow *ow = WinFor(self); NSRect r = self.profileRect; BOOL named = NSWidth(r) > 30; CGFloat a = 18;
+        if (named) { RoundRect(r, 12, vPill); ShardStroke(r, 12, [ProfileColor(ow.profile) colorWithAlphaComponent:0.5], 1); }
+        DrawImage(ProfileAvatar(ow.profile, ProfileName(ow.profile), a), NSMakeRect(named ? NSMinX(r) + 3 : round(NSMidX(r) - a / 2), round(NSMidY(r) - a / 2), a, a));
+        if (named) {
+            NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
+            [ProfileName(ow.profile) drawInRect:NSMakeRect(NSMinX(r) + 26, NSMinY(r) + 5, NSWidth(r) - 33, 16)
+                                 withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ps}];
         }
-        NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
-        [(ow.isPrivate ? @"Private" : ProfileName(ow.profile)) drawInRect:NSMakeRect(NSMinX(self.privateBadge) + 26, NSMinY(self.privateBadge) + 4, NSWidth(self.privateBadge) - 32, 16)
-                 withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ps}];
     }
     if (self.blocked > 0) {
         NSString *n = self.blocked > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)self.blocked];
@@ -7141,7 +7150,14 @@ static NSString *CreateProfile(NSString *name) {
     return pid;
 }
 - (void)profileMenu:(id)s {
-    NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
+    NSMenu *m = [self profilesMenu];
+    NSView *at = [s isKindOfClass:NSView.class] ? s : self.toolbar;
+    if (at == (NSView *)self.toolbar.profileBtn) PopMenuRight(m, NSMakePoint(NSWidth(at.bounds), NSHeight(at.bounds) + 6), at);
+    else PopMenu(m, NSMakePoint(0, NSHeight(at.bounds) + 4), at);
+}
+// Every profile (this window's ticked), then New and Manage: the toolbar avatar and the ⋯ menu both show this.
+- (NSMenu *)profilesMenu {
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@"Profiles"];
     for (NSDictionary *p in Profiles()) {
         NSMenuItem *i = [m addItemWithTitle:p[@"name"] action:@selector(openProfile:) keyEquivalent:@""];
         i.target = self; i.representedObject = p[@"id"]; i.state = [p[@"id"] isEqualToString:self.profile] && !self.isPrivate ? NSControlStateValueOn : NSControlStateValueOff;
@@ -7150,8 +7166,7 @@ static NSString *CreateProfile(NSString *name) {
     [m addItem:NSMenuItem.separatorItem];
     [m addItemWithTitle:@"New Profile…" action:@selector(newProfile:) keyEquivalent:@""].target = self;
     [m addItemWithTitle:@"Manage Profiles…" action:@selector(manageProfiles:) keyEquivalent:@""].target = self;
-    NSView *at = [s isKindOfClass:NSView.class] ? s : self.toolbar;
-    PopMenu(m, NSMakePoint(0, NSHeight(at.bounds) + 4), at);
+    return m;
 }
 - (void)openProfile:(NSMenuItem *)i { OpenProfileWindow(i.representedObject); }
 - (void)manageProfiles:(id)s { [self showSettingsSection:@"profiles"]; }
@@ -8151,6 +8166,12 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 - (void)mainMenu:(id)s {
     NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
     NSMenuItem *(^add)(NSString *, SEL, id) = ^NSMenuItem *(NSString *t, SEL a, id target) { NSMenuItem *i = [m addItemWithTitle:t action:a keyEquivalent:@""]; i.target = target; return i; };
+    if (!self.isPrivate) {   // whose window this is, at the top: its avatar and name, opening the list of profiles
+        NSMenuItem *pi = [m addItemWithTitle:ProfileName(self.profile) action:nil keyEquivalent:@""];
+        pi.image = ProfileAvatar(self.profile, ProfileName(self.profile), 16);
+        pi.submenu = [self profilesMenu];
+        [m addItem:NSMenuItem.separatorItem];
+    }
     add(@"New Tab", @selector(newTabAction:), self);
     add(@"Reopen Closed Tab", @selector(reopenClosed:), self).enabled = self.closed.count > 0;
     [m addItem:NSMenuItem.separatorItem];
