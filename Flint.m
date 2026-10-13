@@ -214,6 +214,7 @@ static NSColor *MGlassEdge(void) { return ThemeIsLight() ? HexA(0x000000, 0.09) 
 static NSColor *MPanel(void) { return ThemeIsLight() ? HexA(0xf6f6f4, 0.98) : HexA(0x111215, 0.97); }
 static NSColor *MCard(void) { return ThemeIsLight() ? Hex(0xffffff) : Hex(0x1a1c20); }
 static NSColor *MChip(void) { return ThemeIsLight() ? HexA(0x000000, 0.05) : HexA(0xffffff, 0.06); }
+static void Blend(NSRect r) { NSRectFillUsingOperation(r, NSCompositingOperationSourceOver); }   // NSRectFill copies alpha straight through, punching see-through slits
 static NSFont *MMono(CGFloat s, NSFontWeight w) { return [NSFont monospacedSystemFontOfSize:s weight:w]; }
 static void MShadowed(void (^draw)(void)) {
     NSShadow *sh = [NSShadow new]; sh.shadowColor = [NSColor colorWithWhite:0 alpha:ThemeIsLight() ? 0.12 : 0.3];
@@ -451,7 +452,8 @@ static NSURL *StripTracking(NSURL *u) {
 @property (strong) VFindBar *findBar;
 @property (strong) NSView *railDock;
 @property (strong) NSView *nowPlaying;
-@property (strong) NSView *shelf, *lights, *shelfHandle;   // Monolith: the tab strip from the bottom edge, the window buttons, the hint at the bottom
+@property (strong) NSView *shelf, *lights, *shelfHandle;
+@property (strong) NSView *lensPanel, *addressPanel;   // Monolith: Lens, and the popup under the address   // Monolith: the tab strip from the bottom edge, the window buttons, the hint at the bottom
 @property (weak) VTab *mediaTab;   // the tab whose music the sidebar player controls
 @property (strong) NSArray<VTab *> *splitPair;   // two tabs sharing the page area, left then right
 @property CGFloat splitRatio;
@@ -482,6 +484,29 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)useSuggestion:(NSDictionary *)it newTab:(BOOL)nt;
 - (void)saveData:(NSData *)data name:(NSString *)name;
 - (NSURL *)downloadFolder;
+@end
+@interface VWindow (Actions)   // implemented in the window itself; the Monolith panels call them
+- (void)zoomIn:(id)s;
+- (void)zoomOut:(id)s;
+- (void)zoomReset:(id)s;
+- (void)viewSource:(id)s;
+- (void)toggleBookmark:(id)s;
+- (void)toggleBlockingGlobal:(id)s;
+- (void)toggleBlockingSite:(NSMenuItem *)m;
+- (void)toggleSiteScripts:(NSMenuItem *)m;
+- (void)setSitePermission:(NSMenuItem *)m;
+- (NSMenu *)profilesMenu;
+- (void)clearSiteData:(NSMenuItem *)m;
+@end
+@interface VWindow (Panels)   // v4k_panels.m
+- (void)toggleLens:(id)s;
+- (void)toggleSitePanel:(id)s;
+- (void)toggleShieldPanel:(id)s;
+- (void)showAddressPanel;
+- (void)hideAddressPanel;
+- (void)closePanels;
+- (BOOL)panelOpen;
+- (BOOL)point:(NSPoint)p inPanelOrBar:(NSView *)root;
 @end
 @interface VWindow (Shelf)   // Monolith's tab strip (v4j_shelf.m)
 - (void)showShelf:(BOOL)on;
@@ -1843,6 +1868,7 @@ static NSString *gUpdateNotes;
             NSTextView *ed = (NSTextView *)ws.field.currentEditor;
             if ([ed isKindOfClass:NSTextView.class]) { ed.typingAttributes = ta; ed.alignment = NSTextAlignmentLeft; [ed selectAll:nil]; }
             ws.editing = ws.field.currentEditor != nil; ws.needsDisplay = YES;
+            if (ws.editing && ws.capsule) [WinFor(ws) showAddressPanel];   // Monolith: bookmarks and open tabs under the address
         });
     };
     [self addSubview:f];
@@ -1884,8 +1910,8 @@ static NSString *gUpdateNotes;
     self.dlBtn.hidden = !dl;
     for (NSButton *b in self.extBtns) b.hidden = !ExtensionPinned(b.identifier);
     CGFloat upW = gUpdateReady ? (gUpdating ? 84 : 64) : 0;
-    CGFloat fixed = 78 + 8 + 8 + 40 + 8 + 40 + (dl ? 48 : 0) + (upW > 0 ? upW + 8 : 0);
-    CGFloat avail = W - self.leftInset - 8;
+    CGFloat fixed = 78 + 8 + (dl ? 48 : 0) + (upW > 0 ? upW + 8 : 0);
+    CGFloat avail = W - self.leftInset - 8 - 56;   // Lens keeps the far right corner
     CGFloat pillW = MAX(220, MIN(560, avail - fixed));
     CGFloat total = fixed + pillW;
     CGFloat x = MAX(self.leftInset, round((W - total) / 2));
@@ -1897,12 +1923,11 @@ static NSString *gUpdateNotes;
     self.infoBtn.frame = NSMakeRect(x + 9, y + 8, 24, 24);
     x += pillW + 8;
     if (dl) { self.dlRect = NSMakeRect(x, y, 40, 40); self.dlBtn.frame = NSInsetRect(self.dlRect, 5, 6); x += 48; } else self.dlRect = NSZeroRect;
-    self.lensRect = NSMakeRect(x, y, 40, 40); self.menuBtn.frame = NSInsetRect(self.lensRect, 5, 6);
+    self.lensRect = NSMakeRect(W - 12 - 40, y, 40, 40); self.menuBtn.frame = NSInsetRect(self.lensRect, 5, 6);
     self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 15; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
-    x += 48;
-    self.avatarRect = NSMakeRect(x, y, 40, 40); self.profileBtn.frame = self.avatarRect; self.profileBtn.hidden = NO;
-    self.profileBtn.toolTip = ow.isPrivate ? @"Private window" : [NSString stringWithFormat:@"%@: click to switch profile or add one", ProfileName(ow.profile)];
-    x += 48;
+    self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);   // Lens: the browser; the shield: blocking; the lock: this site
+    self.avatarRect = NSZeroRect; self.profileBtn.hidden = YES;   // your profile lives in Lens
+    (void)ow;
     self.updateBtn.hidden = !gUpdateReady;
     if (gUpdateReady) {
         self.updateBtn.frame = NSMakeRect(x, y + 6, upW, 28);
@@ -2086,7 +2111,8 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
     if (self.capsule) {
         VWindow *ow = WinFor(self);
         NSArray *round = @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill]];
-        NSMutableArray *circles = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.lensRect], [NSValue valueWithRect:self.avatarRect], nil];
+        NSMutableArray *circles = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.lensRect], nil];
+        if (!NSIsEmptyRect(self.avatarRect)) [circles addObject:[NSValue valueWithRect:self.avatarRect]];
         if (!NSIsEmptyRect(self.dlRect)) [circles addObject:[NSValue valueWithRect:self.dlRect]];
         MShadowed(^{
             for (NSValue *v in round) RoundRect(v.rectValue, 20, MGlass());
@@ -2101,6 +2127,7 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
             [n drawAtPoint:NSMakePoint(NSMinX(self.shieldRect) + 26, NSMinY(self.shieldRect) + 6) withAttributes:@{NSFontAttributeName: MMono(12, NSFontWeightMedium), NSForegroundColorAttributeName: vDim}];
         }
         NSRect av = self.avatarRect;
+        if (NSIsEmptyRect(av)) return;
         if (ow.isPrivate) { NSImage *eye = Tinted(Symbol(@"eye.slash", 13, NSFontWeightMedium), vText); DrawImage(eye, CenterIn(eye.size, av)); }
         else DrawImage(ProfileAvatar(ow.profile, ProfileName(ow.profile), 26), NSMakeRect(NSMidX(av) - 13, NSMidY(av) - 13, 26, 26));
         return;
@@ -2137,6 +2164,9 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
 - (void)mouseUp:(NSEvent *)e { if (e.clickCount == 2 && !self.capsule) [self.window performZoom:nil]; }
 - (void)mouseDown:(NSEvent *)e {
     if (!self.capsule) { [super mouseDown:e]; return; }
+    VWindow *w = WinFor(self);   // the glass around the controls: clicking it lets go of the address
+    if (self.field.currentEditor) [self.window makeFirstResponder:w.current.web.web];
+    [w closePanels];
     if (e.clickCount == 2) [self.window performZoom:nil]; else [self.window performWindowDragWithEvent:e];
 }
 @end
@@ -7254,7 +7284,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
         NSBezierPath *clip = [NSBezierPath bezierPathWithRoundedRect:c xRadius:12 yRadius:12];
         [clip addClip];
         if (t.thumb) { DrawImageFill(t.thumb, c); }
-        else { [(ThemeIsLight() ? Hex(0xececef) : Hex(0x1e2025)) setFill]; NSRectFill(c); ShelfIcon(t, NSMakeRect(NSMidX(c) - 16, NSMidY(c) - 16, 32, 32), 9); }
+        else { [(ThemeIsLight() ? Hex(0xececef) : Hex(0x1e2025)) setFill]; NSRectFillUsingOperation(c, NSCompositingOperationSourceOver); ShelfIcon(t, NSMakeRect(NSMidX(c) - 16, NSMidY(c) - 16, 32, 32), 9); }
         if (alpha < 1) { [[vBg colorWithAlphaComponent:1 - alpha] setFill]; NSRectFillUsingOperation(c, NSCompositingOperationSourceOver); }
         [NSGraphicsContext restoreGraphicsState];
         if (cur) ShardStroke(NSInsetRect(c, -3, -3), 14, accent, 1.5);
@@ -7279,11 +7309,11 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     // the time axis under the cards: a tick under each, a time where there's room
     CGFloat ay = kCardTop + kCardH + 58;
     CGFloat x0 = NSMidX([self card:0]), x1 = NSMidX([self card:(NSInteger)items.count - 1]);
-    [[vText colorWithAlphaComponent:0.14] setFill]; NSRectFill(NSMakeRect(x0, ay + 6, MAX(1, x1 - x0), 1));
+    [[vText colorWithAlphaComponent:0.14] setFill]; Blend(NSMakeRect(x0, ay + 6, MAX(1, x1 - x0), 1));
     CGFloat lastLabel = -1000;
     for (NSInteger i = 0; i < (NSInteger)items.count; i++) {
         CGFloat x = NSMidX([self card:i]);
-        [[vText colorWithAlphaComponent:0.22] setFill]; NSRectFill(NSMakeRect(x, ay, 1, 13));
+        [[vText colorWithAlphaComponent:0.22] setFill]; NSRectFillUsingOperation(NSMakeRect(x, ay, 1, 13), NSCompositingOperationSourceOver);
         VTab *t = items[(NSUInteger)i];
         BOOL last = i == (NSInteger)items.count - 1;
         if (x - lastLabel < 120 && !last) continue;
@@ -7485,7 +7515,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     NSDictionary *a = @{NSFontAttributeName: MMono(11, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint};
     NSSize sz = [count sizeWithAttributes:a];
     [count drawAtPoint:NSMakePoint(NSMinX(self.addBtn.frame) - 14 - sz.width, 21) withAttributes:a];
-    if (!self.pinnedView.hidden) { [[vText colorWithAlphaComponent:0.08] setFill]; NSRectFill(NSMakeRect(NSMaxX(self.pinnedView.frame) + 20, 72, 1, NSHeight(self.bounds) - 108)); }
+    if (!self.pinnedView.hidden) { [[vText colorWithAlphaComponent:0.08] setFill]; Blend(NSMakeRect(NSMaxX(self.pinnedView.frame) + 20, 72, 1, NSHeight(self.bounds) - 108)); }
 }
 @end
 
@@ -7520,6 +7550,8 @@ static void InstallShelfMonitor(void) {
         VWindow *w = c; VTabShelf *s = (VTabShelf *)w.shelf;
         if (!s) return e;
         if (e.type == NSEventTypeKeyDown) {
+            if (e.keyCode == 53 && w.lensPanel && [[w.lensPanel valueForKey:@"shown"] boolValue]) { [w closePanels]; return nil; }
+            if (e.keyCode == 53 && [w panelOpen]) { [w closePanels]; return e; }   // the address field gets its Esc too
             if (s.shown && e.keyCode == 53) { [w showShelf:NO]; return nil; }
             return e;
         }
@@ -7528,6 +7560,7 @@ static void InstallShelfMonitor(void) {
         CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds);
         if (e.type == NSEventTypeLeftMouseDown) {
             if (s.shown && !NSPointInRect(p, s.frame)) [w showShelf:NO];
+            if ([w panelOpen] && ![w point:p inPanelOrBar:root]) [w closePanels];
             return e;
         }
         if (!s.shown) {
@@ -7579,6 +7612,586 @@ static void InstallShelfMonitor(void) {
     [self.window makeFirstResponder:s.search];
 }
 @end
+
+#pragma mark - Monolith panels: Lens, and the address popup
+
+// One small vocabulary for both panels: each item is a rect, a look and (optionally) what clicking it does.
+typedef NS_ENUM(NSInteger, VPKind) { VPLabel, VPRow, VPToggle, VPChip, VPTile, VPGrid, VPStat, VPPill, VPText, VPSep, VPHeader, VPAvatar };
+@interface VPItem : NSObject
+@property VPKind kind;
+@property NSRect r;
+@property (copy) NSString *title, *meta, *symbol;
+@property (strong) NSImage *icon;
+@property BOOL on;
+@property (copy) void (^act)(NSEvent *e, NSRect r);
+@end
+@implementation VPItem
+@end
+
+@interface VPanel : NSView
+@property (weak) VWindow *owner;
+@property (strong) NSMutableArray<VPItem *> *items;
+@property NSInteger hover;
+@property BOOL shown;
+- (void)build;   // subclasses: fill the items and set the height
+- (VPItem *)add:(VPKind)k rect:(NSRect)r title:(NSString *)t;
+- (void)present:(NSRect)frame;
+- (void)dismiss;
+@end
+
+static void PanelShadow(NSView *v) {
+    CGPathRef p = CGPathCreateWithRoundedRect(CGRectMake(0, 0, NSWidth(v.frame), NSHeight(v.frame)), 18, 18, NULL);
+    v.layer.shadowPath = p; CGPathRelease(p);
+}
+static NSColor *PanelAccent(VWindow *w) { return w.isPrivate ? vText : ProfileColor(w.profile); }
+static NSImage *PanelLetter(NSString *s, CGFloat size) {
+    NSString *l = s.length ? [[s substringToIndex:[s rangeOfComposedCharacterSequenceAtIndex:0].length] uppercaseString] : @"•";
+    return [NSImage imageWithSize:NSMakeSize(size, size) flipped:NO drawingHandler:^BOOL(NSRect r) {
+        NSDictionary *a = @{NSFontAttributeName: UIFont(size * 0.5, NSFontWeightSemibold), NSForegroundColorAttributeName: vText};
+        NSSize sz = [l sizeWithAttributes:a];
+        [l drawAtPoint:NSMakePoint((size - sz.width) / 2, (size - sz.height) / 2) withAttributes:a];
+        return YES;
+    }];
+}
+
+@implementation VPanel
+- (BOOL)isFlipped { return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }
+- (instancetype)initWithFrame:(NSRect)r {
+    if (!(self = [super initWithFrame:r])) return nil;
+    self.items = [NSMutableArray array]; self.hover = -1; self.hidden = YES;
+    self.wantsLayer = YES;
+    self.layer.shadowColor = NSColor.blackColor.CGColor; self.layer.shadowOpacity = ThemeIsLight() ? 0.14 : 0.45;
+    self.layer.shadowRadius = 30; self.layer.shadowOffset = CGSizeMake(0, -14);
+    return self;
+}
+- (VPItem *)add:(VPKind)k rect:(NSRect)r title:(NSString *)t {
+    VPItem *i = [VPItem new]; i.kind = k; i.r = r; i.title = t ?: @"";
+    [self.items addObject:i]; return i;
+}
+- (void)build {}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil]];
+}
+- (NSInteger)itemAt:(NSPoint)p {
+    for (NSInteger i = (NSInteger)self.items.count - 1; i >= 0; i--) { VPItem *it = self.items[(NSUInteger)i]; if (it.act && NSPointInRect(p, it.r)) return i; }
+    return -1;
+}
+- (void)mouseMoved:(NSEvent *)e { NSInteger h = [self itemAt:[self convertPoint:e.locationInWindow fromView:nil]]; if (h != self.hover) { self.hover = h; self.needsDisplay = YES; } }
+- (void)mouseExited:(NSEvent *)e { self.hover = -1; self.needsDisplay = YES; }
+- (void)mouseDown:(NSEvent *)e {
+    NSInteger i = [self itemAt:[self convertPoint:e.locationInWindow fromView:nil]];
+    if (i < 0) return;
+    VPItem *it = self.items[(NSUInteger)i];
+    it.act(e, [self convertRect:it.r toView:nil]);
+}
+- (void)present:(NSRect)frame {
+    self.shown = YES;
+    if (self.superview) [self.superview addSubview:self positioned:NSWindowAbove relativeTo:nil];
+    self.frame = NSOffsetRect(frame, 0, -6); self.alphaValue = 0; self.hidden = NO;
+    PanelShadow(self);
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+        ctx.duration = 0.14; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        self.animator.frame = frame; self.animator.alphaValue = 1;
+    }];
+}
+- (void)dismiss {
+    if (!self.shown) return;
+    self.shown = NO; self.hover = -1;
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.1; self.animator.alphaValue = 0; }
+                       completionHandler:^{ if (!self.shown) self.hidden = YES; }];
+}
+- (void)drawRect:(NSRect)dirty {
+    NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
+    RoundRect(b, 18, ThemeIsLight() ? Hex(0xf7f7f5) : Hex(0x121316));
+    ShardStroke(b, 18, ThemeIsLight() ? HexA(0x000000, 0.1) : HexA(0xffffff, 0.09), 1);
+    NSColor *accent = PanelAccent(self.owner);
+    NSColor *card = ThemeIsLight() ? HexA(0x000000, 0.045) : Hex(0x18191d), *cardHover = ThemeIsLight() ? HexA(0x000000, 0.08) : Hex(0x212328);
+    NSMutableParagraphStyle *tr = [NSMutableParagraphStyle new]; tr.lineBreakMode = NSLineBreakByTruncatingTail;
+    NSMutableParagraphStyle *ctr = [NSMutableParagraphStyle new]; ctr.lineBreakMode = NSLineBreakByTruncatingTail; ctr.alignment = NSTextAlignmentCenter;
+    for (NSInteger i = 0; i < (NSInteger)self.items.count; i++) {
+        VPItem *it = self.items[(NSUInteger)i]; NSRect r = it.r; BOOL hov = i == self.hover;
+        switch (it.kind) {
+            case VPLabel: {
+                [it.title drawAtPoint:NSMakePoint(NSMinX(r), NSMinY(r)) withAttributes:@{NSFontAttributeName: MMono(10.5, NSFontWeightMedium), NSForegroundColorAttributeName: vFaint, NSKernAttributeName: @1.2}];
+                if (it.meta.length) {
+                    NSDictionary *a = @{NSFontAttributeName: MMono(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint};
+                    NSSize sz = [it.meta sizeWithAttributes:a];
+                    [it.meta drawAtPoint:NSMakePoint(NSMaxX(r) - sz.width, NSMinY(r)) withAttributes:a];
+                }
+                break;
+            }
+            case VPRow: {
+                if (hov || it.on) RoundRect(r, 11, hov ? cardHover : card);
+                NSRect ic = NSMakeRect(NSMinX(r) + 8, NSMidY(r) - 13, 26, 26);
+                RoundRect(ic, 8, ThemeIsLight() ? HexA(0x000000, 0.06) : Hex(0x22242a));
+                if (it.icon) DrawImage(it.icon, NSInsetRect(ic, 5, 5));
+                else if (it.symbol) { NSImage *s = Tinted(Symbol(it.symbol, 12, NSFontWeightMedium), vDim); DrawImage(s, CenterIn(s.size, ic)); }
+                else { NSImage *l = PanelLetter(it.title, 26); DrawImage(l, ic); }
+                NSDictionary *ma = @{NSFontAttributeName: MMono(11, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint};
+                CGFloat mw = it.meta.length ? ceil([it.meta sizeWithAttributes:ma].width) + 12 : 0;
+                [it.title drawInRect:NSMakeRect(NSMaxX(ic) + 12, NSMidY(r) - 9, NSWidth(r) - 58 - mw, 18) withAttributes:@{NSFontAttributeName: UIFont(13.5, NSFontWeightRegular), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: tr}];
+                if (mw) [it.meta drawAtPoint:NSMakePoint(NSMaxX(r) - mw - 2, NSMidY(r) - 7) withAttributes:ma];
+                break;
+            }
+            case VPToggle: {
+                [it.title drawAtPoint:NSMakePoint(NSMinX(r), NSMidY(r) - 9) withAttributes:@{NSFontAttributeName: UIFont(13.5, NSFontWeightRegular), NSForegroundColorAttributeName: vText}];
+                if (it.meta.length) {
+                    NSDictionary *a = @{NSFontAttributeName: MMono(11, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint};
+                    NSSize sz = [it.meta sizeWithAttributes:a];
+                    [it.meta drawAtPoint:NSMakePoint(NSMaxX(r) - 46 - sz.width, NSMidY(r) - 7) withAttributes:a];
+                }
+                NSRect tk = NSMakeRect(NSMaxX(r) - 34, NSMidY(r) - 10, 34, 20);
+                RoundRect(tk, 10, it.on ? accent : (ThemeIsLight() ? HexA(0x000000, 0.14) : Hex(0x2a2c31)));
+                [(it.on ? NSColor.whiteColor : (ThemeIsLight() ? NSColor.whiteColor : Hex(0x8e9199))) setFill];
+                [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(it.on ? NSMaxX(tk) - 18 : NSMinX(tk) + 2, NSMinY(tk) + 2, 16, 16)] fill];
+                if (i + 1 < (NSInteger)self.items.count && self.items[(NSUInteger)i + 1].kind == VPToggle) { [[vText colorWithAlphaComponent:0.05] setFill]; Blend(NSMakeRect(NSMinX(r), NSMaxY(r) - 0.5, NSWidth(r), 1)); }
+                break;
+            }
+            case VPChip: {
+                RoundRect(r, NSHeight(r) / 2, it.on ? (ThemeIsLight() ? HexA(0x000000, 0.1) : Hex(0x2a2c31)) : (hov ? card : NSColor.clearColor));
+                ShardStroke(r, NSHeight(r) / 2, it.on ? [vText colorWithAlphaComponent:0.16] : MGlassEdge(), 1);
+                CGFloat x = NSMinX(r) + 12;
+                if (it.symbol) { NSImage *s = Tinted(Symbol(it.symbol, 11, NSFontWeightMedium), it.on ? vText : vDim); DrawImage(s, NSMakeRect(x, NSMidY(r) - s.size.height / 2, s.size.width, s.size.height)); x += s.size.width + 6; }
+                NSDictionary *a = @{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium), NSForegroundColorAttributeName: it.on ? vText : vDim};
+                [it.title drawAtPoint:NSMakePoint(x, NSMidY(r) - 8) withAttributes:a];
+                if (it.meta.length) [it.meta drawAtPoint:NSMakePoint(x + [it.title sizeWithAttributes:a].width + 6, NSMidY(r) - 7) withAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint}];
+                break;
+            }
+            case VPTile: {
+                RoundRect(r, 14, hov ? cardHover : card);
+                NSRect ic = NSMakeRect(NSMidX(r) - 15, NSMinY(r) + 12, 30, 30);
+                RoundRect(ic, 9, ThemeIsLight() ? HexA(0x000000, 0.07) : Hex(0x26282d));
+                if (it.icon) DrawImage(it.icon, NSInsetRect(ic, 6, 6)); else DrawImage(PanelLetter(it.title, 30), ic);
+                [it.title drawInRect:NSMakeRect(NSMinX(r) + 6, NSMaxY(r) - 26, NSWidth(r) - 12, 16) withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightRegular), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ctr}];
+                break;
+            }
+            case VPGrid: {
+                RoundRect(r, 12, hov ? cardHover : card);
+                NSImage *s = Tinted(Symbol(it.symbol ?: @"circle", 15, NSFontWeightRegular), it.on ? accent : vText);
+                DrawImage(s, NSMakeRect(NSMidX(r) - s.size.width / 2, NSMinY(r) + 13, s.size.width, s.size.height));
+                [it.title drawInRect:NSMakeRect(NSMinX(r) + 4, NSMaxY(r) - 22, NSWidth(r) - 8, 15) withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ctr}];
+                break;
+            }
+            case VPStat: {
+                RoundRect(r, 11, card);
+                [it.title drawAtPoint:NSMakePoint(NSMinX(r) + 12, NSMinY(r) + 9) withAttributes:@{NSFontAttributeName: MMono(20, NSFontWeightMedium), NSForegroundColorAttributeName: vText}];
+                [it.meta drawInRect:NSMakeRect(NSMinX(r) + 12, NSMaxY(r) - 22, NSWidth(r) - 20, 15) withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightRegular), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: tr}];
+                break;
+            }
+            case VPPill: {
+                RoundRect(r, NSHeight(r) / 2, hov ? cardHover : (ThemeIsLight() ? HexA(0x000000, 0.06) : Hex(0x22242a)));
+                NSDictionary *a = @{NSFontAttributeName: UIFont(12, NSFontWeightMedium), NSForegroundColorAttributeName: it.on ? vText : vDim};
+                NSSize sz = [it.title sizeWithAttributes:a];
+                CGFloat w = sz.width; NSImage *s = it.symbol ? Tinted(Symbol(it.symbol, 11, NSFontWeightMedium), it.on ? accent : vDim) : nil;
+                if (s) w += s.size.width + 6;
+                CGFloat x = round(NSMidX(r) - w / 2);
+                if (s) { DrawImage(s, NSMakeRect(x, NSMidY(r) - s.size.height / 2, s.size.width, s.size.height)); x += s.size.width + 6; }
+                [it.title drawAtPoint:NSMakePoint(x, NSMidY(r) - sz.height / 2) withAttributes:a];
+                break;
+            }
+            case VPText: {
+                [it.title drawInRect:r withAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ctr}];
+                break;
+            }
+            case VPSep: { [[vText colorWithAlphaComponent:0.06] setFill]; NSRectFillUsingOperation(r, NSCompositingOperationSourceOver); break; }
+            case VPHeader: {
+                NSRect ic = NSMakeRect(NSMinX(r), NSMidY(r) - 19, 38, 38);
+                RoundRect(ic, 10, ThemeIsLight() ? HexA(0x000000, 0.06) : Hex(0x1f2126));
+                if (it.icon) DrawImage(it.icon, NSInsetRect(ic, 10, 10)); else DrawImage(PanelLetter(it.title, 38), ic);
+                [it.title drawInRect:NSMakeRect(NSMaxX(ic) + 12, NSMinY(r) + 1, NSWidth(r) - 50, 18) withAttributes:@{NSFontAttributeName: UIFont(14, NSFontWeightSemibold), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: tr}];
+                [it.meta drawInRect:NSMakeRect(NSMaxX(ic) + 12, NSMinY(r) + 22, NSWidth(r) - 50, 16) withAttributes:@{NSFontAttributeName: MMono(11.5, NSFontWeightRegular), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: tr}];
+                break;
+            }
+            case VPAvatar: {
+                RoundRect(r, NSHeight(r) / 2, hov ? cardHover : card);
+                ShardStroke(r, NSHeight(r) / 2, MGlassEdge(), 1);
+                if (it.icon) DrawImage(it.icon, NSMakeRect(NSMinX(r) + 4, NSMidY(r) - 11, 22, 22));
+                [it.title drawInRect:NSMakeRect(NSMinX(r) + 32, NSMidY(r) - 8, NSWidth(r) - 40, 16) withAttributes:@{NSFontAttributeName: UIFont(12, NSFontWeightMedium), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: tr}];
+                break;
+            }
+        }
+    }
+}
+@end
+
+#pragma mark Lens
+
+// Lens: everything about the page you're on, in one place. Replaces the ⋯ menu, the shield and the site menu.
+@interface VLensPanel : VPanel
+@property NSInteger cookies;
+@property NSInteger mode;   // 0 Lens (the browser), 1 this site (the lock), 2 blocking (the shield)
+@end
+@implementation VLensPanel
+static NSMenuItem *Carry(id obj) { NSMenuItem *m = [NSMenuItem new]; m.representedObject = obj; return m; }
+static CGFloat ChipWidth(NSString *t, NSString *meta) {
+    return ceil([t sizeWithAttributes:@{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium)}].width + (meta.length ? [meta sizeWithAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightRegular)}].width + 6 : 0)) + 26;
+}
+- (void)build {
+    [self.items removeAllObjects];
+    VWindow *w = self.owner; VTab *t = w.current; __weak VWindow *ww = w; __weak VLensPanel *ws = self;
+    CGFloat W = self.mode == 0 ? 384 : 340, P = 16, x = P, cw = W - 2 * P, y = P;
+    NSURL *u = [NSURL URLWithString:t.url ?: @""];
+    BOOL web = [u.scheme hasPrefix:@"http"] && !t.isHome;
+    NSString *host = web ? HostOf(u) : @"";
+    NSString *site = [host hasPrefix:@"www."] ? [host substringFromIndex:4] : host;
+
+    if (self.mode == 1) {   // ---- the lock: this site ----
+        VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:web ? host : (t.isHome ? @"New Tab" : t.title ?: @"Flint")];
+        h.icon = t.favicon;
+        h.meta = !web ? @"Flint page" : [u.scheme isEqualToString:@"https"] ? @"Secure connection · WebKit" : @"Not secure · this page isn't encrypted";
+        y += 40 + 14;
+        if (web) {
+            CGFloat sw = floor((cw - 8) / 2);
+            VPItem *s1 = [self add:VPStat rect:NSMakeRect(x, y, sw, 62) title:self.cookies >= 0 ? [NSString stringWithFormat:@"%ld", (long)self.cookies] : @"–"]; s1.meta = @"Cookies";
+            VPItem *s2 = [self add:VPStat rect:NSMakeRect(x + sw + 8, y, cw - sw - 8, 62) title:[NSString stringWithFormat:@"%d%%", (int)round((t.web.zoom ?: 1) * 100)]]; s2.meta = @"Zoom";
+            y += 62 + 16;
+            BOOL js = [Defaults() boolForKey:kScripts] && ![[Defaults() arrayForKey:kJSOff] containsObject:host];
+            VPItem *jv = [self add:VPToggle rect:NSMakeRect(x, y, cw, 40) title:@"JavaScript"]; jv.on = js;
+            jv.act = ^(NSEvent *e, NSRect r) { [ww toggleSiteScripts:Carry(host)]; [ws rebuild]; };
+            y += 48;
+            [self add:VPLabel rect:NSMakeRect(x, y, cw, 14) title:@"PERMISSIONS"]; y += 20;
+            NSDictionary *perms = [Defaults() dictionaryForKey:kSitePerms][host];
+            CGFloat cx = x;
+            for (NSString *k in @[@"camera", @"microphone"]) {
+                NSInteger v = [perms[k] integerValue];
+                NSString *state = v == 1 ? @"Allow" : v == 2 ? @"Block" : @"Ask";
+                NSString *t1 = [k isEqualToString:@"camera"] ? @"Camera" : @"Microphone";
+                VPItem *c = [self add:VPChip rect:NSMakeRect(cx, y, ChipWidth(t1, state), 30) title:t1]; c.meta = state;
+                c.act = ^(NSEvent *e, NSRect r) { [ww setSitePermission:Carry(@[host, k, @((v + 1) % 3)])]; [ws rebuild]; };
+                cx += NSWidth(c.r) + 6;
+            }
+            y += 30 + 18;
+            CGFloat bw = floor((cw - 8) / 2);
+            VPItem *cl = [self add:VPPill rect:NSMakeRect(x, y, bw, 30) title:@"Clear site data…"];
+            cl.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww clearSiteData:Carry(host)]; };
+            VPItem *cp = [self add:VPPill rect:NSMakeRect(x + bw + 8, y, cw - bw - 8, 30) title:@"Copy link"]; cp.symbol = @"link";
+            cp.act = ^(NSEvent *e, NSRect r) { NSPasteboard *pb = NSPasteboard.generalPasteboard; [pb clearContents]; [pb setString:t.url forType:NSPasteboardTypeString]; [ww showToast:@"Link copied"]; [ws.owner closePanels]; };
+            y += 30;
+        } else {
+            [self add:VPText rect:NSMakeRect(x, y, cw, 16) title:@"Nothing to set for this page"]; y += 16;
+        }
+        y += P;
+        [self setFrameSize:NSMakeSize(W, y)]; self.needsDisplay = YES; return;
+    }
+
+    if (self.mode == 2) {   // ---- the shield: blocking ----
+        BOOL global = [Defaults() boolForKey:kBlock], allowed = [[Defaults() arrayForKey:kAllowlist] containsObject:host];
+        VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:!global ? @"Blocking is off" : (web && allowed) ? [@"Allowed on " stringByAppendingString:host] : @"Blocking ads and trackers"];
+        h.icon = Tinted(Symbol(global && !(web && allowed) ? @"checkmark.shield" : @"shield.slash", 16, NSFontWeightMedium), vText);
+        h.meta = [@"Filter lists · " stringByAppendingString:VBlocker.shared.status ?: @""];
+        y += 40 + 14;
+        CGFloat sw = floor((cw - 8) / 2);
+        VPItem *s1 = [self add:VPStat rect:NSMakeRect(x, y, sw, 62) title:[NSString stringWithFormat:@"%ld", (long)t.blocked]]; s1.meta = @"On this page";
+        VPItem *s2 = [self add:VPStat rect:NSMakeRect(x + sw + 8, y, cw - sw - 8, 62) title:gRuleCount >= 1000 ? [NSString stringWithFormat:@"%.0fk", gRuleCount / 1000.0] : [NSString stringWithFormat:@"%lu", (unsigned long)gRuleCount]]; s2.meta = @"Hosts in the lists";
+        y += 62 + 16;
+        if (web) {
+            VPItem *bs = [self add:VPToggle rect:NSMakeRect(x, y, cw, 40) title:[@"Block on " stringByAppendingString:site]]; bs.on = global && !allowed;
+            bs.act = ^(NSEvent *e, NSRect r) { if (!global) [ww toggleBlockingGlobal:nil]; else [ww toggleBlockingSite:Carry(host)]; [ws rebuild]; };
+            y += 40;
+        }
+        VPItem *ga = [self add:VPToggle rect:NSMakeRect(x, y, cw, 40) title:@"Block everywhere"]; ga.on = global;
+        ga.act = ^(NSEvent *e, NSRect r) { [ww toggleBlockingGlobal:nil]; [ws rebuild]; };
+        y += 48;
+        if (web) {
+            NSUInteger hidden = [[Defaults() dictionaryForKey:@"cosmeticFilters"][site] count];
+            VPItem *be = [self add:VPPill rect:NSMakeRect(x, y, cw, 30) title:@"Block an element on this page…"]; be.symbol = @"hand.point.up.left";
+            be.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww blockElement:nil]; };
+            y += 36;
+            if (hidden) {
+                CGFloat bw = floor((cw - 8) / 2);
+                VPItem *un = [self add:VPPill rect:NSMakeRect(x, y, bw, 30) title:@"Undo last"];
+                un.act = ^(NSEvent *e, NSRect r) { [ww undoLastElement:Carry(site)]; [ws rebuild]; };
+                VPItem *sa = [self add:VPPill rect:NSMakeRect(x + bw + 8, y, cw - bw - 8, 30) title:[NSString stringWithFormat:@"Show %lu hidden", (unsigned long)hidden]];
+                sa.act = ^(NSEvent *e, NSRect r) { [ww resetElements:Carry(site)]; [ws rebuild]; };
+                y += 36;
+            }
+        }
+        VPItem *up = [self add:VPPill rect:NSMakeRect(x, y, cw, 30) title:@"Update filter lists now"]; up.symbol = @"arrow.clockwise";
+        up.act = ^(NSEvent *e, NSRect r) { [ww updateListsNow:nil]; [ws.owner closePanels]; };
+        y += 30 + P;
+        [self setFrameSize:NSMakeSize(W, y)]; self.needsDisplay = YES; return;
+    }
+
+    // ---- Lens: the browser (the page's own settings live behind the lock and the shield) ----
+    VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw - 128, 40) title:@"Flint"];
+    h.icon = Tinted(Symbol(@"camera.aperture", 16, NSFontWeightMedium), vText);
+    h.meta = w.isPrivate ? @"Private window" : [NSString stringWithFormat:@"%lu tabs in this window", (unsigned long)w.tabs.count];
+    VPItem *av = [self add:VPAvatar rect:NSMakeRect(W - P - 118, y + 5, 118, 30) title:w.isPrivate ? @"Private" : ProfileName(w.profile)];
+    av.icon = w.isPrivate ? Tinted(Symbol(@"eye.slash", 14, NSFontWeightMedium), vText) : ProfileAvatar(w.profile, ProfileName(w.profile), 22);
+    if (!w.isPrivate) av.act = ^(NSEvent *e, NSRect r) {
+        NSView *root = ww.window.contentView;
+        NSRect rr = [root convertRect:r fromView:nil];
+        PopMenu([ww profilesMenu], NSMakePoint(NSMinX(rr), NSMaxY(rr) + 4), root);
+    };
+    y += 40 + 16;
+
+    NSArray *exts = FExtHost.shared.extensions;
+    if (exts.count && !w.isPrivate) {
+        VPItem *el = [self add:VPLabel rect:NSMakeRect(x, y, cw, 14) title:@"EXTENSIONS"]; el.meta = [NSString stringWithFormat:@"%lu installed", (unsigned long)exts.count]; y += 20;
+        for (id e in exts) {
+            NSString *ident = [e valueForKey:@"ident"];
+            BOOL pinned = ExtensionPinned(ident);
+            VPItem *row = [self add:VPRow rect:NSMakeRect(x - 8, y, cw - 64, 36) title:[e valueForKey:@"name"]];
+            row.icon = [FExtHost.shared iconFor:e];
+            row.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [FExtHost.shared openPopup:e from:ww.toolbar.menuBtn]; };
+            VPItem *pin = [self add:VPPill rect:NSMakeRect(x + cw - 64, y + 5, 64, 26) title:pinned ? @"Pinned" : @"Pin"]; pin.on = pinned; pin.symbol = pinned ? @"pin.fill" : @"pin";
+            pin.act = ^(NSEvent *ev, NSRect r) {
+                NSMutableArray *p = [[Defaults() arrayForKey:kExtPinned] ?: [FExtHost.shared.extensions valueForKey:@"ident"] mutableCopy];
+                if ([p containsObject:ident]) [p removeObject:ident]; else [p addObject:ident];
+                [Defaults() setObject:p forKey:kExtPinned];
+                for (VWindow *o in gWindows) { [o.toolbar layoutBar]; [o refreshChrome]; }
+                [ws rebuild];
+            };
+            y += 38;
+        }
+        y += 12;
+    }
+
+    if (t.web) {
+        [self add:VPLabel rect:NSMakeRect(x, y + 9, 60, 14) title:@"ZOOM"];
+        CGFloat zx = x + cw - 170;
+        VPItem *zo = [self add:VPPill rect:NSMakeRect(zx, y, 44, 30) title:@"−"]; zo.act = ^(NSEvent *e, NSRect r) { [ww zoomOut:nil]; [ws rebuild]; };
+        VPItem *zr = [self add:VPPill rect:NSMakeRect(zx + 50, y, 70, 30) title:[NSString stringWithFormat:@"%d%%", (int)round(t.web.zoom * 100)]]; zr.on = YES; zr.act = ^(NSEvent *e, NSRect r) { [ww zoomReset:nil]; [ws rebuild]; };
+        VPItem *zi = [self add:VPPill rect:NSMakeRect(zx + 126, y, 44, 30) title:@"+"]; zi.act = ^(NSEvent *e, NSRect r) { [ww zoomIn:nil]; [ws rebuild]; };
+        y += 30 + 16;
+    }
+
+    CGFloat gw = floor((cw - 16) / 3);
+    NSArray *grid = @[@[@"Find", @"magnifyingglass", @"showFind:"], @[@"Split", @"rectangle.split.2x1", @"toggleSplit:"], @[@"Share", @"square.and.arrow.up", @"sharePage:"],
+                      @[@"Bookmarks", @"book", @"showBookmarks:"], @[@"History", @"clock", @"showHistory:"], @[@"Downloads", @"arrow.down.circle", @"showDownloadManager:"],
+                      @[@"New window", @"macwindow.badge.plus", @"newWindow:"], @[@"Private", @"eye.slash", @"newPrivateWindow:"], @[@"Settings", @"gearshape", @"showSettings:"]];
+    for (NSUInteger i = 0; i < grid.count; i++) {
+        NSArray *g = grid[i];
+        VPItem *it = [self add:VPGrid rect:NSMakeRect(x + (i % 3) * (gw + 8), y + (i / 3) * 66, gw, 58) title:g[0]];
+        it.symbol = g[1];
+        SEL sel = NSSelectorFromString(g[2]);
+        it.act = ^(NSEvent *e, NSRect r) {
+            [ws.owner closePanels];
+            id target = [ww respondsToSelector:sel] ? ww : gApp;
+            if ([target respondsToSelector:sel]) [NSApp sendAction:sel to:target from:ww.toolbar.menuBtn];
+        };
+    }
+    y += 3 * 66 + 6;
+    if (web) {
+        CGFloat bw = floor((cw - 8) / 2);
+        VPItem *src = [self add:VPPill rect:NSMakeRect(x, y, bw, 28) title:@"View source"]; src.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww viewSource:nil]; };
+        VPItem *ext = [self add:VPPill rect:NSMakeRect(x + bw + 8, y, bw, 28) title:@"Open in default browser"];
+        ext.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [NSWorkspace.sharedWorkspace openURL:u]; };
+        y += 28 + 12;
+    }
+    [self add:VPText rect:NSMakeRect(x, y, cw, 14) title:@"⌘. opens Lens"];
+    y += 14 + P;
+    [self setFrameSize:NSMakeSize(W, y)];
+    self.needsDisplay = YES;
+}
+- (void)rebuild {
+    [self build];
+    PanelShadow(self);
+}
+- (void)countCookies {
+    VWindow *w = self.owner; NSString *host = HostOf([NSURL URLWithString:w.current.url ?: @""]);
+    self.cookies = -1;
+    if (!host.length) return;
+    WKWebsiteDataStore *ds = w.isPrivate ? w.privateStore : ProfileStore(w.profile);
+    __weak VLensPanel *ws = self;
+    NSString *bare = [host hasPrefix:@"www."] ? [host substringFromIndex:4] : host;
+    [ds.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *all) {
+        NSInteger n = 0;
+        for (NSHTTPCookie *c in all) { NSString *d = [c.domain hasPrefix:@"."] ? [c.domain substringFromIndex:1] : c.domain; if ([bare hasSuffix:d] || [d hasSuffix:bare]) n++; }
+        dispatch_async(dispatch_get_main_queue(), ^{ ws.cookies = n; if (ws.shown) [ws rebuild]; });
+    }];
+}
+@end
+
+#pragma mark Address popup
+
+// Click the address: it's selected, ready to type over, and your bookmarks open underneath it —
+// folders as chips (the one you open shows in place), loose bookmarks as tiles, then your other open tabs.
+@interface VAddressPanel : VPanel
+@property (strong) NSMutableArray *path;   // the folder you've opened, as a chain of folder dictionaries
+@end
+@implementation VAddressPanel
+- (void)open:(NSString *)url event:(NSEvent *)e {
+    VWindow *w = self.owner;
+    NSURL *u = [NSURL URLWithString:url]; if (!u) return;
+    BOOL nt = (e.modifierFlags & NSEventModifierFlagCommand) != 0;
+    [w closePanels];
+    [w.window makeFirstResponder:w.current.web.web ?: w.window.contentView];
+    [w openURL:u newTab:nt];
+}
+- (void)build {
+    [self.items removeAllObjects];
+    VWindow *w = self.owner; VTab *t = w.current; __weak VWindow *ww = w; __weak VAddressPanel *ws = self;
+    if (!self.path) self.path = [NSMutableArray array];
+    CGFloat W = MAX(560, NSWidth(self.frame) > 0 ? NSWidth(self.frame) : 640), P = 16, x = P, cw = W - 2 * P, y = 12;
+    NSURL *u = [NSURL URLWithString:t.url ?: @""];
+    BOOL web = !t.isHome && [u.scheme hasPrefix:@"http"];
+
+    if (web) {   // the page you're on: save, copy or share it
+        BOOL saved = [VBookmarks.shared find:t.url] != nil;
+        VPItem *row = [self add:VPRow rect:NSMakeRect(x - 6, y, cw - 260, 40) title:t.title.length ? t.title : HostOf(u)];
+        row.icon = t.favicon; row.meta = nil;
+        CGFloat bx = x + cw - 252;
+        VPItem *sv = [self add:VPPill rect:NSMakeRect(bx, y + 6, 84, 28) title:saved ? @"Saved" : @"Save"]; sv.symbol = saved ? @"star.fill" : @"star"; sv.on = saved;
+        sv.act = ^(NSEvent *e, NSRect r) { [ww toggleBookmark:nil]; [ws rebuildKeepingWidth]; };
+        VPItem *cp = [self add:VPPill rect:NSMakeRect(bx + 90, y + 6, 92, 28) title:@"Copy link"]; cp.symbol = @"link";
+        cp.act = ^(NSEvent *e, NSRect r) { NSPasteboard *pb = NSPasteboard.generalPasteboard; [pb clearContents]; [pb setString:t.url forType:NSPasteboardTypeString]; [ww showToast:@"Link copied"]; [ws.owner closePanels]; };
+        VPItem *sh = [self add:VPPill rect:NSMakeRect(bx + 188, y + 6, 64, 28) title:@"Share"];
+        sh.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww sharePage:nil]; };
+        y += 40 + 10;
+        [self add:VPSep rect:NSMakeRect(0, y, W, 1) title:@""]; y += 14;
+    }
+
+    VPItem *bl = [self add:VPLabel rect:NSMakeRect(x, y, cw - 70, 14) title:@"BOOKMARKS"]; (void)bl;
+    VPItem *mg = [self add:VPPill rect:NSMakeRect(x + cw - 72, y - 6, 72, 26) title:@"Manage"];
+    mg.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww showBookmarks:nil]; };
+    y += 24;
+
+    NSArray *bar = VBookmarks.shared.bar ?: @[];
+    NSMutableArray *folders = [NSMutableArray array], *links = [NSMutableArray array];
+    for (NSDictionary *b in bar) [([b[@"children"] isKindOfClass:NSArray.class] ? folders : links) addObject:b];
+    if (!bar.count) { [self add:VPText rect:NSMakeRect(x, y + 4, cw, 16) title:@"No bookmarks yet · ⌘D saves the page you're on"]; y += 30; }
+
+    // folder chips; the open one is filled in
+    NSDictionary *openTop = self.path.firstObject;
+    CGFloat cx = x;
+    for (NSDictionary *f in folders) {
+        NSString *name = [f[@"name"] length] ? f[@"name"] : @"Folder";
+        NSString *count = [NSString stringWithFormat:@"%lu", (unsigned long)[f[@"children"] count]];
+        CGFloat wid = ceil([name sizeWithAttributes:@{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium)}].width + [count sizeWithAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightRegular)}].width) + 50;
+        if (cx + wid > x + cw) { cx = x; y += 36; }
+        VPItem *c = [self add:VPChip rect:NSMakeRect(cx, y, wid, 30) title:name]; c.symbol = @"folder"; c.meta = count; c.on = openTop == f;
+        c.act = ^(NSEvent *e, NSRect r) { if (ws.path.firstObject == f) [ws.path removeAllObjects]; else { [ws.path removeAllObjects]; [ws.path addObject:f]; } [ws rebuildKeepingWidth]; };
+        cx += wid + 6;
+    }
+    if (folders.count) y += 30 + 12;
+
+    if (self.path.count) {   // the open folder, in place
+        NSDictionary *cur = self.path.lastObject;
+        NSArray *kids = cur[@"children"];
+        if (self.path.count > 1) {
+            VPItem *bk = [self add:VPPill rect:NSMakeRect(x, y, 90, 26) title:@"Back"]; bk.symbol = @"chevron.left";
+            bk.act = ^(NSEvent *e, NSRect r) { [ws.path removeLastObject]; [ws rebuildKeepingWidth]; };
+            [self add:VPLabel rect:NSMakeRect(x + 100, y + 6, cw - 100, 14) title:[cur[@"name"] uppercaseString] ?: @""];
+            y += 34;
+        }
+        CGFloat colW = floor((cw - 8) / 2);
+        NSUInteger i = 0;
+        for (NSDictionary *b in kids) {
+            BOOL isFolder = [b[@"children"] isKindOfClass:NSArray.class];
+            NSString *name = [b[@"name"] length] ? b[@"name"] : (HostOf([NSURL URLWithString:b[@"url"] ?: @""]) ?: @"");
+            VPItem *row = [self add:VPRow rect:NSMakeRect(x - 6 + (i % 2) * (colW + 8), y + (i / 2) * 40, colW + 6, 38) title:name];
+            if (isFolder) { row.symbol = @"folder"; row.meta = [NSString stringWithFormat:@"%lu", (unsigned long)[b[@"children"] count]];
+                row.act = ^(NSEvent *e, NSRect r) { [ws.path addObject:b]; [ws rebuildKeepingWidth]; }; }
+            else { row.icon = [VFavicons.shared iconForURL:b[@"url"]]; row.meta = HostOf([NSURL URLWithString:b[@"url"] ?: @""]);
+                NSString *url = b[@"url"]; row.act = ^(NSEvent *e, NSRect r) { [ws open:url event:e]; }; }
+            i++;
+            if (i >= 16) break;
+        }
+        if (!kids.count) { [self add:VPText rect:NSMakeRect(x, y + 4, cw, 16) title:@"This folder is empty"]; y += 30; }
+        else y += ((MIN(kids.count, 16) + 1) / 2) * 40 + 10;
+    }
+
+    if (links.count) {   // loose bookmarks as tiles
+        NSInteger cols = MAX(4, (NSInteger)floor((cw + 8) / 102));
+        CGFloat tw = floor((cw - (cols - 1) * 8) / cols);
+        NSUInteger i = 0;
+        for (NSDictionary *b in links) {
+            NSString *name = [b[@"name"] length] ? b[@"name"] : (HostOf([NSURL URLWithString:b[@"url"] ?: @""]) ?: @"");
+            VPItem *tile = [self add:VPTile rect:NSMakeRect(x + (i % cols) * (tw + 8), y + (i / cols) * 86, tw, 78) title:name];
+            tile.icon = [VFavicons.shared iconForURL:b[@"url"]];
+            NSString *url = b[@"url"]; tile.act = ^(NSEvent *e, NSRect r) { [ws open:url event:e]; };
+            i++;
+            if (i >= (NSUInteger)cols * 2) break;
+        }
+        y += ((MIN(links.count, (NSUInteger)cols * 2) + cols - 1) / cols) * 86 + 6;
+    }
+
+    // your other open tabs, the most recent first
+    NSMutableArray *others = [NSMutableArray array];
+    for (VTab *o in w.tabs) if (o != t) [others addObject:o];
+    [others sortUsingComparator:^NSComparisonResult(VTab *a, VTab *b) { return a.hiddenAt > b.hiddenAt ? NSOrderedAscending : a.hiddenAt < b.hiddenAt ? NSOrderedDescending : NSOrderedSame; }];
+    if (others.count) {
+        [self add:VPSep rect:NSMakeRect(0, y + 4, W, 1) title:@""]; y += 18;
+        [self add:VPLabel rect:NSMakeRect(x, y, cw, 14) title:@"OPEN TABS"]; y += 20;
+        NSUInteger n = 0;
+        for (VTab *o in others) {
+            VPItem *row = [self add:VPRow rect:NSMakeRect(x - 6, y, cw + 12, 36) title:o.isHome ? @"New Tab" : (o.title.length ? o.title : o.url ?: @"")];
+            row.icon = o.favicon; row.meta = o.audible && !o.muted ? @"playing" : (!o.web && !o.isHome ? @"asleep" : HostOf([NSURL URLWithString:o.url ?: @""]));
+            row.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww selectTab:o]; };
+            y += 38;
+            if (++n >= 4) break;
+        }
+    }
+    y += 6;
+    [self add:VPSep rect:NSMakeRect(0, y, W, 1) title:@""];
+    [self add:VPText rect:NSMakeRect(x, y + 12, cw, 14) title:@"type to go or search  ·  ⌘D bookmark  ·  esc close"];
+    y += 12 + 14 + 12;
+    [self setFrameSize:NSMakeSize(W, y)];
+    self.needsDisplay = YES;
+}
+- (void)rebuildKeepingWidth {
+    [self build];
+    PanelShadow(self);
+}
+@end
+
+#pragma mark Opening and closing them
+
+@implementation VWindow (Panels)
+- (VLensPanel *)lens {
+    if (!self.lensPanel) { VLensPanel *p = [[VLensPanel alloc] initWithFrame:NSMakeRect(0, 0, 384, 400)]; p.owner = self; self.lensPanel = p; [self.window.contentView addSubview:p]; }
+    return (VLensPanel *)self.lensPanel;
+}
+- (VAddressPanel *)addressPopup {
+    if (!self.addressPanel) { VAddressPanel *p = [[VAddressPanel alloc] initWithFrame:NSMakeRect(0, 0, 640, 300)]; p.owner = self; self.addressPanel = p; [self.window.contentView addSubview:p]; }
+    return (VAddressPanel *)self.addressPanel;
+}
+- (void)openLensMode:(NSInteger)mode under:(NSRect)anchorInBar {
+    VLensPanel *p = [self lens];
+    if (p.shown && p.mode == mode) { [p dismiss]; return; }
+    [(VPanel *)self.addressPanel dismiss];
+    [self showShelf:NO];
+    p.mode = mode; p.cookies = -1; [p build];
+    if (mode != 2) [p countCookies];
+    NSView *root = self.window.contentView; VToolbar *tb = self.toolbar;
+    NSRect lr = [root convertRect:anchorInBar fromView:tb];
+    CGFloat W = NSWidth(p.frame), H = NSHeight(p.frame);
+    CGFloat px = MAX(8, MIN(NSWidth(root.bounds) - W - 8, round(NSMidX(lr) - W / 2)));
+    NSRect f = NSMakeRect(px, NSMaxY([root convertRect:tb.pill fromView:tb]) + 8, W, H);
+    if (p.shown) { p.frame = f; PanelShadow(p); p.needsDisplay = YES; return; }
+    [p present:f];
+}
+- (void)toggleLens:(id)s { [self openLensMode:0 under:self.toolbar.lensRect]; }
+- (void)toggleSitePanel:(id)s { [self openLensMode:1 under:self.toolbar.infoBtn.frame]; }
+- (void)toggleShieldPanel:(id)s { [self openLensMode:2 under:self.toolbar.shieldBtn.frame]; }
+- (void)showAddressPanel {
+    VAddressPanel *p = [self addressPopup];
+    NSView *root = self.window.contentView; VToolbar *tb = self.toolbar;
+    if (!tb.capsule || tb.hidden) return;
+    [(VPanel *)self.lensPanel dismiss];
+    NSRect pr = [root convertRect:tb.pill fromView:tb];
+    CGFloat W = MIN(NSWidth(root.bounds) - 16, MAX(NSWidth(pr) + 120, 640));
+    [p setFrameSize:NSMakeSize(W, 10)];
+    [p.path removeAllObjects];
+    [p build];
+    CGFloat px = MAX(8, MIN(NSWidth(root.bounds) - W - 8, round(NSMidX(pr) - W / 2)));
+    if (p.shown) { p.frame = NSMakeRect(px, NSMaxY(pr) + 8, W, NSHeight(p.frame)); return; }
+    [p present:NSMakeRect(px, NSMaxY(pr) + 8, W, NSHeight(p.frame))];
+}
+- (void)hideAddressPanel { [(VPanel *)self.addressPanel dismiss]; }
+- (void)closePanels { [(VPanel *)self.lensPanel dismiss]; [(VPanel *)self.addressPanel dismiss]; }
+- (BOOL)panelOpen { return ((VPanel *)self.lensPanel).shown || ((VPanel *)self.addressPanel).shown; }
+- (BOOL)point:(NSPoint)p inPanelOrBar:(NSView *)root {
+    for (NSView *v in @[self.lensPanel ?: NSNull.null, self.addressPanel ?: NSNull.null]) if ([v isKindOfClass:NSView.class] && !v.hidden && NSPointInRect(p, v.frame)) return YES;
+    NSView *hit = [self.toolbar hitTest:[root convertPoint:p toView:self.toolbar.superview]];
+    return hit != nil;
+}
+@end
 #pragma mark - Browser window
 
 @interface VRoot : NSView
@@ -7588,7 +8201,26 @@ static void InstallShelfMonitor(void) {
 - (void)drawRect:(NSRect)r { [vBg setFill]; NSRectFill(NSIntersectionRect(r, self.bounds)); }
 - (void)resizeSubviewsWithOldSize:(NSSize)s { [WinFor(self) layout]; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
+// Leaving the window (say, down through the tab strip) puts the strip away, unless you opened it on purpose.
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
+}
+- (void)mouseExited:(NSEvent *)e {
+    VWindow *w = WinFor(self);
+    VTabShelf *s = (VTabShelf *)w.shelf;
+    if (!s.shown || s.sticky) return;
+    __weak NSWindow *win = self.window;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{   // a moment's grace for an overshoot
+        if (!win || NSPointInRect(NSEvent.mouseLocation, win.frame) || s.sticky) return;
+        [w showShelf:NO];
+    });
+}
 - (void)mouseDown:(NSEvent *)e {   // the ground around the page moves the window; a double-click zooms it
+    VWindow *w = WinFor(self);   // clicking away from the address lets go of it
+    if (w.toolbar.field.currentEditor) [self.window makeFirstResponder:w.current.web.web];
+    [w closePanels];
     if (e.clickCount == 2) [self.window performZoom:nil]; else [self.window performWindowDragWithEvent:e];
 }
 @end
@@ -8185,6 +8817,7 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
 // The title bar's height and the traffic lights are AppKit's (via the compact toolbar style).
 - (void)positionLights {}
 - (void)windowDidResize:(NSNotification *)n {
+    [self closePanels];
     NSView *root = self.window.contentView;
     NSRect want = root.superview.bounds;
     if (!NSEqualRects(root.frame, want) && NSWidth(want) > 0) root.frame = want;
@@ -8493,6 +9126,7 @@ static NSArray *MatchCommands(NSString *q, NSUInteger limit) {
     self.typingField = f;
     [self autocomplete:f];
     NSString *typed = self.completion ? [f.stringValue substringToIndex:MIN(self.lastTyped, f.stringValue.length)] : f.stringValue;
+    if (f == self.toolbar.field) { if (Trim(typed).length) [self hideAddressPanel]; else [self showAddressPanel]; }
     if (!Trim(typed).length) { [self.suggest dismiss]; return; }
     [self.suggest showBelow:[self suggestAnchorFor:f] items:[self suggestionsFor:Trim(typed)]];
     [self fetchSuggestions:Trim(typed)];
@@ -8502,7 +9136,7 @@ static NSArray *MatchCommands(NSString *q, NSUInteger limit) {
     if (![self isAddressField:n.object]) return;
     if (n.object == self.home.field) self.home.needsDisplay = YES;
     self.lastTyped = 0; self.completion = nil;
-    dispatch_async(dispatch_get_main_queue(), ^{ [self.suggest dismiss]; [self refreshChrome]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [self.suggest dismiss]; [self hideAddressPanel]; [self refreshChrome]; });
 }
 
 - (BOOL)control:(NSControl *)c textView:(NSTextView *)tv doCommandBySelector:(SEL)sel {
@@ -10085,7 +10719,8 @@ static void RunBuildScript(NSString *stamp) {
     [self item:@"Zoom Out" action:@selector(zoomOut:) key:@"-" mods:C in:view target:nil];
     [self item:@"Actual Size" action:@selector(zoomReset:) key:@"0" mods:C in:view target:nil];
     [view addItem:NSMenuItem.separatorItem];
-    [self item:@"Toggle Sidebar" action:@selector(toggleSidebar:) key:@"s" mods:C in:view target:nil];
+    [self item:@"Show Tabs" action:@selector(toggleSidebar:) key:@"s" mods:C in:view target:nil];
+    [self item:@"Lens" action:@selector(toggleLens:) key:@"." mods:C in:view target:nil];
     [self item:@"Toggle Bookmarks Bar" action:@selector(toggleBookmarksBar:) key:@"b" mods:C | S in:view target:nil];
     [view addItem:NSMenuItem.separatorItem];
     [self item:@"Reader" action:@selector(toggleReader:) key:@"r" mods:C | K in:view target:nil];
@@ -10186,6 +10821,15 @@ static void RunBuildScript(NSString *stamp) {
 
 // New windows from the menu or the Dock.
 // ⌘N opens a window in the profile you're using, as Chrome does
+// Clicking Flint in the Dock always brings a browser window forward: un-minimised if need be, or a new one if none is open.
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visible {
+    VWindow *front = gWin && [gWindows containsObject:gWin] ? gWin : gWindows.lastObject;
+    if (!front) { [self newWindow:nil]; return NO; }
+    if (front.window.isMiniaturized) [front.window deminiaturize:nil];
+    [front.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    return NO;
+}
 - (void)newWindow:(id)s { VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"profile": gWin && !gWin.isPrivate ? gWin.profile ?: @"" : @""}]; [w showWindow:nil]; [w windowDidResize:nil]; }
 - (void)openProfileItem:(NSMenuItem *)i { OpenProfileWindow(i.representedObject); }
 - (void)newProfileAction:(id)s { [gWin newProfile:nil]; }
