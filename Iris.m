@@ -1336,6 +1336,26 @@ static BOOL FLSelectorOK(NSString *s) {
     return YES;
 }
 
+// A generic selector is cheap only when each of its alternatives ends in an id or a class: WebKit files those under that
+// id or class and only tests elements that carry it. One that ends in a bare tag or attribute (div[id^="ad-"], a[href^=…])
+// is tested against every such element on every page, on every change, which is what slows DOM-heavy sites.
+static BOOL FLKeyedSelector(NSString *sel) {
+    NSInteger br = 0, pa = 0; unichar q = 0; BOOL has = NO;
+    for (NSUInteger i = 0; i < sel.length; i++) {
+        unichar c = [sel characterAtIndex:i];
+        if (q) { if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') { q = c; continue; }
+        if (c == '\\') { i++; continue; }
+        if (c == '[') br++; else if (c == ']') br--; else if (c == '(') pa++; else if (c == ')') pa--;
+        else if (br == 0 && pa == 0) {
+            if (c == ' ' || c == '>' || c == '+' || c == '~') has = NO;
+            else if (c == ',') { if (!has) return NO; has = NO; }
+            else if (c == '#' || c == '.') has = YES;
+        }
+    }
+    return has;
+}
+
 @interface FLRules : NSObject
 @property (strong) NSMutableArray *block, *allow, *important;   // network rules
 @property (strong) NSMutableOrderedSet<NSString *> *generic;     // ##sel
@@ -1386,7 +1406,7 @@ static FLRules *FLParse(NSString *dir) {
                 // every page carries the generic sheet and re-checks it on each change, so selectors that make
                 // WebKit search around an element (:has, :nth-…, attribute substrings) only run on the sites that name them
                 if ([sel rangeOfString:@":has("].location != NSNotFound || [sel rangeOfString:@":nth-"].location != NSNotFound
-                    || [sel rangeOfString:@"*="].location != NSNotFound || [sel rangeOfString:@"~="].location != NSNotFound) continue;
+                    || [sel rangeOfString:@"*="].location != NSNotFound || [sel rangeOfString:@"~="].location != NSNotFound || !FLKeyedSelector(sel)) continue;
                 [R.generic addObject:sel];
                 if (exc.count) { NSMutableSet *s = R.genericExcept[sel] ?: [NSMutableSet set]; [s addObjectsFromArray:exc]; R.genericExcept[sel] = s; }
             } else {
@@ -4389,6 +4409,7 @@ static void MarkQuarantined(NSString *path, NSString *from) {
 static WKUserContentController *gUCC;
 static WKUserContentController *gPrivUCC;   // private windows: Iris's helpers only, no extensions
 static void IrisApplyRules(void);
+static NSString *const kHideElements = @"hideElements";   // element hiding on (default) or network blocking only
 static WKProcessPool *gPool;
 static BOOL gBlockOn = YES;
 static NSArray<WKContentRuleList *> *gRules;
@@ -4649,7 +4670,13 @@ static void IrisApplyRules(void) {
     for (WKUserContentController *u in @[gUCC ?: (id)NSNull.null, gPrivUCC ?: (id)NSNull.null]) {
         if (![u isKindOfClass:WKUserContentController.class]) continue;
         [u removeAllContentRuleLists];
-        if (gBlockOn) for (WKContentRuleList *l in gRules) [u addContentRuleList:l];
+        // element hiding (the lists after the network ones) can be switched off on its own
+        BOOL hide = ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements];
+        NSInteger cosFrom = [Defaults() objectForKey:@"ruleCosmeticFrom"] ? [Defaults() integerForKey:@"ruleCosmeticFrom"] : NSIntegerMax;
+        if (gBlockOn) for (WKContentRuleList *l in gRules) {
+            if (!hide && [l.identifier hasPrefix:@"iris-block-"] && [[l.identifier substringFromIndex:11] integerValue] >= cosFrom) continue;
+            [u addContentRuleList:l];
+        }
         // extensions' own blocking rules (declarativeNetRequest): normal windows only, like the extensions themselves
         if (u == gUCC) for (NSArray *lists in gExtRuleLists.allValues) for (WKContentRuleList *l in lists) [u addContentRuleList:l];
     }
@@ -4673,7 +4700,7 @@ static BOOL SiteAllowlisted(NSString *host) {
 }
 
 static NSString *RulesFingerprint(NSString *dir, NSArray *allow) {
-    NSMutableString *fp = [NSMutableString stringWithString:@"v4|"];
+    NSMutableString *fp = [NSMutableString stringWithString:@"v7|"];
     for (NSString *f in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
         NSDictionary *a = [NSFileManager.defaultManager attributesOfItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
         [fp appendFormat:@"%@:%llu:%.0f|", f, a.fileSize, a.fileModificationDate.timeIntervalSince1970];
@@ -4715,17 +4742,45 @@ static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInt
         NSString *ti = tailJSON.length > 2 ? [tailJSON substringWithRange:NSMakeRange(1, tailJSON.length - 2)] : @"";
         NSString *json = [NSString stringWithFormat:@"[%@%@%@]", bi, bi.length && ti.length ? @"," : @"", ti];
         NSString *ident = [NSString stringWithFormat:@"iris-block-%lu", (unsigned long)done.count];
-        [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) {
+        void (^landed)(WKContentRuleList *, NSString *) = ^(WKContentRuleList *list, NSString *why) {
             if (list) [done addObject:list];
             else if (bodyCount > 200) {   // split the list's own rules; each half keeps the exceptions
-                DLog(@"rule list of %lu refused (%@): splitting", (unsigned long)bodyCount, err.localizedDescription);
+                DLog(@"rule list of %lu refused (%@): splitting", (unsigned long)bodyCount, why);
                 NSArray *body = [NSJSONSerialization JSONObjectWithData:[bodyJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
                 NSUInteger h = body.count / 2;
                 [queue insertObject:IrisRuleChunk([body subarrayWithRange:NSMakeRange(h, body.count - h)], tailJSON) atIndex:0];
                 [queue insertObject:IrisRuleChunk([body subarrayWithRange:NSMakeRange(0, h)], tailJSON) atIndex:0];
-            } else { dropped += bodyCount; DLog(@"rule list of %lu dropped: %@", (unsigned long)bodyCount, err.localizedDescription); }
+            } else { dropped += bodyCount; DLog(@"rule list of %lu dropped: %@", (unsigned long)bodyCount, why); }
             dispatch_async(dispatch_get_main_queue(), weakNext);
-        }];
+        };
+        void (^inProcess)(void) = ^{
+            [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) {
+                landed(list, err.localizedDescription);
+            }];
+        };
+        // WebKit builds a list's matcher in the calling process, and a big list briefly needs a lot of memory. A helper
+        // (Iris itself, started with --compile-rules) does the building, so the browser never carries that peak and
+        // the rules can sit in a few large lists, which pages check faster than many small ones.
+        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"iris-rules-%@.json", NSUUID.UUID.UUIDString]];
+        if (![json writeToFile:tmp atomically:NO encoding:NSUTF8StringEncoding error:nil]) { inProcess(); return; }
+        NSTask *task = [NSTask new];
+        task.executableURL = [NSURL fileURLWithPath:NSBundle.mainBundle.executablePath];
+        task.arguments = @[@"--compile-rules", ident, tmp];
+        task.qualityOfService = NSQualityOfServiceUtility;
+        task.standardOutput = NSFileHandle.fileHandleWithNullDevice; task.standardError = NSFileHandle.fileHandleWithNullDevice;
+        task.terminationHandler = ^(NSTask *t) {
+            int status = t.terminationStatus; BOOL clean = t.terminationReason == NSTaskTerminationReasonExit;
+            [NSFileManager.defaultManager removeItemAtPath:tmp error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (clean && status == 0)
+                    [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *list, NSError *err) {
+                        if (list) landed(list, nil); else inProcess();
+                    }];
+                else landed(nil, clean ? [NSString stringWithFormat:@"WebKit refused it (%d)", status] : @"the helper stopped");
+            });
+        };
+        NSError *launchErr = nil;
+        if (![task launchAndReturnError:&launchErr]) { [NSFileManager.defaultManager removeItemAtPath:tmp error:nil]; DLog(@"blocker: helper didn't start (%@), compiling here", launchErr.localizedDescription); inProcess(); }
     };
     weakNext = next;
     dispatch_async(dispatch_get_main_queue(), next);
@@ -4797,10 +4852,11 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
                     // Iris's own process: big lists meant hundreds of MB at once, enough to starve the Mac while a video played);
                     // every list carries all the exceptions
                     NSString *netTail = IrisJSON([R.allow arrayByAddingObjectsFromArray:off]), *offJSON = IrisJSON(off);
-                    for (NSUInteger i = 0; i < R.block.count; i += 15000) @autoreleasepool {
-                        [lists addObject:IrisRuleChunk([R.block subarrayWithRange:NSMakeRange(i, MIN(15000, R.block.count - i))], netTail)];
+                    for (NSUInteger i = 0; i < R.block.count; i += 40000) @autoreleasepool {
+                        [lists addObject:IrisRuleChunk([R.block subarrayWithRange:NSMakeRange(i, MIN(40000, R.block.count - i))], netTail)];
                     }
                     if (R.important.count) [lists addObject:IrisRuleChunk(R.important, offJSON)];   // $important: no exception reaches it
+                    [Defaults() setInteger:(NSInteger)lists.count forKey:@"ruleCosmeticFrom"];      // the element-hiding lists start here
                     @autoreleasepool {
                         NSArray *cos = FLCosmeticRules(R, valid);
                         for (NSUInteger i = 0; i < cos.count; i += 20000) [lists addObject:IrisRuleChunk([cos subarrayWithRange:NSMakeRange(i, MIN(20000, cos.count - i))], offJSON)];
@@ -5888,8 +5944,13 @@ static NSString *ConsentScript(void) {
         "if(!t||t.length>60||!no.test(t)||yes.test(t))continue;if(vis(el)){press(el);return stop()}}};"
     "let mo;const stop=()=>{if(mo)mo.disconnect();clearTimeout(timer)};"
     "const later=()=>{if(timer||done)return;timer=setTimeout(()=>{timer=0;scan()},400)};"
+    // Cheap by design: frames that aren't the page or a consent provider's own frame are skipped, and instead of watching
+    // every change in the page (which taxes sites that rebuild their DOM constantly) it watches only what's added to <body>
+    // and looks again a few times while banners usually appear.
+    "if(window!==top&&!frameIsCmp)return;"
     "webkit.messageHandlers.irisCosmetic.postMessage({op:'consentOn',host:location.hostname}).then(on=>{if(!on)return;"
-      "const go=()=>{scan();if(done)return;mo=new MutationObserver(later);mo.observe(document.documentElement,{childList:true,subtree:true});setTimeout(stop,20000)};"
+      "const go=()=>{scan();if(done)return;mo=new MutationObserver(later);mo.observe(document.body||document.documentElement,{childList:true});"
+        "for(const t of [700,1600,3200,6000,10000,15000])setTimeout(()=>{if(!done)scan()},t);setTimeout(stop,20000)};"
       "document.readyState==='loading'?document.addEventListener('DOMContentLoaded',go,{once:true}):go()}).catch(()=>{})})();";
 }
 
@@ -12665,7 +12726,26 @@ static void MigrateFromFlint(void) {
     [d synchronize];
 }
 
+// Iris started as its own rule compiler: build one content rule list into WebKit's store, then exit.
+// 0 = built, 2 = WebKit refused it, 1 = bad arguments.
+static int IrisCompileRulesHelper(const char *ident, const char *path) {
+    @autoreleasepool {
+        NSString *json = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
+        if (!json.length) return 1;
+        __block int result = -1;
+        [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@(ident) encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) {
+            if (!list) fprintf(stderr, "%s\n", err.localizedDescription.UTF8String ?: "refused");
+            result = list ? 0 : 2;
+        }];
+        json = nil;
+        NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:900];
+        while (result < 0 && limit.timeIntervalSinceNow > 0) [NSRunLoop.mainRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+        return result < 0 ? 2 : result;
+    }
+}
+
 int main(int argc, const char *argv[]) {
+    if (argc >= 4 && !strcmp(argv[1], "--compile-rules")) return IrisCompileRulesHelper(argv[2], argv[3]);
     @autoreleasepool {
         MigrateFromFlint();
         NSApplication *app = NSApplication.sharedApplication;
@@ -12864,6 +12944,8 @@ static NSArray *SettingsSchema(VWindow *win) {
     }
     [S addObject:SSection(@"blocking", @"Ad Blocking", @"Filter lists Iris uses to recognise ad and tracker servers. They update themselves weekly.", @"shield", @[
         SGroup(@"Lists", lists),
+        SGroup(@"Element hiding", @[ SSwitch(kHideElements, @"Hide ad spaces and page clutter", @"Hides the boxes ads leave behind, cookie notices and other annoyances with style rules. Ads and trackers are blocked either way; off makes busy pages a little lighter.",
+                                             ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kHideElements]; IrisApplyRules(); }) ]),
         SGroup(@"Updates", @[ SValue(@"Status", nil, VBlocker.shared.status ?: @""),
             SButton(@"updateLists", @"Update the lists now", nil, @"Update Now", ^(NSDictionary *a, void (^done)(NSString *)) { [win updateListsNow:nil]; done(@"Updating filter lists…"); }) ]) ])];
 
