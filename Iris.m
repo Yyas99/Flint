@@ -200,7 +200,8 @@ static void InitPalette(void) {
 // Your accent where something is chosen, on, or current. With Silver (no accent) the active tab keeps its profile's colour.
 static BOOL AccentChosen(void) { return [Defaults() integerForKey:kAccent] != 0; }
 
-static NSFont *UIFont(CGFloat s, NSFontWeight w) { return [NSFont systemFontOfSize:s weight:w]; }
+static void IrisEventLog(NSString *kind, NSString *detail);   // crashes/events.log (v6c_crash)
+static NSFont *UIFont(CGFloat s, NSFontWeight w) { return [NSFont systemFontOfSize:s weight:w] ?: [NSFont systemFontOfSize:s] ?: [NSFont userFontOfSize:s]; }   // never nil: a nil font in drawing attributes is a crash
 // Headings: San Francisco at display sizes (the system face, tuned for large text), not a serif:
 // crisp and neutral, like the rest of macOS. Very large sizes go a step lighter so they don't shout.
 static NSFont *TitleFont(CGFloat s, BOOL bold) {
@@ -232,7 +233,7 @@ static NSColor *MPanel(void) { return ThemeIsLight() ? HexA(0xf6f6f4, 0.98) : He
 static NSColor *MCard(void) { return ThemeIsLight() ? Hex(0xffffff) : Hex(0x1a1c20); }
 static NSColor *MChip(void) { return ThemeIsLight() ? HexA(0x000000, 0.05) : HexA(0xffffff, 0.06); }
 static void Blend(NSRect r) { NSRectFillUsingOperation(r, NSCompositingOperationSourceOver); }   // NSRectFill copies alpha straight through, punching see-through slits
-static NSFont *MMono(CGFloat s, NSFontWeight w) { return [NSFont monospacedSystemFontOfSize:s weight:w]; }
+static NSFont *MMono(CGFloat s, NSFontWeight w) { return [NSFont monospacedSystemFontOfSize:s weight:w] ?: UIFont(s, w); }
 static void MShadowed(void (^draw)(void)) {
     NSShadow *sh = [NSShadow new]; sh.shadowColor = [NSColor colorWithWhite:0 alpha:ThemeIsLight() ? 0.12 : 0.3];
     sh.shadowBlurRadius = 14; sh.shadowOffset = NSMakeSize(0, -4);
@@ -502,6 +503,7 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)findCount:(int)count active:(int)active;
 - (void)newTabWithPage:(VPage *)p url:(NSURL *)u select:(BOOL)sel;
 - (void)tabOpenedBehind;
+- (void)sleep:(VTab *)t;
 - (void)applyTheme;
 - (void)openDownloads:(id)s;
 - (void)useSuggestion:(NSDictionary *)it newTab:(BOOL)nt;
@@ -4633,6 +4635,8 @@ static NSString *RulesFingerprint(NSString *dir, NSArray *allow) {
     return fp;
 }
 
+static NSString *IrisJSON(id obj) { NSData *d = [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil]; return d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"[]"; }
+static NSArray *IrisRuleChunk(NSArray *body, NSString *tailJSON) { return @[IrisJSON(body), tailJSON ?: @"[]", @(body.count)]; }
 // Compiles the lists into WebKit's store. A list WebKit refuses is split in half and tried again, so one rule it
 // can't take costs only its neighbours, never the whole blocker.
 static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInteger count, NSDate *t0, void (^finish)(NSArray *, NSUInteger)) {
@@ -4657,18 +4661,22 @@ static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInt
             weakNext = nil; next = nil;
             return;
         }
-        NSArray *body = queue.firstObject[0], *tail = queue.firstObject[1]; [queue removeObjectAtIndex:0];
-        NSArray *rules = [body arrayByAddingObjectsFromArray:tail];
-        NSString *json = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:rules options:0 error:nil] encoding:NSUTF8StringEncoding];
+        // each list waits as compact JSON text, not thousands of dictionaries: that's most of the memory a build used to hold
+        NSString *bodyJSON = queue.firstObject[0], *tailJSON = queue.firstObject[1]; NSUInteger bodyCount = [queue.firstObject[2] unsignedIntegerValue];
+        [queue removeObjectAtIndex:0];
+        NSString *bi = bodyJSON.length > 2 ? [bodyJSON substringWithRange:NSMakeRange(1, bodyJSON.length - 2)] : @"";
+        NSString *ti = tailJSON.length > 2 ? [tailJSON substringWithRange:NSMakeRange(1, tailJSON.length - 2)] : @"";
+        NSString *json = [NSString stringWithFormat:@"[%@%@%@]", bi, bi.length && ti.length ? @"," : @"", ti];
         NSString *ident = [NSString stringWithFormat:@"iris-block-%lu", (unsigned long)done.count];
         [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) {
             if (list) [done addObject:list];
-            else if (body.count > 200) {   // split the list's own rules; each half keeps the exceptions
-                DLog(@"rule list of %lu refused (%@): splitting", (unsigned long)rules.count, err.localizedDescription);
+            else if (bodyCount > 200) {   // split the list's own rules; each half keeps the exceptions
+                DLog(@"rule list of %lu refused (%@): splitting", (unsigned long)bodyCount, err.localizedDescription);
+                NSArray *body = [NSJSONSerialization JSONObjectWithData:[bodyJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
                 NSUInteger h = body.count / 2;
-                [queue insertObject:@[[body subarrayWithRange:NSMakeRange(h, body.count - h)], tail] atIndex:0];
-                [queue insertObject:@[[body subarrayWithRange:NSMakeRange(0, h)], tail] atIndex:0];
-            } else { dropped += body.count; DLog(@"rule list of %lu dropped: %@", (unsigned long)rules.count, err.localizedDescription); }
+                [queue insertObject:IrisRuleChunk([body subarrayWithRange:NSMakeRange(h, body.count - h)], tailJSON) atIndex:0];
+                [queue insertObject:IrisRuleChunk([body subarrayWithRange:NSMakeRange(0, h)], tailJSON) atIndex:0];
+            } else { dropped += bodyCount; DLog(@"rule list of %lu dropped: %@", (unsigned long)bodyCount, err.localizedDescription); }
             dispatch_async(dispatch_get_main_queue(), weakNext);
         }];
     };
@@ -4731,26 +4739,29 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
              (unsigned long)R.allow.count, (unsigned long)sels.count, -t0.timeIntervalSinceNow);
         dispatch_async(dispatch_get_main_queue(), ^{
             [FLSelectorCheck check:sels.array done:^(NSSet *valid) {
-                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
                     // the sites you've turned blocking off for close every list (ignore-previous-rules only reaches its own list)
                     NSMutableArray *off = [NSMutableArray array];
                     // (if-domain, not if-top-url: WebKit won't mix the two kinds in one list, and the filters use if-domain)
                     for (NSString *site in allow) { NSString *w = [site isKindOfClass:NSString.class] ? FLDomain(site) : nil; if (!w) continue;
                         [off addObject:@{@"trigger": @{@"url-filter": @".*", @"if-domain": @[w]}, @"action": @{@"type": @"ignore-previous-rules"}}]; }
                     NSMutableArray<NSArray *> *lists = [NSMutableArray array];
-                    // network: 30k rules per list keeps each compile quick; every list carries all the exceptions
-                    for (NSUInteger i = 0; i < R.block.count; i += 30000) {
-                        [lists addObject:@[[R.block subarrayWithRange:NSMakeRange(i, MIN(30000, R.block.count - i))], [R.allow arrayByAddingObjectsFromArray:off]]];
+                    // network: 15k rules per list keeps each compile's working memory small (WebKit builds its matcher in
+                    // Iris's own process: big lists meant hundreds of MB at once, enough to starve the Mac while a video played);
+                    // every list carries all the exceptions
+                    NSString *netTail = IrisJSON([R.allow arrayByAddingObjectsFromArray:off]), *offJSON = IrisJSON(off);
+                    for (NSUInteger i = 0; i < R.block.count; i += 15000) @autoreleasepool {
+                        [lists addObject:IrisRuleChunk([R.block subarrayWithRange:NSMakeRange(i, MIN(15000, R.block.count - i))], netTail)];
                     }
-                    if (R.important.count) [lists addObject:@[R.important, off]];   // $important: no exception reaches it
-                    NSArray *cos = FLCosmeticRules(R, valid);
-                    for (NSUInteger i = 0; i < cos.count; i += 40000) {
-                        [lists addObject:@[[cos subarrayWithRange:NSMakeRange(i, MIN(40000, cos.count - i))], off]];
+                    if (R.important.count) [lists addObject:IrisRuleChunk(R.important, offJSON)];   // $important: no exception reaches it
+                    @autoreleasepool {
+                        NSArray *cos = FLCosmeticRules(R, valid);
+                        for (NSUInteger i = 0; i < cos.count; i += 20000) [lists addObject:IrisRuleChunk([cos subarrayWithRange:NSMakeRange(i, MIN(20000, cos.count - i))], offJSON)];
                     }
-                    if (!lists.count) [lists addObject:@[@[@{@"trigger": @{@"url-filter": @"^iris-never:"}, @"action": @{@"type": @"block"}}], @[]]];
+                    if (!lists.count) [lists addObject:IrisRuleChunk(@[@{@"trigger": @{@"url-filter": @"^iris-never:"}, @"action": @{@"type": @"block"}}], @"[]")];
                     NSUInteger count = R.block.count + R.important.count + valid.count;
                     dispatch_async(dispatch_get_main_queue(), ^{ IrisCompileRuleLists(lists, fp, count, t0, finish); });
-                });
+                } });
             }];
         });
     });
@@ -5314,7 +5325,10 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
 }
 - (void)webView:(WKWebView *)w didFailProvisionalNavigation:(WKNavigation *)n withError:(NSError *)e { [self showError:e]; }
 - (void)webView:(WKWebView *)w didFailNavigation:(WKNavigation *)n withError:(NSError *)e { [self showError:e]; }
-- (void)webViewWebContentProcessDidTerminate:(WKWebView *)w { [w reload]; }
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)w {   // a page's engine died (often memory): note it, then bring the page back
+    IrisEventLog(@"page engine ended", [NSString stringWithFormat:@"%@%@%@", HostOf(w.URL) ?: @"?", self.tab.audible ? @" (was playing)" : @"", self.tab.inPiP ? @" (picture in picture)" : @""]);
+    [w reload];
+}
 
 static NSString *ErrEsc(NSString *s) {
     return [[[[s ?: @"" stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"] stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"]
@@ -11599,7 +11613,7 @@ static volatile BOOL gGovRunning;
     if (gGovRunning) return;
     gGovRunning = YES;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ int sigs[] = {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP, SIGTERM}; for (int i = 0; i < 7; i++) signal(sigs[i], GovCrash); atexit(GovResumeAll); });
+    dispatch_once(&once, ^{ atexit(GovResumeAll); });   // crashes and quit signals resume them too (v6c_crash)
     [NSThread detachNewThreadWithBlock:^{
         [NSThread currentThread].qualityOfService = NSQualityOfServiceUtility;
         const double period = 0.1; double cap = 1.5;   // the rule: GovCap(), averaged over 10 s
@@ -11831,6 +11845,198 @@ static void CtlOut(NSString *s) {
 }
 
 @end
+
+#pragma mark - Crash and trouble reports: Iris's own, never Apple's crash reporter
+
+// When Iris crashes it writes its own report and exits quietly, so macOS's crash reporter never sees it (no dialog,
+// nothing sent to Apple). Reports go to crashes/ beside Iris.app while developing (where they can be read and
+// worked on), otherwise to ~/Library/Logs/Iris. Each one says what failed and where (signal or exception, the
+// call stack), what Iris was doing (tabs, what was playing, Picture in Picture, memory in use), and, added on the
+// next launch, the last lines of the debug log. Non-fatal trouble goes to the same folder's events.log: a page's
+// engine dying, macOS warning about memory, and what Iris did about it.
+//
+// A crashing process can't safely allocate or call Objective-C, so everything the signal handler writes is
+// prepared in fixed buffers beforehand and refreshed every few seconds.
+
+#include <execinfo.h>
+#include <mach/mach.h>
+#include <sys/stat.h>
+
+static char gCrashDir[1024];         // where reports go
+static char gCrashCtx[4096];         // "what Iris was doing", refreshed every 5 seconds
+static volatile sig_atomic_t gCrashing;
+static NSTimeInterval gLaunchedAt;
+
+static NSString *CrashDir(void) {
+    static NSString *d;
+    if (d) return d;
+    NSString *dev = [NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"crashes"];
+    BOOL devFolder = [NSFileManager.defaultManager fileExistsAtPath:[NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"Iris.m"]];
+    d = devFolder ? dev : [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/Iris"];
+    [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    return d;
+}
+static double FootprintMB(void) {
+    task_vm_info_data_t info; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &n) == KERN_SUCCESS ? info.phys_footprint / 1048576.0 : 0;
+}
+static NSString *CrashContext(void) {
+    NSMutableString *s = [NSMutableString string];
+    NSDictionary *b = NSBundle.mainBundle.infoDictionary;
+    NSDictionary *exe = [NSFileManager.defaultManager attributesOfItemAtPath:NSBundle.mainBundle.executablePath error:nil];
+    [s appendFormat:@"Iris %@ (%@), built %@\n", b[@"CFBundleShortVersionString"] ?: @"?", b[@"CFBundleVersion"] ?: @"?", exe.fileModificationDate ?: @"?"];
+    [s appendFormat:@"macOS %@ · %ld threads of %ld cores · %.0f GB memory\n", NSProcessInfo.processInfo.operatingSystemVersionString,
+        (long)NSProcessInfo.processInfo.activeProcessorCount, (long)NSProcessInfo.processInfo.processorCount, NSProcessInfo.processInfo.physicalMemory / 1073741824.0];
+    [s appendFormat:@"Iris's own memory: %.0f MB · up %.0f min · theme %ld · blocking %@ · holding back background tabs %@\n", FootprintMB(),
+        (NSDate.date.timeIntervalSince1970 - gLaunchedAt) / 60,
+        (long)[Defaults() integerForKey:kTheme], [Defaults() boolForKey:kBlock] ? @"on" : @"off", [Defaults() boolForKey:kThrottleOn] ? @"on" : @"off"];
+    NSUInteger tabs = 0, awake = 0; NSMutableArray *notes = [NSMutableArray array];
+    for (VWindow *w in gWindows) for (VTab *t in w.tabs) {
+        tabs++; if (t.web) awake++;
+        NSString *h = HostOf([NSURL URLWithString:t.url ?: @""]);
+        NSMutableArray *f = [NSMutableArray array];
+        if (t == w.current) [f addObject:@"current"];
+        if (t.audible) [f addObject:@"playing"];
+        if (t.inPiP) [f addObject:@"picture-in-picture"];
+        if (t.loading) [f addObject:@"loading"];
+        if (f.count) [notes addObject:[NSString stringWithFormat:@"%@ (%@)", h.length ? h : @"new tab", [f componentsJoinedByString:@", "]]];
+    }
+    [s appendFormat:@"%lu windows · %lu tabs, %lu awake%@%@\n", (unsigned long)gWindows.count, (unsigned long)tabs, (unsigned long)awake,
+        notes.count ? @" · " : @"", [notes componentsJoinedByString:@" · "]];
+    return s;
+}
+static void CrashRefreshContext(void) {
+    NSString *c = CrashContext();
+    strlcpy(gCrashCtx, c.UTF8String ?: "", sizeof gCrashCtx);
+}
+
+// async-signal-safe little helpers
+static void CW(int fd, const char *s) { if (s) write(fd, s, strlen(s)); }
+static void CWNum(int fd, long v) {
+    char b[24]; int i = 23; b[i] = 0; BOOL neg = v < 0; unsigned long u = neg ? -(unsigned long)v : (unsigned long)v;
+    do { b[--i] = '0' + u % 10; u /= 10; } while (u && i > 0);
+    if (neg && i > 0) b[--i] = '-';
+    CW(fd, b + i);
+}
+static int CrashOpen(char *path, size_t cap) {
+    // crashes/crash-<unix time>.txt, and a "pending" marker so the next launch can add the log and say so
+    strlcpy(path, gCrashDir, cap); strlcat(path, "/crash-", cap);
+    char t[24]; int i = 23; t[i] = 0; unsigned long u = (unsigned long)time(NULL); do { t[--i] = '0' + u % 10; u /= 10; } while (u && i > 0);
+    strlcat(path, t + i, cap); strlcat(path, ".txt", cap);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    char marker[1100]; strlcpy(marker, gCrashDir, sizeof marker); strlcat(marker, "/pending", sizeof marker);
+    int m = open(marker, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (m >= 0) { CW(m, path); close(m); }
+    return fd;
+}
+
+static void CrashSignal(int sig, siginfo_t *info, void *uctx) {
+    if (gCrashing) _exit(128 + sig);   // crashed while reporting: just go
+    gCrashing = 1;
+    GovResumeAll();   // never leave a page's engine paused behind us
+    char path[1100]; int fd = CrashOpen(path, sizeof path);
+    if (fd >= 0) {
+        const char *name = sig == SIGSEGV ? "SIGSEGV (bad memory access)" : sig == SIGBUS ? "SIGBUS (bad memory access)" : sig == SIGILL ? "SIGILL (trap: usually a failed check)"
+                         : sig == SIGABRT ? "SIGABRT (aborted)" : sig == SIGFPE ? "SIGFPE (arithmetic)" : sig == SIGTRAP ? "SIGTRAP (trap)" : "signal";
+        CW(fd, "Iris crash report\n=================\nWhat: "); CW(fd, name); CW(fd, " · signal "); CWNum(fd, sig);
+        CW(fd, " · at address 0x"); { char h[20]; unsigned long a = (unsigned long)(info ? info->si_addr : 0); int i = 19; h[i] = 0; do { h[--i] = "0123456789abcdef"[a & 15]; a >>= 4; } while (a && i > 0); CW(fd, h + i); }
+        CW(fd, "\nWhen: unix "); CWNum(fd, (long)time(NULL)); CW(fd, "\n\nWhat Iris was doing (a few seconds before):\n"); CW(fd, gCrashCtx);
+        CW(fd, "\nCall stack (crashed thread):\n");
+        void *frames[128]; int n = backtrace(frames, 128); backtrace_symbols_fd(frames, n, fd);
+        close(fd);
+    }
+    _exit(128 + sig);   // exiting ourselves: macOS's crash reporter never gets it
+}
+static void CrashTerm(int sig) { GovResumeAll(); signal(sig, SIG_DFL); raise(sig); }   // a normal quit request (updates use it): no report
+
+static void CrashWriteException(NSException *e, NSString *where) {
+    if (gCrashing) return;
+    gCrashing = 1;
+    GovResumeAll();
+    char path[1100]; int fd = CrashOpen(path, sizeof path);
+    if (fd < 0) return;
+    NSMutableString *s = [NSMutableString stringWithFormat:@"Iris crash report\n=================\nWhat: uncaught exception %@ (%@)\nReason: %@\nWhen: %@\n\nWhat Iris was doing:\n%@\nCall stack (where it was thrown):\n%@\n",
+        e.name, where, e.reason, NSDate.date, CrashContext(), [e.callStackSymbols componentsJoinedByString:@"\n"]];
+    if (e.userInfo.count) [s appendFormat:@"\nDetails: %@\n", e.userInfo];
+    NSData *d = [s dataUsingEncoding:NSUTF8StringEncoding]; write(fd, d.bytes, d.length); close(fd);
+}
+static void CrashOnUncaught(NSException *e) {
+    DLog(@"EXCEPTION %@ %@\n%@", e.name, e.reason, e.callStackSymbols);
+    CrashWriteException(e, @"uncaught");
+    _exit(70);
+}
+// AppKit stops the app itself when an exception escapes a run-loop turn (NSApplicationCrashOnExceptions):
+// take that over so the report is ours and the exit is quiet.
+static void (*gOrigCrashOnException)(id, SEL, NSException *);
+static void IrisCrashOnException(id app, SEL sel, NSException *e) {
+    DLog(@"EXCEPTION %@ %@\n%@", e.name, e.reason, e.callStackSymbols);
+    CrashWriteException(e, @"in AppKit's run loop");
+    _exit(70);
+}
+
+// Non-fatal trouble, one line each, in events.log next to the reports.
+static void IrisEventLog(NSString *kind, NSString *detail) {
+    NSString *line = [NSString stringWithFormat:@"%@  %@ · %@ · Iris %.0f MB\n", [NSISO8601DateFormatter stringFromDate:NSDate.date timeZone:NSTimeZone.localTimeZone formatOptions:NSISO8601DateFormatWithInternetDateTime],
+                      kind, detail ?: @"", FootprintMB()];
+    NSString *p = [CrashDir() stringByAppendingPathComponent:@"events.log"];
+    NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:p];
+    if (!h) { [line writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil]; return; }
+    [h seekToEndOfFile]; [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile];
+    DLog(@"%@: %@", kind, detail);
+}
+
+// When macOS says memory is short: Iris lets go of what it can rebuild, and on a critical warning puts tabs you
+// aren't using to sleep (never the one on screen, anything playing, or Picture in Picture).
+static void CrashMemoryPressure(unsigned long level) {
+    BOOL critical = (level & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0;
+    NSUInteger slept = 0, thumbs = 0;
+    for (VWindow *w in gWindows) for (VTab *t in w.tabs.copy) {
+        if (t != w.current && t.thumb && !t.web) { t.thumb = nil; thumbs++; }
+        if (critical && t.web && t != w.current && !t.audible && !t.inPiP && ![w.splitPair containsObject:t]) { [w sleep:t]; slept++; }
+    }
+    IrisEventLog(critical ? @"memory critical" : @"memory warning", [NSString stringWithFormat:@"put %lu background tabs to sleep, let go of %lu pictures", (unsigned long)slept, (unsigned long)thumbs]);
+}
+
+static void IrisCrashInstall(void) {
+    gLaunchedAt = NSDate.date.timeIntervalSince1970;
+    strlcpy(gCrashDir, CrashDir().fileSystemRepresentation, sizeof gCrashDir);
+    // a stack of its own, so even running out of stack can be reported
+    static char altstack[128 * 1024]; stack_t ss = {.ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0}; sigaltstack(&ss, NULL);
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = CrashSignal; sa.sa_flags = SA_SIGINFO | SA_ONSTACK; sigemptyset(&sa.sa_mask);
+    int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE, SIGTRAP};
+    for (int i = 0; i < 6; i++) sigaction(sigs[i], &sa, NULL);
+    signal(SIGTERM, CrashTerm);
+    NSSetUncaughtExceptionHandler(&CrashOnUncaught);
+    Method m = class_getInstanceMethod(NSApplication.class, NSSelectorFromString(@"_crashOnException:"));
+    if (m) gOrigCrashOnException = (void (*)(id, SEL, NSException *))method_setImplementation(m, (IMP)IrisCrashOnException);
+}
+// After launch: keep the context fresh, watch memory, and finish off last time's report if there is one.
+static void IrisCrashStarted(void) {
+    CrashRefreshContext();
+    [NSTimer scheduledTimerWithTimeInterval:5 repeats:YES block:^(NSTimer *t) { CrashRefreshContext(); }];
+    static dispatch_source_t mem;
+    mem = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(mem, ^{ CrashMemoryPressure(dispatch_source_get_data(mem)); });
+    dispatch_resume(mem);
+    NSString *marker = [CrashDir() stringByAppendingPathComponent:@"pending"];
+    NSString *report = [NSString stringWithContentsOfFile:marker encoding:NSUTF8StringEncoding error:nil];
+    if (!report.length) return;
+    [NSFileManager.defaultManager removeItemAtPath:marker error:nil];
+    NSString *log = [NSString stringWithContentsOfFile:[NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Iris/iris.log"] encoding:NSUTF8StringEncoding error:nil];
+    if (log.length) {   // the last 80 lines Iris logged before it went
+        NSArray *lines = [log componentsSeparatedByString:@"\n"];
+        NSString *tail = [[lines subarrayWithRange:NSMakeRange(lines.count > 80 ? lines.count - 80 : 0, MIN(80, lines.count))] componentsJoinedByString:@"\n"];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:report];
+        [h seekToEndOfFile]; [h writeData:[[@"\n\nThe debug log just before:\n" stringByAppendingString:tail] dataUsingEncoding:NSUTF8StringEncoding]]; [h closeFile];
+    }
+    IrisEventLog(@"crashed last time", report.lastPathComponent);
+    // keep the 30 most recent reports
+    NSArray *all = [[[NSFileManager.defaultManager contentsOfDirectoryAtPath:CrashDir() error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"SELF BEGINSWITH 'crash-'"]] sortedArrayUsingSelector:@selector(compare:)];
+    for (NSUInteger i = 0; i + 30 < all.count; i++) [NSFileManager.defaultManager removeItemAtPath:[CrashDir() stringByAppendingPathComponent:all[i]] error:nil];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [gWin showToast:[CrashDir() hasSuffix:@"/crashes"] ? @"Iris closed unexpectedly last time · a report is in crashes/" : @"Iris closed unexpectedly last time · a report is in Library/Logs/Iris"];
+    });
+}
 #pragma mark - Theme
 
 static void IrisApplyTheme(void) {
@@ -12002,7 +12208,8 @@ static void RunBuildScript(NSString *stamp) {
     [VBlocker.shared prepare:nil];
     [self.win startControl];
     [FExtHost.shared start];
-    if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start];   // the CPU rule: background pages share a quarter of the processor on battery, 40% plugged in; what you watch is never paced
+    if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start];
+    IrisCrashStarted();   // the CPU rule: background pages share a quarter of the processor on battery, 40% plugged in; what you watch is never paced
     [self fillMissingIcons];
 }
 
@@ -12338,7 +12545,7 @@ int main(int argc, const char *argv[]) {
         MigrateFromFlint();
         NSApplication *app = NSApplication.sharedApplication;
         app.activationPolicy = NSApplicationActivationPolicyRegular;
-        NSSetUncaughtExceptionHandler(&OnException);
+        IrisCrashInstall();   // Iris's own crash reports; Apple's crash reporter never sees a crash
         [Defaults() registerDefaults:@{@"NSApplicationCrashOnExceptions": @YES}];
         gApp = [VApp new];
         app.delegate = gApp;

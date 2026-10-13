@@ -25,3 +25,6 @@ extdebug
 jsc.env
 
 .DS_Store
+
+# crash reports and trouble log (they name the sites you had open)
+crashes/
