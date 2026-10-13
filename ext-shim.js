@@ -235,9 +235,25 @@
         func: d.func ? String(d.func) : (d.function ? String(d.function) : null), args: d.args || []
       }])),
       insertCSS: api(null, d => call('scripting.insertCSS', [{ target: d.target, files: d.files || null, css: d.css || null }])),
-      removeCSS: nop(undefined),
-      registerContentScripts: nop(undefined), unregisterContentScripts: nop(undefined), getRegisteredContentScripts: nop([]), updateContentScripts: nop(undefined)
+      removeCSS: api(null, d => call('scripting.removeCSS', [{ target: d.target, files: d.files || null, css: d.css || null }])),
+      // scripts the extension registers at run time (blockers register most of their page scripts this way)
+      registerContentScripts: api(null, scripts => call('scripting.registerContentScripts', [scripts || []])),
+      unregisterContentScripts: api(null, filter => call('scripting.unregisterContentScripts', [filter || null])),
+      getRegisteredContentScripts: api(null, filter => call('scripting.getRegisteredContentScripts', [filter || null])),
+      updateContentScripts: api(null, scripts => call('scripting.updateContentScripts', [scripts || []])),
+      ExecutionWorld: { ISOLATED: 'ISOLATED', MAIN: 'MAIN' }, StyleOrigin: { AUTHOR: 'AUTHOR', USER: 'USER' }
     };
+    // ── userScripts (user-script managers, custom filters): only for extensions that ask for the permission ──
+    if ((E.manifest.permissions || []).includes('userScripts')) {
+      chrome.userScripts = {
+        register: api(null, s => call('userScripts.register', [s || []])),
+        update: api(null, s => call('userScripts.update', [s || []])),
+        unregister: api(null, f => call('userScripts.unregister', [f || null])),
+        getScripts: api(null, f => call('userScripts.getScripts', [f || null])),
+        configureWorld: nop(undefined), resetWorldConfiguration: nop(undefined), getWorldConfigurations: nop([]),
+        ExecutionWorld: { MAIN: 'MAIN', USER_SCRIPT: 'USER_SCRIPT' }
+      };
+    }
     const action = {
       setBadgeText: nop(undefined), getBadgeText: nop(''), setBadgeBackgroundColor: nop(undefined), setBadgeTextColor: nop(undefined),
       setIcon: nop(undefined), setTitle: nop(undefined), getTitle: nop(E.manifest.name || ''), setPopup: nop(undefined),
@@ -248,12 +264,53 @@
     chrome.action = action; chrome.browserAction = action;
     // toolbar click on an extension without a popup: Chrome fires action.onClicked in the background
     G.__flintActionClicked = tab => { if (!action.onClicked.hasListeners()) return false; action.onClicked._fire(tab); return true; };
-    chrome.contextMenus = { create: (p, cb) => { cb && setTimeout(cb); return (p && p.id) || 1; }, update: nop(undefined), remove: nop(undefined), removeAll: nop(undefined), onClicked: ev() };
+    // ── context menus: items in the page's right-click menu; clicks come back through onClicked / onclick ──
+    const menuClicks = new Map(), menusOnClicked = ev();
+    let menuSeq = 0;
+    const menuProps = p => { const o = {}; for (const k in p || {}) if (k !== 'onclick' && typeof p[k] !== 'function') o[k] = p[k]; return o; };
+    const menuCall = (op, args, cb) => { const p = call(op, args); p.then(() => cb && cb(), e => { lastError = { message: String(e && e.message || e) }; try { cb && cb(); } finally { lastError = undefined; } }); return p; };
+    chrome.contextMenus = {
+      create: (p, cb) => {
+        p = p || {};
+        const id = p.id !== undefined ? p.id : ++menuSeq;
+        if (typeof p.onclick === 'function') menuClicks.set(id, p.onclick);
+        menuCall('contextMenus.create', [{ ...menuProps(p), id }], cb).catch(() => {});
+        return id;
+      },
+      update: (id, p, cb) => { if (p && typeof p.onclick === 'function') menuClicks.set(id, p.onclick); return menuCall('contextMenus.update', [id, menuProps(p)], cb); },
+      remove: (id, cb) => { menuClicks.delete(id); return menuCall('contextMenus.remove', [id], cb); },
+      removeAll: cb => { menuClicks.clear(); return menuCall('contextMenus.removeAll', [], cb); },
+      onClicked: menusOnClicked, onShown: ev(), onHidden: ev(), refresh: () => {},
+      ACTION_MENU_TOP_LEVEL_LIMIT: 6,
+      ContextType: { ALL: 'all', PAGE: 'page', FRAME: 'frame', SELECTION: 'selection', LINK: 'link', EDITABLE: 'editable', IMAGE: 'image', VIDEO: 'video', AUDIO: 'audio', LAUNCHER: 'launcher', BROWSER_ACTION: 'browser_action', PAGE_ACTION: 'page_action', ACTION: 'action' },
+      ItemType: { NORMAL: 'normal', CHECKBOX: 'checkbox', RADIO: 'radio', SEPARATOR: 'separator' }
+    };
     chrome.menus = chrome.contextMenus;
+    G.__flintMenuClicked = (info, tab) => { menusOnClicked._fire(info, tab); const f = menuClicks.get(info.menuItemId); if (f) { try { f(info, tab); } catch (e) { console.error(e); } } return true; };
     chrome.notifications = { create: nop('n'), clear: nop(true), getAll: nop({}), onClicked: ev(), onClosed: ev(), onButtonClicked: ev() };
     chrome.webNavigation = { onCommitted: ev(), onCompleted: ev(), onBeforeNavigate: ev(), onDOMContentLoaded: ev(), onHistoryStateUpdated: ev(), getFrame: nop(null), getAllFrames: nop([]) };
     chrome.webRequest = { onBeforeRequest: ev(), onBeforeSendHeaders: ev(), onHeadersReceived: ev(), onCompleted: ev(), onErrorOccurred: ev(), onAuthRequired: ev(), onBeforeRedirect: ev(), onResponseStarted: ev(), onSendHeaders: ev() };
-    chrome.declarativeNetRequest = { updateDynamicRules: nop(undefined), getDynamicRules: nop([]), updateSessionRules: nop(undefined), getSessionRules: nop([]), updateEnabledRulesets: nop(undefined), getEnabledRulesets: nop([]), MAX_NUMBER_OF_DYNAMIC_RULES: 30000 };
+    // ── declarativeNetRequest: rules run by WebKit's content blocker (see Flint's FDNR) ────────────────
+    const dnr = op => api(null, (o) => call('dnr.' + op, [o === undefined ? null : o]));
+    chrome.declarativeNetRequest = {
+      updateDynamicRules: dnr('updateDynamicRules'), getDynamicRules: dnr('getDynamicRules'),
+      updateSessionRules: dnr('updateSessionRules'), getSessionRules: dnr('getSessionRules'),
+      updateEnabledRulesets: dnr('updateEnabledRulesets'), getEnabledRulesets: dnr('getEnabledRulesets'),
+      updateStaticRules: dnr('updateStaticRules'), getDisabledRuleIds: dnr('getDisabledRuleIds'),
+      getAvailableStaticRuleCount: dnr('getAvailableStaticRuleCount'), isRegexSupported: dnr('isRegexSupported'),
+      getMatchedRules: dnr('getMatchedRules'), setExtensionActionOptions: dnr('setExtensionActionOptions'), testMatchOutcome: dnr('testMatchOutcome'),
+      onRuleMatchedDebug: ev(),
+      MAX_NUMBER_OF_DYNAMIC_RULES: 30000, MAX_NUMBER_OF_UNSAFE_DYNAMIC_RULES: 5000, MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES: 30000,
+      MAX_NUMBER_OF_SESSION_RULES: 5000, MAX_NUMBER_OF_UNSAFE_SESSION_RULES: 5000, MAX_NUMBER_OF_REGEX_RULES: 1000,
+      MAX_NUMBER_OF_STATIC_RULESETS: 100, MAX_NUMBER_OF_ENABLED_STATIC_RULESETS: 50, GUARANTEED_MINIMUM_STATIC_RULES: 30000,
+      GETMATCHEDRULES_QUOTA_INTERVAL: 10, MAX_GETMATCHEDRULES_CALLS_PER_INTERVAL: 20,
+      DYNAMIC_RULESET_ID: '_dynamic', SESSION_RULESET_ID: '_session',
+      RuleActionType: { BLOCK: 'block', REDIRECT: 'redirect', ALLOW: 'allow', UPGRADE_SCHEME: 'upgradeScheme', MODIFY_HEADERS: 'modifyHeaders', ALLOW_ALL_REQUESTS: 'allowAllRequests' },
+      ResourceType: { MAIN_FRAME: 'main_frame', SUB_FRAME: 'sub_frame', STYLESHEET: 'stylesheet', SCRIPT: 'script', IMAGE: 'image', FONT: 'font', OBJECT: 'object', XMLHTTPREQUEST: 'xmlhttprequest', PING: 'ping', CSP_REPORT: 'csp_report', MEDIA: 'media', WEBSOCKET: 'websocket', WEBTRANSPORT: 'webtransport', WEBBUNDLE: 'webbundle', OTHER: 'other' },
+      DomainType: { FIRST_PARTY: 'firstParty', THIRD_PARTY: 'thirdParty' },
+      RequestMethod: { CONNECT: 'connect', DELETE: 'delete', GET: 'get', HEAD: 'head', OPTIONS: 'options', PATCH: 'patch', POST: 'post', PUT: 'put', OTHER: 'other' },
+      HeaderOperation: { APPEND: 'append', SET: 'set', REMOVE: 'remove' }
+    };
     chrome.privacy = { services: { passwordSavingEnabled: { set: nop(undefined), get: nop({ value: false, levelOfControl: 'controllable_by_this_extension' }), clear: nop(undefined) }, autofillAddressEnabled: { set: nop(undefined), get: nop({ value: false }) }, autofillCreditCardEnabled: { set: nop(undefined), get: nop({ value: false }) } } };
     chrome.idle = { queryState: nop('active'), setDetectionInterval: () => {}, onStateChanged: ev() };
     chrome.commands = { getAll: nop([]), onCommand: ev() };

@@ -87,7 +87,8 @@ const ICON = {
   bookmark: '<path d="M6 3h12v18l-6-4-6 4z"/>',
   command: '<path d="M9 6a3 3 0 10-3 3h12a3 3 0 10-3-3v12a3 3 0 103-3H6a3 3 0 103 3z"/>',
   wrench: '<path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/>',
-  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>'
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>',
+  person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/>'
 };
 let S = [], cur = (location.hash || '#general').slice(1), q = '';
 const svg = k => `<svg viewBox="0 0 24 24">${ICON[k] || ''}</svg>`;
@@ -100,7 +101,7 @@ function control(r) {
   }
   if (r.type === 'select') return `<select data-set="${esc(r.id)}">${r.options.map((o, i) => `<option value="${i}" ${i === r.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
   if (r.type === 'swatches') return `<div class="sws">${r.options.map((o, i) => `<button title="${esc(o.label)}" data-swatch="${esc(r.id)}" data-i="${i}" class="${i === r.value ? 'on' : ''}" style="background:${esc(o.color)}"></button>`).join('')}</div>`;
-  if (r.type === 'button') return `<button class="btn ${r.confirm && r.confirm.danger ? 'danger' : ''}" data-act="${esc(r.id)}">${esc(r.label)}</button>`;
+  if (r.type === 'button') return `<div class="ctl">${(r.more || []).map(m => `<button class="btn" data-act="${esc(m.id)}">${esc(m.label)}</button>`).join('')}<button class="btn ${r.confirm && r.confirm.danger ? 'danger' : ''}" data-act="${esc(r.id)}">${esc(r.label)}</button></div>`;
   if (r.type === 'value') return `<span class="val">${esc(r.value)}</span>`;
   return '';
 }

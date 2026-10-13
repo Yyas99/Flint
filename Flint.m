@@ -75,6 +75,8 @@ static NSString *const kBgThrottle    = @"backgroundThrottle";   // 0 standard, 
 static NSString *const kSingleProcess = @"singleWebProcess";
 static NSString *const kRestorePaused = @"restoredVideoPaused";
 static NSString *const kResumeMedia = @"resumeVideoPosition";
+static NSString *const kProfiles = @"profiles";              // [{id, name}]: profiles besides the first one
+static NSString *const kMainProfileName = @"mainProfileName"; // what the first profile is called (default "Personal")
 static NSString *const kLazyRestore   = @"loadOpenTabOnClick";
 static NSString *const kUserAgent     = @"userAgent";         // 0 Safari, 1 Chrome, 2 Firefox
 static NSString *const kConfirmQuit   = @"confirmQuit";
@@ -369,7 +371,9 @@ static NSURL *StripTracking(NSURL *u) {
 @end
 
 @interface VHistory : NSObject
-+ (instancetype)shared;
++ (instancetype)shared;                              // the history of the profile you're using
++ (instancetype)forProfile:(NSString *)profile;
++ (void)flushAll;
 - (void)visit:(NSURL *)u title:(NSString *)t;
 - (NSArray<NSDictionary *> *)match:(NSString *)q limit:(NSUInteger)n;
 - (NSArray<NSDictionary *> *)topSites:(NSUInteger)n;
@@ -404,7 +408,8 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)updateLists:(BOOL)force done:(void (^)(void))done;
 @end
 
-@interface VButton : NSButton
+@interface VButton : NSButton <NSDraggingSource>
+@property BOOL dragsPage;   // the site button: drag it to put the page on the bookmarks bar (or anywhere that takes links)
 @property (copy) NSString *symbolName;
 @property CGFloat symbolSize;
 @property (nonatomic) BOOL active, hovered;
@@ -414,6 +419,10 @@ static NSURL *StripTracking(NSURL *u) {
 @interface VWindow : NSWindowController <NSWindowDelegate, NSTextFieldDelegate, NSMenuDelegate>
 @property (readonly) BOOL isPrivate;
 @property (strong, readonly) WKWebsiteDataStore *privateStore;   // private windows: this window's own, in memory only
+@property (copy, readonly) NSString *profile;     // "" = the first profile; otherwise a profile id (its own cookies, sign-ins, history and tabs)
+- (WKWebViewConfiguration *)pageConfig;           // the engine set-up for this window's pages (private, profile or main)
+- (void)profileMenu:(id)s;
+- (void)newProfile:(id)s;
 - (instancetype)initPrivate:(BOOL)priv state:(NSDictionary *)state;
 - (NSDictionary *)sessionDict;
 - (void)scheduleSave;
@@ -520,6 +529,31 @@ static NSURL *StripTracking(NSURL *u) {
 @end
 
 static VWindow *gWin;                       // the browser window you're using (the last one that was key)
+
+// Profiles: every profile has its own website data (cookies, sign-ins, site storage), history and open tabs.
+// The first profile is the one Flint always had (WebKit's default data); others get their own data store.
+static NSArray<NSDictionary *> *Profiles(void) {
+    NSMutableArray *a = [NSMutableArray arrayWithObject:@{@"id": @"", @"name": [Defaults() stringForKey:kMainProfileName] ?: @"Personal"}];
+    for (NSDictionary *p in [Defaults() arrayForKey:kProfiles] ?: @[]) if ([p isKindOfClass:NSDictionary.class] && [p[@"id"] length]) [a addObject:p];
+    return a;
+}
+static NSString *ProfileName(NSString *pid) {
+    for (NSDictionary *p in Profiles()) if ([p[@"id"] isEqualToString:pid ?: @""]) return p[@"name"];
+    return @"Personal";
+}
+static NSMutableDictionary<NSString *, WKWebsiteDataStore *> *gProfileStores;
+static NSMutableDictionary<NSString *, NSArray<WKContentRuleList *> *> *gExtRuleLists;   // extension id → its compiled blocking rules
+static WKWebsiteDataStore *ProfileStore(NSString *pid) {
+    if (!pid.length) return WKWebsiteDataStore.defaultDataStore;
+    if (!gProfileStores) gProfileStores = [NSMutableDictionary dictionary];
+    NSMutableDictionary *stores = gProfileStores;
+    if (stores[pid]) return stores[pid];
+    WKWebsiteDataStore *s = nil;
+    if (@available(macOS 14.0, *)) { NSUUID *u = [[NSUUID alloc] initWithUUIDString:pid]; if (u) s = [WKWebsiteDataStore dataStoreForIdentifier:u]; }
+    if (!s) s = WKWebsiteDataStore.defaultDataStore;   // before macOS 14 WebKit has no separate stores: profiles share website data
+    stores[pid] = s;
+    return s;
+}
 @class VWindow;
 static BOOL gQuitting;   // set once Flint has decided to quit: windows closing now must not overwrite the saved tabs
 static void SettingsOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *));   // at launch, restored tabs wait until the extensions are up (then load)
@@ -557,6 +591,7 @@ static VWindow *WinOfWeb(WKWebView *v) { for (VTab *t in AllTabs(YES)) if (t.web
 - (void)installFromWebStore:(NSString *)input done:(void (^)(NSString *name, NSString *error))done;
 - (BOOL)openOptionsForID:(NSString *)ident;
 - (BOOL)hasOptionsForID:(NSString *)ident;
+- (void)addMenuItemsTo:(NSMenu *)menu context:(NSDictionary *)ctx pageURL:(NSString *)page view:(WKWebView *)v;   // chrome.contextMenus items
 @end
 
 @interface VApp : NSObject <NSApplicationDelegate, NSMenuDelegate>
@@ -575,21 +610,27 @@ static VApp *gApp;
 
 // Kept as a small JSON file: one entry per URL with title, visit count and last visit.
 @interface VHistory ()
+@property (copy) NSString *file;
 @property (strong) NSMutableDictionary<NSString *, NSMutableDictionary *> *byURL;
 @property BOOL dirty;
 @end
 
 @implementation VHistory
 
-+ (instancetype)shared {
-    static VHistory *h; static dispatch_once_t once;
-    dispatch_once(&once, ^{ h = [VHistory new]; [h load]; });
+static NSMutableDictionary<NSString *, VHistory *> *gHistories;
++ (instancetype)forProfile:(NSString *)profile {
+    NSString *pid = profile ?: @"";
+    if (!gHistories) gHistories = [NSMutableDictionary dictionary];
+    VHistory *h = gHistories[pid];
+    if (!h) { h = [VHistory new]; h.file = pid.length ? [NSString stringWithFormat:@"history-%@.json", pid] : @"history.json"; [h load]; gHistories[pid] = h; }
     return h;
 }
++ (instancetype)shared { return [self forProfile:gWin && !gWin.isPrivate ? gWin.profile : @""]; }
++ (void)flushAll { for (VHistory *h in gHistories.allValues) [h flush]; }
 
 - (void)load {
     self.byURL = [NSMutableDictionary dictionary];
-    NSData *d = [NSData dataWithContentsOfFile:SupportFile(@"history.json")];
+    NSData *d = [NSData dataWithContentsOfFile:SupportFile(self.file)];
     NSArray *a = d ? [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingMutableContainers error:nil] : nil;
     if ([a isKindOfClass:NSArray.class]) for (NSMutableDictionary *e in a) if ([e isKindOfClass:NSDictionary.class] && e[@"u"]) self.byURL[e[@"u"]] = e;
     [NSTimer scheduledTimerWithTimeInterval:20 repeats:YES block:^(NSTimer *t) { [self flush]; }];
@@ -603,7 +644,7 @@ static VApp *gApp;
     }];
     if (all.count > 6000) all = [all subarrayWithRange:NSMakeRange(0, 6000)];
     NSData *d = [NSJSONSerialization dataWithJSONObject:all options:0 error:nil];
-    [d writeToFile:SupportFile(@"history.json") atomically:YES];
+    [d writeToFile:SupportFile(self.file) atomically:YES];
 }
 
 - (void)visit:(NSURL *)u title:(NSString *)t {
@@ -1123,6 +1164,18 @@ static BOOL MenuItemEnabled(NSMenuItem *i) {
 }
 static BOOL MenuItemIsHeader(NSMenuItem *i) { return !i.separatorItem && !i.action && !i.submenu && i.title.length; }
 
+// A menu can let its items be dragged, take drops, and offer a right-click menu per item (the bookmarks
+// bar's folders do): the NSMenu carries a VMenuDropTarget that knows what the items stand for.
+@protocol VMenuDropTarget <NSObject>
+- (NSDragOperation)menu:(NSMenu *)m validateDrop:(id<NSDraggingInfo>)info before:(NSMenuItem *)item into:(NSMenuItem *)folder;
+- (BOOL)menu:(NSMenu *)m acceptDrop:(id<NSDraggingInfo>)info before:(NSMenuItem *)item into:(NSMenuItem *)folder;
+- (NSMenu *)menu:(NSMenu *)m contextMenuFor:(NSMenuItem *)item;
+- (BOOL)menu:(NSMenu *)m beginDragFor:(NSMenuItem *)item event:(NSEvent *)e view:(NSView<NSDraggingSource> *)v;
+- (BOOL)itemIsDraggable:(NSMenuItem *)item;
+@end
+static char kMenuDropKey;
+static id<VMenuDropTarget> MenuDropTarget(NSMenu *m) { return m ? objc_getAssociatedObject(m, &kMenuDropKey) : nil; }
+
 @class VMenuPanel;
 static NSMutableArray<VMenuPanel *> *gMenus;   // open menus, outermost first
 static id gMenuLocal, gMenuGlobal, gMenuResign;
@@ -1130,7 +1183,10 @@ static void CloseMenus(void);
 static void CloseMenusFrom(VMenuPanel *c);
 static void OpenMenuPanel(NSMenu *m, NSPoint topLeft, NSWindow *owner, VMenuPanel *parent, CGFloat flipX);
 
-@interface VMenuView : NSView
+@interface VMenuView : NSView <NSDraggingSource>
+@property NSInteger pressRow, dropRow;   // dropRow: insertion line before this row (rows.count = at the end)
+@property NSInteger dropInto;            // a folder row the drop goes into
+@property NSPoint pressAt;
 @property (strong) NSMenu *source;
 @property (strong) NSArray<NSMenuItem *> *items;
 @property (strong) NSArray<NSValue *> *rects;
@@ -1231,6 +1287,13 @@ static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
         CGFloat th = 17;
         [i.title drawInRect:NSMakeRect(tx, NSMinY(r) + round((NSHeight(r) - th) / 2), right - tx, th) withAttributes:ta];
     }
+    // while something is dragged over the menu: where it lands
+    if (self.dropInto >= 0 && self.dropInto < (NSInteger)self.rects.count) ShardStroke(self.rects[(NSUInteger)self.dropInto].rectValue, 7, vAccent, 1.5);
+    else if (self.dropRow >= 0 && self.rects.count) {
+        NSRect r = self.dropRow < (NSInteger)self.rects.count ? self.rects[(NSUInteger)self.dropRow].rectValue : self.rects.lastObject.rectValue;
+        CGFloat y = self.dropRow < (NSInteger)self.rects.count ? NSMinY(r) : NSMaxY(r);
+        RoundRect(NSMakeRect(NSMinX(r) + 6, y - 1, NSWidth(r) - 12, 2), 1, vAccent);
+    }
 }
 
 - (void)updateTrackingAreas {
@@ -1264,7 +1327,61 @@ static const CGFloat kMenuPad = 6, kMenuRow = 28, kMenuSep = 9, kMenuHead = 24;
 - (void)mouseMoved:(NSEvent *)e { [self setHot:[self rowAt:[self convertPoint:e.locationInWindow fromView:nil]] openSub:NO]; }
 - (void)mouseEntered:(NSEvent *)e { [self mouseMoved:e]; }
 - (void)mouseExited:(NSEvent *)e { if (!self.panel.child) { self.hover = -1; self.needsDisplay = YES; } }
-- (void)mouseDown:(NSEvent *)e {}
+- (void)mouseDown:(NSEvent *)e { self.pressAt = [self convertPoint:e.locationInWindow fromView:nil]; self.pressRow = [self rowAt:self.pressAt]; }
+- (void)mouseDragged:(NSEvent *)e {
+    id<VMenuDropTarget> t = MenuDropTarget(self.source);
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    if (!t || ![self selectable:self.pressRow] || hypot(p.x - self.pressAt.x, p.y - self.pressAt.y) < 4) return;
+    NSMenuItem *it = self.items[(NSUInteger)self.pressRow];
+    if (![t itemIsDraggable:it]) return;
+    self.pressRow = -1;
+    [self.subTimer invalidate];
+    [t menu:self.source beginDragFor:it event:e view:self];
+}
+- (void)rightMouseDown:(NSEvent *)e {
+    id<VMenuDropTarget> t = MenuDropTarget(self.source);
+    NSInteger k = [self rowAt:[self convertPoint:e.locationInWindow fromView:nil]];
+    NSMenu *ctx = t && [self selectable:k] ? [t menu:self.source contextMenuFor:self.items[(NSUInteger)k]] : nil;
+    if (!ctx) return;
+    NSWindow *owner = self.panel.owner; NSPoint s = NSEvent.mouseLocation;
+    CloseMenus();
+    OpenMenuPanel(ctx, s, owner, nil, 0);
+}
+- (NSDragOperation)draggingSession:(NSDraggingSession *)s sourceOperationMaskForDraggingContext:(NSDraggingContext)c {
+    return c == NSDraggingContextWithinApplication ? NSDragOperationMove | NSDragOperationCopy : NSDragOperationCopy;
+}
+- (void)draggingSession:(NSDraggingSession *)s endedAtPoint:(NSPoint)p operation:(NSDragOperation)op {
+    if (op != NSDragOperationNone) CloseMenus();   // moved somewhere else: the open menus are out of date
+}
+// Drops: before/after the nearest item, or into a folder (the middle of its row; its submenu opens to go deeper).
+- (void)dropTargetAt:(NSPoint)p {
+    self.dropRow = -1; self.dropInto = -1;
+    NSInteger k = [self rowAt:p];
+    if (k < 0) { self.dropRow = p.y < kMenuPad + 2 ? 0 : (NSInteger)self.rects.count; return; }
+    NSMenuItem *it = self.items[(NSUInteger)k]; NSRect r = self.rects[(NSUInteger)k].rectValue;
+    if (it.submenu && fabs(p.y - NSMidY(r)) < NSHeight(r) * 0.25) { self.dropInto = k; [self setHot:k openSub:NO]; return; }
+    self.dropRow = p.y < NSMidY(r) ? k : k + 1;
+}
+- (NSMenuItem *)itemAtRow:(NSInteger)k { return k >= 0 && k < (NSInteger)self.items.count ? self.items[(NSUInteger)k] : nil; }
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)info {
+    id<VMenuDropTarget> t = MenuDropTarget(self.source); if (!t) return NSDragOperationNone;
+    [self dropTargetAt:[self convertPoint:info.draggingLocation fromView:nil]];
+    NSDragOperation op = [t menu:self.source validateDrop:info before:[self itemAtRow:self.dropRow] into:[self itemAtRow:self.dropInto]];
+    if (op == NSDragOperationNone) { self.dropRow = self.dropInto = -1; }
+    self.needsDisplay = YES;
+    return op;
+}
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)info { return [self draggingUpdated:info]; }
+- (void)draggingExited:(id<NSDraggingInfo>)info { self.dropRow = self.dropInto = -1; self.needsDisplay = YES; }
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)info {
+    id<VMenuDropTarget> t = MenuDropTarget(self.source);
+    NSMenuItem *before = [self itemAtRow:self.dropRow], *into = [self itemAtRow:self.dropInto];
+    BOOL any = self.dropRow >= 0 || self.dropInto >= 0;
+    self.dropRow = self.dropInto = -1; self.needsDisplay = YES;
+    BOOL ok = t && any && [t menu:self.source acceptDrop:info before:before into:into];
+    if (ok) dispatch_async(dispatch_get_main_queue(), ^{ CloseMenus(); });
+    return ok;
+}
 - (void)mouseUp:(NSEvent *)e {
     NSInteger k = [self rowAt:[self convertPoint:e.locationInWindow fromView:nil]];
     if (![self selectable:k]) return;
@@ -1357,7 +1474,8 @@ static void OpenMenuPanel(NSMenu *m, NSPoint topLeft, NSWindow *owner, VMenuPane
     if ([m.delegate respondsToSelector:@selector(menuWillOpen:)]) [m.delegate menuWillOpen:m];
     if (!gMenus) gMenus = [NSMutableArray array];
     VMenuView *list = [[VMenuView alloc] initWithFrame:NSZeroRect];
-    list.source = m; list.hover = -1;
+    list.source = m; list.hover = -1; list.pressRow = list.dropRow = list.dropInto = -1;
+    if (MenuDropTarget(m)) [list registerForDraggedTypes:@[@"com.flint.bookmark-index", NSPasteboardTypeURL, @"WebURLsWithTitlesPboardType", NSPasteboardTypeString]];
     CGFloat w = [list buildRows], h = NSHeight(list.frame);
     if (!list.items.count) return;
     NSScreen *scr = owner.screen ?: NSScreen.mainScreen;
@@ -1417,9 +1535,60 @@ static void PopMenuForEvent(NSMenu *m, NSEvent *e, NSView *v) {
     if (!m || !v.window) return;
     PopMenu(m, [v convertPoint:e.locationInWindow fromView:nil], v);
 }
+#pragma mark - Dragging pages and bookmarks
+
+static NSString *const kBookmarkDragType = @"com.flint.bookmark-index";   // a bookmark being moved on the bar
+
+// What a dragged page looks like under the pointer: its icon and title in a small pill.
+static NSImage *DragChip(NSString *title, NSImage *icon) {
+    NSDictionary *a = @{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium), NSForegroundColorAttributeName: vText};
+    if (title.length > 40) title = [[title substringToIndex:39] stringByAppendingString:@"…"];
+    CGFloat w = ceil([title sizeWithAttributes:a].width) + 40, h = 28;
+    return [NSImage imageWithSize:NSMakeSize(w, h) flipped:YES drawingHandler:^BOOL(NSRect r) {
+        RoundRect(r, 8, [vPill colorWithAlphaComponent:0.96]);
+        NSImage *im = icon ?: Tinted(Symbol(@"globe", 13, NSFontWeightRegular), vDim);
+        DrawImage(im, NSMakeRect(8, 6, 16, 16));
+        [title drawAtPoint:NSMakePoint(30, 6) withAttributes:a];
+        return YES;
+    }];
+}
+// Start dragging a page's address: the bookmarks bar, other apps, the Finder (a .webloc) and text fields all take it.
+static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url, NSString *title, NSImage *icon, NSString *bookmarkIndex) {
+    NSPasteboardItem *it = [NSPasteboardItem new];
+    if (url.length) { [it setString:url forType:NSPasteboardTypeURL]; [it setString:url forType:NSPasteboardTypeString]; }
+    if (title.length) [it setString:title forType:@"public.url-name"];
+    if (bookmarkIndex) [it setString:bookmarkIndex forType:kBookmarkDragType];
+    NSDraggingItem *di = [[NSDraggingItem alloc] initWithPasteboardWriter:it];
+    NSImage *img = DragChip(title.length ? title : url, icon);
+    NSPoint p = [v convertPoint:e.locationInWindow fromView:nil];
+    [di setDraggingFrame:NSMakeRect(p.x - 14, p.y - img.size.height / 2, img.size.width, img.size.height) contents:img];
+    [v beginDraggingSessionWithItems:@[di] event:e source:v];
+}
+
 #pragma mark - Buttons
 
 @implementation VButton
+- (NSDragOperation)draggingSession:(NSDraggingSession *)s sourceOperationMaskForDraggingContext:(NSDraggingContext)c { return NSDragOperationCopy | NSDragOperationLink; }
+// The site button: a click opens site information; a drag carries the page.
+- (void)mouseDown:(NSEvent *)e {
+    VTab *t = self.dragsPage ? WinFor(self).current : nil;
+    if (!t || t.isHome || !t.url.length || [t.url hasPrefix:@"flint:"]) { [super mouseDown:e]; return; }
+    self.highlighted = YES;
+    NSPoint start = e.locationInWindow;
+    while (YES) {
+        NSEvent *n = [self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp];
+        if (n.type == NSEventTypeLeftMouseUp) {
+            self.highlighted = NO;
+            if (NSPointInRect([self convertPoint:n.locationInWindow fromView:nil], self.bounds)) [self sendAction:self.action to:self.target];
+            return;
+        }
+        if (hypot(n.locationInWindow.x - start.x, n.locationInWindow.y - start.y) > 4) {
+            self.highlighted = NO;
+            BeginURLDrag(self, e, t.url, t.title, t.favicon, nil);
+            return;
+        }
+    }
+}
 
 + (instancetype)symbol:(NSString *)s size:(CGFloat)pt tip:(NSString *)tip target:(id)t action:(SEL)a {
     VButton *b = [[VButton alloc] initWithFrame:NSMakeRect(0, 0, 30, 28)];
@@ -1532,6 +1701,14 @@ static NSString *gUpdateNotes;
 }
 @end
 
+// The profile badge's click target (the toolbar draws the badge itself).
+@interface VBadgeButton : NSButton
+@end
+@implementation VBadgeButton
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (void)drawRect:(NSRect)r {}
+@end
+
 @interface VToolbar : NSView
 @property (strong) VButton *sideBtn, *backBtn, *fwdBtn, *reloadBtn, *infoBtn, *starBtn, *shieldBtn, *menuBtn, *dlBtn;
 @property (strong) VButton *homeBtn, *addTabBtn, *readerBtn, *shareBtn, *extMenuBtn, *pipBtn;
@@ -1546,6 +1723,7 @@ static NSString *gUpdateNotes;
 @property CGFloat leftInset;
 @property (strong) NSMutableArray<NSButton *> *extBtns;
 @property NSRect privateBadge;
+@property (strong) VBadgeButton *profileBtn;
 - (void)layoutBar;
 - (NSView *)extensionButtonFor:(NSString *)ident;
 @end
@@ -1569,7 +1747,8 @@ static NSString *gUpdateNotes;
     self.backBtn = [VButton symbol:@"chevron.left" size:14 tip:@"Back (⌘[)" target:w action:@selector(goBack:)];
     self.fwdBtn = [VButton symbol:@"chevron.right" size:14 tip:@"Forward (⌘])" target:w action:@selector(goForward:)];
     self.reloadBtn = [VButton symbol:@"arrow.clockwise" size:13 tip:@"Reload (⌘R)" target:w action:@selector(reloadOrStop:)];
-    self.infoBtn = [VButton symbol:@"lock.fill" size:11 tip:@"Site information" target:w action:@selector(siteMenu:)];
+    self.infoBtn = [VButton symbol:@"lock.fill" size:11 tip:@"Site information · drag to bookmark the page" target:w action:@selector(siteMenu:)];
+    self.infoBtn.dragsPage = YES;
     self.starBtn = [VButton symbol:@"star" size:13 tip:@"Bookmark this page (⌘D)" target:w action:@selector(toggleBookmark:)];
     self.shieldBtn = [VButton symbol:@"checkmark.shield" size:14 tip:@"Ads and trackers" target:w action:@selector(shieldMenu:)];
     self.menuBtn = [VButton symbol:@"ellipsis" size:14 tip:@"Menu" target:w action:@selector(mainMenu:)];
@@ -1589,6 +1768,9 @@ static NSString *gUpdateNotes;
     self.updateBtn = [[VPillButton alloc] initWithFrame:NSZeroRect];
     self.updateBtn.bordered = NO; self.updateBtn.title = @""; self.updateBtn.target = nil; self.updateBtn.action = @selector(installUpdate:);
     self.updateBtn.hidden = YES; [self addSubview:self.updateBtn];
+    self.profileBtn = [[VBadgeButton alloc] initWithFrame:NSZeroRect];
+    self.profileBtn.bordered = NO; self.profileBtn.title = @""; self.profileBtn.target = nil; self.profileBtn.action = @selector(profileMenu:);
+    self.profileBtn.toolTip = @"Profiles"; self.profileBtn.hidden = YES; [self addSubview:self.profileBtn];
     VAddressField *f = [[VAddressField alloc] initWithFrame:NSZeroRect];
     f.bezeled = NO; f.bordered = NO; f.drawsBackground = NO; f.focusRingType = NSFocusRingTypeNone;
     f.font = UIFont(13, NSFontWeightRegular); f.textColor = vText;
@@ -1678,7 +1860,14 @@ static NSString *gUpdateNotes;
     }
     right -= 4;
     x += 6;
-    if (WinFor(self).isPrivate) { self.privateBadge = NSMakeRect(x, y + 3, 72, 22); x += 78; } else self.privateBadge = NSZeroRect;
+    // private windows say so; with more than one profile, every window shows whose it is (click to switch)
+    VWindow *ow = WinFor(self);
+    NSString *badge = ow.isPrivate ? @"Private" : Profiles().count > 1 ? ProfileName(ow.profile) : nil;
+    if (badge) {
+        CGFloat bw = MIN(150, ceil([badge sizeWithAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium)}].width) + 36);
+        self.privateBadge = NSMakeRect(x, y + 3, bw, 22); x += bw + 6;
+    } else self.privateBadge = NSZeroRect;
+    self.profileBtn.frame = self.privateBadge; self.profileBtn.hidden = !badge || ow.isPrivate;
     // the address bar: full width, or a centred medium/compact bar
     CGFloat avail = MAX(120, right - x);
     NSInteger mode = [Defaults() integerForKey:kAddrWidth];
@@ -1779,10 +1968,12 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
     if (self.editing) ShardStroke(self.pill, 8, vLine, 1);
     if (!NSIsEmptyRect(self.privateBadge)) {   // private windows say so, quietly
         RoundRect(self.privateBadge, 8, vPill);
-        NSImage *eye = Tinted(Symbol(@"eye.slash", 10, NSFontWeightMedium), vDim);
+        VWindow *ow = WinFor(self);
+        NSImage *eye = Tinted(Symbol(ow.isPrivate ? @"eye.slash" : @"person.crop.circle", 10, NSFontWeightMedium), vDim);
         DrawImage(eye, CenterIn(eye.size, NSMakeRect(NSMinX(self.privateBadge) + 7, NSMinY(self.privateBadge), 16, NSHeight(self.privateBadge))));
-        [@"Private" drawAtPoint:NSMakePoint(NSMinX(self.privateBadge) + 26, NSMinY(self.privateBadge) + 4)
-                 withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: vDim}];
+        NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail;
+        [(ow.isPrivate ? @"Private" : ProfileName(ow.profile)) drawInRect:NSMakeRect(NSMinX(self.privateBadge) + 26, NSMinY(self.privateBadge) + 4, NSWidth(self.privateBadge) - 32, 16)
+                 withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ps}];
     }
     if (self.blocked > 0) {
         NSString *n = self.blocked > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)self.blocked];
@@ -2024,15 +2215,152 @@ static const CGFloat kSugRow = 36, kSugHead = 24, kSugPad = 6;
 
 #pragma mark - Bookmarks bar
 
-@interface VBookmarksBar : NSView
+@interface VBookmarksBar : NSView <NSDraggingSource>
 @property (strong) NSMutableArray<NSValue *> *rects;
 @property NSInteger hover, firstHidden;
+@property NSInteger pressIndex;          // the bookmark the mouse went down on (a click or the start of a drag)
+@property NSPoint pressAt;
+@property NSInteger dropIndex, dropFolder;   // while something is dragged over the bar: where it would land
 - (void)reload;
 @end
+
+// Every window's bar and star show the change.
+static void BookmarksChanged(void) { [VBookmarks.shared save]; for (VWindow *w in gWindows) { [w.bookmarksBar reload]; [w refreshChrome]; } }
+
+// Bookmark moves: the node being dragged (from the bar or any folder menu), and tree edits that work at any depth.
+static NSMutableDictionary *gDragBookmark;
+static char kBMNodeKey;
+static NSMutableArray *BMChildren(NSMutableDictionary *folder) {   // a folder's list, made editable if it came in read-only
+    if (![folder isKindOfClass:NSMutableDictionary.class]) return nil;
+    if (![folder[@"children"] isKindOfClass:NSMutableArray.class]) folder[@"children"] = [folder[@"children"] ?: @[] mutableCopy];
+    return folder[@"children"];
+}
+static BOOL BMRemove(NSMutableArray *list, id n) {
+    NSUInteger i = [list indexOfObjectIdenticalTo:n];
+    if (i != NSNotFound) { [list removeObjectAtIndex:i]; return YES; }
+    for (NSMutableDictionary *x in list) if ([x isKindOfClass:NSDictionary.class] && x[@"children"] && BMRemove(BMChildren(x), n)) return YES;
+    return NO;
+}
+static BOOL BMContains(NSDictionary *folder, id n) {   // n is folder or somewhere inside it
+    if (folder == n) return YES;
+    for (NSDictionary *x in [folder[@"children"] isKindOfClass:NSArray.class] ? folder[@"children"] : @[]) if (BMContains(x, n)) return YES;
+    return NO;
+}
+// Put `node` (already a bookmark: moved; new: added) into `list` at `index` (NSNotFound = the end).
+static BOOL BMPlace(NSMutableDictionary *node, NSMutableArray *list, NSUInteger index) {
+    if (!node || !list) return NO;
+    NSUInteger old = [list indexOfObjectIdenticalTo:node];
+    BMRemove(VBookmarks.shared.bar, node);
+    if (index == NSNotFound || index > list.count) index = list.count;
+    else if (old != NSNotFound && old < index) index--;
+    [list insertObject:node atIndex:MIN(index, list.count)];
+    return YES;
+}
+static NSArray *DroppedLink(NSPasteboard *pb);
+static NSMutableDictionary *DraggedBookmark(id<NSDraggingInfo> info) {
+    return [info.draggingPasteboard stringForType:kBookmarkDragType] && gDragBookmark ? gDragBookmark : nil;
+}
+
+static NSMenu *BookmarkMenu(NSMutableArray *list, NSUInteger from);
+
+// What makes a folder's menu (and the bar's overflow menu) editable: drag items out, reorder, drop pages and
+// bookmarks in, right-click an item.
+@interface VBookmarkMenuTarget : NSObject <VMenuDropTarget>
+@property (strong) NSMutableArray *list;
+@property NSUInteger from;
+@end
+@implementation VBookmarkMenuTarget
+- (NSMutableDictionary *)nodeFor:(NSMenuItem *)i { return i ? objc_getAssociatedObject(i, &kBMNodeKey) : nil; }
+- (BOOL)itemIsDraggable:(NSMenuItem *)i { return [self nodeFor:i] != nil; }
+- (BOOL)menu:(NSMenu *)m beginDragFor:(NSMenuItem *)i event:(NSEvent *)e view:(NSView<NSDraggingSource> *)v {
+    NSMutableDictionary *n = [self nodeFor:i]; if (!n) return NO;
+    gDragBookmark = n;
+    NSImage *icon = n[@"children"] ? Tinted(Symbol(@"folder", 13, NSFontWeightRegular), vDim) : [VFavicons.shared iconForURL:n[@"url"]];
+    BeginURLDrag(v, e, n[@"url"], [n[@"name"] length] ? n[@"name"] : n[@"url"], icon, @"node");
+    return YES;
+}
+- (NSDragOperation)menu:(NSMenu *)m validateDrop:(id<NSDraggingInfo>)info before:(NSMenuItem *)item into:(NSMenuItem *)folder {
+    NSMutableDictionary *moving = DraggedBookmark(info), *target = [self nodeFor:folder];
+    if (!moving && !DroppedLink(info.draggingPasteboard)) return NSDragOperationNone;
+    if (moving && target && BMContains(moving, target)) return NSDragOperationNone;   // a folder into itself
+    if (moving && [self nodeFor:item] == moving) return NSDragOperationNone;
+    return moving ? NSDragOperationMove : NSDragOperationCopy;
+}
+- (BOOL)menu:(NSMenu *)m acceptDrop:(id<NSDraggingInfo>)info before:(NSMenuItem *)item into:(NSMenuItem *)folder {
+    NSMutableDictionary *node = DraggedBookmark(info);
+    if (!node) { NSArray *link = DroppedLink(info.draggingPasteboard); if (!link) return NO; node = [@{@"name": link[1], @"url": link[0]} mutableCopy]; }
+    NSMutableDictionary *target = [self nodeFor:folder];
+    if (target) { if (BMContains(node, target)) return NO; BMPlace(node, BMChildren(target), NSNotFound); }
+    else {
+        NSMutableDictionary *b = [self nodeFor:item];
+        NSUInteger at = b ? [self.list indexOfObjectIdenticalTo:b] : NSNotFound;   // an item past the bookmarks ("Open All"): the end
+        BMPlace(node, self.list, at);
+    }
+    gDragBookmark = nil;
+    BookmarksChanged();
+    return YES;
+}
+- (NSMenu *)menu:(NSMenu *)m contextMenuFor:(NSMenuItem *)i {
+    NSMutableDictionary *n = [self nodeFor:i]; if (!n) return nil;
+    NSMenu *c = [[NSMenu alloc] initWithTitle:@""];
+    VWindow *w = gWin;
+    NSMenuItem *(^add)(NSString *, SEL, id) = ^NSMenuItem *(NSString *t, SEL a, id obj) { NSMenuItem *it = [c addItemWithTitle:t action:a keyEquivalent:@""]; it.target = w; it.representedObject = obj; return it; };
+    if (n[@"url"]) {
+        add(@"Open in New Tab", @selector(openBookmarkInNewTab:), n[@"url"]);
+        add(@"Open in Background Tab", @selector(openBookmarkInBackground:), n[@"url"]);
+        add(@"Copy Link", @selector(copyText:), n[@"url"]);
+        [c addItem:NSMenuItem.separatorItem];
+        add(@"Edit…", @selector(editBookmark:), n);
+    } else {
+        NSMutableArray *urls = [NSMutableArray array]; for (NSDictionary *x in n[@"children"]) if (x[@"url"]) [urls addObject:x[@"url"]];
+        add([NSString stringWithFormat:@"Open All in Tabs (%lu)", (unsigned long)urls.count], @selector(openAllBookmarks:), urls).enabled = urls.count > 0;
+        [c addItem:NSMenuItem.separatorItem];
+        add(@"Rename…", @selector(editBookmark:), n);
+    }
+    add(@"Delete", @selector(deleteBookmark:), n);
+    return c;
+}
+@end
+
+static NSMenu *BookmarkMenu(NSMutableArray *list, NSUInteger from) {
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
+    VBookmarkMenuTarget *t = [VBookmarkMenuTarget new]; t.list = list; t.from = from;
+    objc_setAssociatedObject(m, &kMenuDropKey, t, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSMutableArray *urls = [NSMutableArray array];
+    for (NSUInteger k = from; k < list.count; k++) {
+        NSMutableDictionary *n = list[k];
+        NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:[n[@"name"] length] ? n[@"name"] : (HostOf([NSURL URLWithString:n[@"url"]]) ?: @"") action:nil keyEquivalent:@""];
+        objc_setAssociatedObject(it, &kBMNodeKey, n, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (n[@"children"]) {
+            it.image = Symbol(@"folder", 12, NSFontWeightRegular);
+            it.submenu = BookmarkMenu(BMChildren(n) ?: [NSMutableArray array], 0);
+        } else {
+            NSImage *ic = [VFavicons.shared iconForURL:n[@"url"]];
+            if (ic) { NSImage *s = [ic copy]; s.size = NSMakeSize(16, 16); it.image = s; }
+            it.target = gWin; it.action = @selector(openBookmarkItem:); it.representedObject = n[@"url"];
+            if (n[@"url"]) [urls addObject:n[@"url"]];
+        }
+        [m addItem:it];
+    }
+    if (from >= list.count) [m addItemWithTitle:@"Empty · drop pages here" action:nil keyEquivalent:@""];
+    if (urls.count > 1) {
+        [m addItem:NSMenuItem.separatorItem];
+        NSMenuItem *all = [m addItemWithTitle:[NSString stringWithFormat:@"Open All (%lu)", (unsigned long)urls.count] action:@selector(openAllBookmarks:) keyEquivalent:@""];
+        all.target = gWin; all.representedObject = urls;
+    }
+    return m;
+}
 
 @implementation VBookmarksBar
 - (BOOL)isFlipped { return YES; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
+- (instancetype)initWithFrame:(NSRect)r {
+    if (!(self = [super initWithFrame:r])) return nil;
+    self.pressIndex = -1; self.dropIndex = -1; self.dropFolder = -1;
+    // pages (the site button, a tab from the sidebar, links from pages and other apps) and bookmarks being moved
+    [self registerForDraggedTypes:@[kBookmarkDragType, NSPasteboardTypeURL, @"WebURLsWithTitlesPboardType", NSPasteboardTypeString]];
+    return self;
+}
 - (void)reload { self.needsDisplay = YES; }
 
 - (NSString *)labelFor:(NSDictionary *)n { return n[@"name"] ?: @""; }
@@ -2061,6 +2389,12 @@ static const CGFloat kSugRow = 36, kSugHead = 24, kSugPad = 6;
         if (tw) [label drawAtPoint:NSMakePoint(x + 7 + 16 + 7, 2 + round((26 - 17) / 2)) withAttributes:ta];
         x += w;
     }
+    // where a dragged page or bookmark would land: into a folder, or a thin line between two bookmarks
+    if (self.dropFolder >= 0 && self.dropFolder < (NSInteger)self.rects.count) ShardStroke(self.rects[(NSUInteger)self.dropFolder].rectValue, 7, vAccent, 1.5);
+    else if (self.dropIndex >= 0) {
+        CGFloat lx = self.rects.count == 0 ? 6 : self.dropIndex < (NSInteger)self.rects.count ? NSMinX(self.rects[(NSUInteger)self.dropIndex].rectValue) : NSMaxX(self.rects.lastObject.rectValue);
+        RoundRect(NSMakeRect(lx - 1, 5, 2, 20), 1, vAccent);
+    }
     if (self.firstHidden >= 0) {
         NSRect more = NSMakeRect(NSWidth(self.bounds) - 30, 3, 24, 24);
         if (self.hover == 999) RoundRect(more, 6, vHover);
@@ -2085,45 +2419,105 @@ static const CGFloat kSugRow = 36, kSugHead = 24, kSugPad = 6;
 }
 - (void)mouseExited:(NSEvent *)e { self.hover = -1; self.needsDisplay = YES; }
 
-static NSMenu *BookmarkMenu(NSArray *nodes) {
-    NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
-    NSMutableArray *urls = [NSMutableArray array];
-    for (NSDictionary *n in nodes) {
-        NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:[n[@"name"] length] ? n[@"name"] : (HostOf([NSURL URLWithString:n[@"url"]]) ?: @"") action:nil keyEquivalent:@""];
-        if (n[@"children"]) {
-            it.image = Symbol(@"folder", 12, NSFontWeightRegular);
-            it.submenu = BookmarkMenu(n[@"children"]);
-        } else {
-            NSImage *ic = [VFavicons.shared iconForURL:n[@"url"]];
-            if (ic) { NSImage *s = [ic copy]; s.size = NSMakeSize(16, 16); it.image = s; }
-            it.target = gWin; it.action = @selector(openBookmarkItem:); it.representedObject = n[@"url"];
-            [urls addObject:n[@"url"]];
-        }
-        [m addItem:it];
-    }
-    if (!nodes.count) [m addItemWithTitle:@"(empty)" action:nil keyEquivalent:@""];
-    if (urls.count > 1) {
-        [m addItem:NSMenuItem.separatorItem];
-        NSMenuItem *all = [m addItemWithTitle:[NSString stringWithFormat:@"Open All (%lu)", (unsigned long)urls.count] action:@selector(openAllBookmarks:) keyEquivalent:@""];
-        all.target = gWin; all.representedObject = urls;
-    }
-    return m;
-}
-
 - (void)mouseDown:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     NSInteger i = [self indexAt:p];
-    NSArray *bar = VBookmarks.shared.bar;
+    self.pressIndex = -1;
     if (i == 999) {
-        NSArray *rest = [bar subarrayWithRange:NSMakeRange((NSUInteger)self.firstHidden, bar.count - (NSUInteger)self.firstHidden)];
-        PopMenuRight(BookmarkMenu(rest), NSMakePoint(NSWidth(self.bounds) - 6, 28), self);
+        PopMenuRight(BookmarkMenu(VBookmarks.shared.bar, (NSUInteger)self.firstHidden), NSMakePoint(NSWidth(self.bounds) - 6, 28), self);
         return;
     }
     if (i < 0) { if (e.clickCount == 2) [self.window performZoom:nil]; else [self.window performWindowDragWithEvent:e]; return; }
+    self.pressIndex = i; self.pressAt = p;   // opens on release; moving first starts a drag
+}
+- (void)mouseDragged:(NSEvent *)e {
+    if (self.pressIndex < 0 || self.pressIndex >= (NSInteger)VBookmarks.shared.bar.count) return;
+    NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    if (hypot(p.x - self.pressAt.x, p.y - self.pressAt.y) < 4) return;
+    NSDictionary *n = VBookmarks.shared.bar[(NSUInteger)self.pressIndex];
+    NSInteger i = self.pressIndex; self.pressIndex = -1; self.hover = -1; self.needsDisplay = YES;
+    NSImage *icon = n[@"children"] ? Tinted(Symbol(@"folder", 13, NSFontWeightRegular), vDim) : [VFavicons.shared iconForURL:n[@"url"]];
+    gDragBookmark = (NSMutableDictionary *)n; (void)i;
+    BeginURLDrag(self, e, n[@"url"], [self labelFor:n].length ? [self labelFor:n] : n[@"url"], icon, @"node");
+}
+- (void)mouseUp:(NSEvent *)e {
+    NSInteger i = self.pressIndex; self.pressIndex = -1;
+    NSArray *bar = VBookmarks.shared.bar;
+    if (i < 0 || i >= (NSInteger)bar.count || i >= (NSInteger)self.rects.count) return;
+    if ([self indexAt:[self convertPoint:e.locationInWindow fromView:nil]] != i) return;   // let go somewhere else: nothing
     NSDictionary *n = bar[(NSUInteger)i];
     NSRect r = self.rects[(NSUInteger)i].rectValue;
-    if (n[@"children"]) { PopMenu(BookmarkMenu(n[@"children"]), NSMakePoint(NSMinX(r), NSMaxY(r) + 3), self); return; }
+    if (n[@"children"]) { PopMenu(BookmarkMenu(BMChildren((NSMutableDictionary *)n), 0), NSMakePoint(NSMinX(r), NSMaxY(r) + 3), self); return; }
     [WinFor(self) openURL:[NSURL URLWithString:n[@"url"]] newTab:(e.modifierFlags & NSEventModifierFlagCommand) != 0];
+}
+
+#pragma mark Drag and drop
+
+- (NSDragOperation)draggingSession:(NSDraggingSession *)s sourceOperationMaskForDraggingContext:(NSDraggingContext)c {
+    return c == NSDraggingContextWithinApplication ? NSDragOperationMove | NSDragOperationCopy : NSDragOperationCopy;
+}
+// Where a drop at this point lands: the middle of a folder means into it; otherwise before or after the nearest bookmark.
+- (void)targetFor:(NSPoint)p moving:(NSInteger)from {
+    NSArray *bar = VBookmarks.shared.bar;
+    self.dropFolder = -1; self.dropIndex = (NSInteger)self.rects.count;
+    for (NSUInteger k = 0; k < self.rects.count; k++) {
+        NSRect r = self.rects[k].rectValue;
+        if (p.x > NSMaxX(r)) continue;
+        if (bar[k][@"children"] && (NSInteger)k != from && p.x > NSMinX(r) + NSWidth(r) * 0.25 && p.x < NSMaxX(r) - NSWidth(r) * 0.25) { self.dropFolder = (NSInteger)k; self.dropIndex = -1; return; }
+        self.dropIndex = p.x < NSMidX(r) ? (NSInteger)k : (NSInteger)k + 1;
+        return;
+    }
+}
+- (NSInteger)movingIndex:(id<NSDraggingInfo>)info {   // where the bookmark being moved sits on the bar (-1: in a folder, or not a move)
+    NSMutableDictionary *n = DraggedBookmark(info); if (!n) return -1;
+    NSUInteger i = [VBookmarks.shared.bar indexOfObjectIdenticalTo:n];
+    return i == NSNotFound ? -1 : (NSInteger)i;
+}
+// The address (and a title, when the source gave one) from whatever was dragged in.
+static NSArray *DroppedLink(NSPasteboard *pb) {
+    NSString *url = [pb stringForType:NSPasteboardTypeURL], *title = [pb stringForType:@"public.url-name"];
+    id webkit = [pb propertyListForType:@"WebURLsWithTitlesPboardType"];   // WebKit's own link drags: [[urls], [titles]]
+    if ([webkit isKindOfClass:NSArray.class] && [webkit count] == 2) {
+        if (!url.length) url = [[webkit[0] firstObject] description];
+        if (!title.length) title = [[webkit[1] firstObject] description];
+    }
+    if (!url.length) { NSString *t = Trim([pb stringForType:NSPasteboardTypeString] ?: @""); if ([t hasPrefix:@"http://"] || [t hasPrefix:@"https://"]) url = t; }
+    NSURL *u = url.length ? [NSURL URLWithString:url] : nil;
+    if (!u || !([u.scheme isEqualToString:@"http"] || [u.scheme isEqualToString:@"https"] || [u.scheme isEqualToString:@"file"])) return nil;
+    if (!title.length) for (VTab *t in AllTabs(NO)) if ([t.url isEqualToString:u.absoluteString] && t.title.length) { title = t.title; break; }
+    if (!title.length) title = HostOf(u) ?: u.absoluteString;
+    return @[u.absoluteString, title];
+}
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)info {
+    NSInteger from = [self movingIndex:info];
+    NSMutableDictionary *moving = DraggedBookmark(info);
+    if (!moving && !DroppedLink(info.draggingPasteboard)) { self.dropIndex = self.dropFolder = -1; self.needsDisplay = YES; return NSDragOperationNone; }
+    [self targetFor:[self convertPoint:info.draggingLocation fromView:nil] moving:from];
+    if (from >= 0 && self.dropFolder < 0 && (self.dropIndex == from || self.dropIndex == from + 1)) self.dropIndex = -1;   // no move
+    if (moving && self.dropFolder >= 0 && BMContains(moving, VBookmarks.shared.bar[(NSUInteger)self.dropFolder])) self.dropFolder = -1;
+    self.needsDisplay = YES;
+    return moving ? NSDragOperationMove : NSDragOperationCopy;
+}
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)info { return [self draggingUpdated:info]; }
+- (void)draggingExited:(id<NSDraggingInfo>)info { self.dropIndex = self.dropFolder = -1; self.needsDisplay = YES; }
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)info {
+    NSMutableArray *bar = VBookmarks.shared.bar;
+    NSInteger to = self.dropIndex, folder = self.dropFolder;
+    self.dropIndex = self.dropFolder = -1; self.needsDisplay = YES;
+    if (to < 0 && folder < 0) return NO;
+    NSMutableDictionary *node = DraggedBookmark(info);
+    if (!node) { NSArray *link = DroppedLink(info.draggingPasteboard); if (!link) return NO; node = [@{@"name": link[1], @"url": link[0]} mutableCopy]; }   // a page or link: a new bookmark
+    NSMutableDictionary *target = folder >= 0 && folder < (NSInteger)bar.count ? bar[(NSUInteger)folder] : nil;
+    if (target) { if (BMContains(node, target)) return NO; BMPlace(node, BMChildren(target), NSNotFound); }
+    else {   // the insertion point counts bar positions; place before the bookmark now there (or at the end)
+        NSMutableDictionary *before = to < (NSInteger)bar.count ? bar[(NSUInteger)to] : nil;
+        if (before == node) return NO;
+        BMPlace(node, bar, before ? [bar indexOfObjectIdenticalTo:before] : NSNotFound);
+    }
+    gDragBookmark = nil;
+    BookmarksChanged();
+    if (target) [WinFor(self) showToast:[NSString stringWithFormat:@"Moved into %@", target[@"name"] ?: @"folder"]];
+    return YES;
 }
 - (void)otherMouseDown:(NSEvent *)e {
     NSInteger i = [self indexAt:[self convertPoint:e.locationInWindow fromView:nil]];
@@ -2162,7 +2556,7 @@ static NSMenu *BookmarkMenu(NSArray *nodes) {
 
 #pragma mark - Sidebar: pinned tabs and the tab list
 
-@interface VSidebar : NSView
+@interface VSidebar : NSView <NSDraggingSource>
 @property NSInteger hoverRow;      // index into WinFor(self).tabs, -2 = "New tab" row
 @property BOOL hoverClose;
 @property (strong) VTab *dragTab;
@@ -2350,9 +2744,16 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
     [WinFor(self) selectTab:t];
     if (!t.pinned) self.dragTab = t;
 }
+- (NSDragOperation)draggingSession:(NSDraggingSession *)s sourceOperationMaskForDraggingContext:(NSDraggingContext)c { return NSDragOperationCopy; }
 - (void)mouseDragged:(NSEvent *)e {
     if (!self.dragTab) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
+    // dragged out of the sidebar: the tab's page travels (onto the bookmarks bar, another app, the Finder)
+    if (p.x > NSWidth(self.bounds) + 6 || p.x < -6) {
+        VTab *t = self.dragTab; self.dragTab = nil; self.dragging = NO; self.needsDisplay = YES;
+        if (t.url.length && !t.isHome && ![t.url hasPrefix:@"flint:"]) BeginURLDrag(self, e, t.url, t.title, t.favicon, nil);
+        return;
+    }
     if (!self.dragging && fabs(p.y - self.downAt.y) < 4) return;
     self.dragging = YES;
     NSInteger n = (NSInteger)self.loose.count;
@@ -2406,7 +2807,7 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
     NSMutableArray *t = [NSMutableArray array];
     NSMutableSet *hosts = [NSMutableSet set];
     if (![Defaults() boolForKey:kHomeTopSites] || WinFor(self).isPrivate) { self.tiles = @[]; self.hover = -1; self.needsDisplay = YES; return; }
-    for (NSDictionary *s in [VHistory.shared topSites:16]) {
+    for (NSDictionary *s in [[VHistory forProfile:WinFor(self).profile] topSites:16]) {
         NSString *h = HostOf([NSURL URLWithString:s[@"u"]]);
         if ([hosts containsObject:h]) continue; [hosts addObject:h];
         [t addObject:s]; if (t.count >= 8) break;
@@ -3482,6 +3883,13 @@ static WKWebViewConfiguration *PrivateConfig(WKWebsiteDataStore *store) {
     return c;
 }
 
+// A profile's pages: everything as usual (extensions, blocking, Flint's helpers), with that profile's own website data.
+static WKWebViewConfiguration *ProfileConfig(NSString *pid) {
+    WKWebViewConfiguration *c = FlintConfig();
+    if (pid.length) c.websiteDataStore = ProfileStore(pid);
+    return c;
+}
+
 #pragma mark Blocking: filter-list hosts compiled into WebKit content rules (blocked inside WebKit, no per-request cost)
 
 static NSString *RuleHostRegex(NSString *h) {
@@ -3500,6 +3908,8 @@ static void FlintApplyRules(void) {
         if (![u isKindOfClass:WKUserContentController.class]) continue;
         [u removeAllContentRuleLists];
         if (gBlockOn) for (WKContentRuleList *l in gRules) [u addContentRuleList:l];
+        // extensions' own blocking rules (declarativeNetRequest): normal windows only, like the extensions themselves
+        if (u == gUCC) for (NSArray *lists in gExtRuleLists.allValues) for (WKContentRuleList *l in lists) [u addContentRuleList:l];
     }
 }
 
@@ -3686,6 +4096,8 @@ static void FlintReloadBlocklists(void) { FlintReloadBlocklistsThen(nil); }
         [menu addItem:NSMenuItem.separatorItem];
         [menu addItem:make(@"Block Element…", @selector(blockElement:), nil)];
     }
+    // extensions' own items (chrome.contextMenus)
+    if (!self.page.tab.owner.isPrivate) [FExtHost.shared addMenuItemsTo:menu context:c pageURL:self.URL.absoluteString view:self];
     // tidy: no leading, trailing or doubled separators
     for (NSInteger k = menu.numberOfItems - 1; k > 0; k--)
         if ([menu itemAtIndex:k].isSeparatorItem && [menu itemAtIndex:k - 1].isSeparatorItem) [menu removeItemAtIndex:k];
@@ -3720,7 +4132,7 @@ static void *kKVO = &kKVO;
 }
 
 - (void)attach:(FWebView *)w {
-    if (!w) w = [[FWebView alloc] initWithFrame:self.bounds configuration:self.tab.owner.isPrivate ? PrivateConfig(self.tab.owner.privateStore) : FlintConfig()];
+    if (!w) w = [[FWebView alloc] initWithFrame:self.bounds configuration:self.tab.owner ? [self.tab.owner pageConfig] : FlintConfig()];
     _web = w;
     w.page = self;
     w.frame = self.bounds;
@@ -3769,7 +4181,7 @@ static void *kKVO = &kKVO;
         BOOL finished = self.loading && !_web.loading;
         self.loading = _web.loading;
         if (self.loading) [self watchLoading];
-        if (finished && [self.url hasPrefix:@"http"] && !self.tab.owner.isPrivate) [VHistory.shared visit:_web.URL title:self.title];
+        if (finished && [self.url hasPrefix:@"http"] && !self.tab.owner.isPrivate) [[VHistory forProfile:self.tab.owner.profile] visit:_web.URL title:self.title];
     }
     else if ([k isEqualToString:@"_isPlayingAudio"]) {
         BOOL playing = NO; @try { playing = [[_web valueForKey:@"_isPlayingAudio"] boolValue]; } @catch (NSException *x) {}
@@ -4519,6 +4931,449 @@ static void FlintCosmeticInstall(WKUserContentController *ucc) {
     [self showToast:[NSString stringWithFormat:@"Hidden elements on %@ are back", i.representedObject]];
 }
 @end
+#pragma mark - declarativeNetRequest: any extension's blocking rules, run by WebKit's own content blocker
+
+// Chrome's declarativeNetRequest (the MV3 way ad blockers and privacy extensions block requests) is translated
+// into WebKit content rule lists, the engine Safari's blockers use: the rules are compiled once and matched inside
+// WebKit, with no per-request cost. This is general, not tied to one extension: static rulesets from the manifest,
+// enabling/disabling rulesets, dynamic and session rules, and per-rule static disabling all work the same way for
+// uBlock Origin Lite, AdGuard, Ghostery or anything else that uses the API.
+//
+// What maps over: block, allow, allowAllRequests and upgradeScheme; urlFilter (Adblock syntax) and regexFilter;
+// request and initiator domains, resource types, first/third party, case sensitivity, and rule priority.
+// What doesn't (WebKit can't do it): redirect and modifyHeaders actions, tab-specific and response-header rules —
+// those rules are skipped, never applied wrongly.
+
+
+// One-time probe: does this WebKit understand "load-context" (top frame vs child frame)? Unknown keys fail a whole list.
+static BOOL gDNRLoadContext;
+
+static NSString *DNREscapeChar(unichar c) {
+    return strchr(".+?()[]{}\\$|^*/", (int)c) && c != '/' ? [NSString stringWithFormat:@"\\%C", c] : [NSString stringWithFormat:@"%C", c];
+}
+
+// Adblock-style urlFilter ("||ads.example.com^", "/banner/*.gif|") → WebKit regex. nil: can't be expressed.
+static NSString *DNRURLFilterRegex(NSString *f, BOOL *domainAnchored) {
+    NSMutableString *r = [NSMutableString string];
+    NSUInteger i = 0, n = f.length;
+    if (domainAnchored) *domainAnchored = NO;
+    if ([f hasPrefix:@"||"]) { [r appendString:@"^[a-z][a-z0-9.+-]*://([^/?#]*\\.)?"]; i = 2; if (domainAnchored) *domainAnchored = YES; }
+    else if ([f hasPrefix:@"|"]) { [r appendString:@"^"]; i = 1; }
+    BOOL endAnchor = n > i && [f characterAtIndex:n - 1] == '|';
+    if (endAnchor) n--;
+    for (; i < n; i++) {
+        unichar c = [f characterAtIndex:i];
+        if (c > 126 || c < 32) return nil;   // WebKit's content rules are ASCII only
+        if (c == '*') [r appendString:@".*"];
+        else if (c == '^') [r appendString:(i == n - 1 && !endAnchor) ? @"([^a-zA-Z0-9_.%-].*)?$" : @"[^a-zA-Z0-9_.%-]"];
+        else [r appendString:DNREscapeChar(c)];
+    }
+    if (endAnchor && ![r hasSuffix:@"$"]) [r appendString:@"$"];
+    if (!r.length) [r appendString:@".*"];
+    return r;
+}
+
+// RE2 (Chrome's regex flavour) → WebKit's content-rule subset, or nil with a reason when it uses something WebKit lacks
+// (alternation, counted repeats, look-arounds, word boundaries, back-references).
+static NSString *DNRRegex(NSString *src, NSString **why) {
+    NSMutableString *r = [NSMutableString string];
+    BOOL inClass = NO;
+    NSUInteger n = src.length;
+    for (NSUInteger i = 0; i < n; i++) {
+        unichar c = [src characterAtIndex:i];
+        if (c > 126 || c < 32) { if (why) *why = @"non-ASCII"; return nil; }
+        if (c == '\\') {
+            if (i + 1 >= n) { if (why) *why = @"trailing escape"; return nil; }
+            unichar d = [src characterAtIndex:++i];
+            if (d == 'd') [r appendString:inClass ? @"0-9" : @"[0-9]"];
+            else if (d == 'w') [r appendString:inClass ? @"a-zA-Z0-9_" : @"[a-zA-Z0-9_]"];
+            else if (d == 'b' || d == 'B' || d == 's' || d == 'S' || d == 'D' || d == 'W' || isdigit(d) || d == 'p' || d == 'P') { if (why) *why = @"unsupported escape"; return nil; }
+            else [r appendFormat:@"\\%C", d];
+            continue;
+        }
+        if (inClass) { if (c == ']') inClass = NO; [r appendFormat:@"%C", c]; continue; }
+        if (c == '[') { inClass = YES; [r appendString:@"["]; continue; }
+        if (c == '|' || c == '{' || c == '}') { if (why) *why = @"alternation or counted repeat"; return nil; }
+        if (c == '(' && i + 1 < n && [src characterAtIndex:i + 1] == '?') { if (why) *why = @"special group"; return nil; }
+        if (c == '^' && i != 0) { if (why) *why = @"anchor in the middle"; return nil; }
+        if (c == '$' && i != n - 1) { if (why) *why = @"anchor in the middle"; return nil; }
+        if (c == '?' && i > 0 && strchr("*+?", (int)[src characterAtIndex:i - 1])) continue;   // lazy quantifier: same matches
+        [r appendFormat:@"%C", c];
+    }
+    if (inClass) { if (why) *why = @"unclosed class"; return nil; }
+    return r;
+}
+
+static NSString *DNRDomain(NSString *d) {
+    if (![d isKindOfClass:NSString.class] || !d.length) return nil;
+    d = d.lowercaseString;
+    for (NSUInteger i = 0; i < d.length; i++) { unichar c = [d characterAtIndex:i]; if (!(isalnum(c) || c == '.' || c == '-' || c == '_')) return nil; }
+    return d;
+}
+static NSString *DNRHostPrefix(NSString *domain) {   // matches the domain and its subdomains, at the start of an address
+    NSMutableString *e = [NSMutableString string];
+    for (NSUInteger i = 0; i < domain.length; i++) [e appendString:DNREscapeChar([domain characterAtIndex:i])];
+    return [NSString stringWithFormat:@"^[a-z][a-z0-9.+-]*://([^/?#]*\\.)?%@", e];
+}
+
+// Chrome resource types → WebKit's. Frames are "document" (top or child frame where WebKit can tell them apart).
+// Only types WebKit names exactly are mapped: WebKit's "raw" covers every fetch/XHR, so mapping pings, beacons,
+// websockets or "other" onto it would turn a rule like "block third-party pings" into "block all third-party
+// requests" (which stopped YouTube's video). Rules that only name such types are left out instead.
+static void DNRAddTypes(NSArray *types, NSMutableSet *wk, BOOL *top, BOOL *child) {
+    NSDictionary *m = @{@"stylesheet": @"style-sheet", @"script": @"script", @"image": @"image", @"font": @"font", @"media": @"media",
+                        @"xmlhttprequest": @"raw"};
+    for (NSString *t in types) {
+        if (![t isKindOfClass:NSString.class]) continue;
+        if ([t isEqualToString:@"main_frame"]) { [wk addObject:@"document"]; *top = YES; }
+        else if ([t isEqualToString:@"sub_frame"]) { [wk addObject:@"document"]; *child = YES; }
+        else if (m[t]) [wk addObject:m[t]];
+    }
+}
+static NSArray *DNRAllTypes(void) { return @[@"main_frame", @"sub_frame", @"stylesheet", @"script", @"image", @"font", @"object", @"xmlhttprequest", @"ping", @"csp_report", @"media", @"websocket", @"webtransport", @"webbundle", @"other"]; }
+
+typedef NS_ENUM(NSInteger, DNRKind) { DNRSkip, DNRBlock, DNRAllow };
+
+// One Chrome rule → WebKit rules (often one; one per request domain when a rule names several).
+// `kind` says whether they block (or upgrade) or exempt; `extra` collects exemptions a rule implies (excluded domains).
+static NSArray<NSDictionary *> *DNRConvert(NSDictionary *rule, DNRKind *kind, NSMutableArray *extraAllows) {
+    *kind = DNRSkip;
+    NSDictionary *a = [rule[@"action"] isKindOfClass:NSDictionary.class] ? rule[@"action"] : nil;
+    NSDictionary *c = [rule[@"condition"] isKindOfClass:NSDictionary.class] ? rule[@"condition"] : @{};
+    NSString *type = a[@"type"];
+    if (![type isKindOfClass:NSString.class]) return @[];
+    if (c[@"tabIds"] || c[@"responseHeaders"] || c[@"excludedResponseHeaders"]) return @[];
+    if ([c[@"requestMethods"] isKindOfClass:NSArray.class] && ![c[@"requestMethods"] containsObject:@"get"]) return @[];
+
+    NSString *wkAction; BOOL allowAll = NO;
+    if ([type isEqualToString:@"block"]) { wkAction = @"block"; *kind = DNRBlock; }
+    else if ([type isEqualToString:@"upgradeScheme"]) { wkAction = @"make-https"; *kind = DNRBlock; }
+    else if ([type isEqualToString:@"allow"]) { wkAction = @"ignore-previous-rules"; *kind = DNRAllow; }
+    else if ([type isEqualToString:@"allowAllRequests"]) { wkAction = @"ignore-previous-rules"; *kind = DNRAllow; allowAll = YES; }
+    else return @[];   // redirect, modifyHeaders: WebKit's blocker can't do these
+
+    // where the request comes from
+    NSMutableDictionary *base = [NSMutableDictionary dictionary];
+    NSMutableArray *ifd = [NSMutableArray array], *unless = [NSMutableArray array];
+    for (NSString *d in [c[@"initiatorDomains"] isKindOfClass:NSArray.class] ? c[@"initiatorDomains"] : ([c[@"domains"] isKindOfClass:NSArray.class] ? c[@"domains"] : @[])) { NSString *x = DNRDomain(d); if (x) [ifd addObject:[@"*" stringByAppendingString:x]]; }
+    for (NSString *d in [c[@"excludedInitiatorDomains"] isKindOfClass:NSArray.class] ? c[@"excludedInitiatorDomains"] : ([c[@"excludedDomains"] isKindOfClass:NSArray.class] ? c[@"excludedDomains"] : @[])) { NSString *x = DNRDomain(d); if (x) [unless addObject:[@"*" stringByAppendingString:x]]; }
+    if ([c[@"initiatorDomains"] isKindOfClass:NSArray.class] && [c[@"initiatorDomains"] count] && !ifd.count) { *kind = DNRSkip; return @[]; }
+    if (!allowAll) { if (ifd.count) base[@"if-domain"] = ifd; else if (unless.count) base[@"unless-domain"] = unless; }
+
+    // what kind of request
+    NSMutableSet *wkTypes = [NSMutableSet set]; BOOL top = NO, child = NO;
+    if ([c[@"resourceTypes"] isKindOfClass:NSArray.class]) DNRAddTypes(c[@"resourceTypes"], wkTypes, &top, &child);
+    else {
+        NSMutableArray *all = [DNRAllTypes() mutableCopy];
+        if ([c[@"excludedResourceTypes"] isKindOfClass:NSArray.class]) [all removeObjectsInArray:c[@"excludedResourceTypes"]];
+        else [all removeObject:@"main_frame"];   // Chrome's default: everything but the page itself
+        DNRAddTypes(all, wkTypes, &top, &child);
+    }
+    if (!wkTypes.count) { *kind = DNRSkip; return @[]; }
+    if ([wkTypes containsObject:@"document"] && !(top && child)) {
+        if (gDNRLoadContext) base[@"load-context"] = @[top ? @"top-frame" : @"child-frame"];
+        else if (!top) [wkTypes removeObject:@"document"];   // can't tell frames apart: never block whole pages by mistake
+        if (!wkTypes.count) { *kind = DNRSkip; return @[]; }
+    }
+    if (!allowAll) base[@"resource-type"] = [wkTypes.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    if ([c[@"domainType"] isEqual:@"firstParty"]) base[@"load-type"] = @[@"first-party"];
+    else if ([c[@"domainType"] isEqual:@"thirdParty"]) base[@"load-type"] = @[@"third-party"];
+    if ([c[@"isUrlFilterCaseSensitive"] boolValue]) base[@"url-filter-is-case-sensitive"] = @YES;
+
+    // which addresses
+    NSString *pattern = nil; BOOL domainAnchored = NO;
+    if ([c[@"regexFilter"] isKindOfClass:NSString.class]) { pattern = DNRRegex(c[@"regexFilter"], NULL); if (!pattern) { *kind = DNRSkip; return @[]; } }
+    else if ([c[@"urlFilter"] isKindOfClass:NSString.class]) { pattern = DNRURLFilterRegex(c[@"urlFilter"], &domainAnchored); if (!pattern) { *kind = DNRSkip; return @[]; } }
+    NSMutableArray *domains = [NSMutableArray array];
+    for (NSString *d in [c[@"requestDomains"] isKindOfClass:NSArray.class] ? c[@"requestDomains"] : @[]) { NSString *x = DNRDomain(d); if (x) [domains addObject:x]; }
+    if ([c[@"requestDomains"] isKindOfClass:NSArray.class] && [c[@"requestDomains"] count] && !domains.count) { *kind = DNRSkip; return @[]; }
+
+    NSMutableArray<NSString *> *filters = [NSMutableArray array];
+    if (domains.count && !domainAnchored && ![pattern hasPrefix:@"^"]) {
+        for (NSString *d in domains) [filters addObject:pattern ? [NSString stringWithFormat:@"%@[/:?#].*%@", DNRHostPrefix(d), [pattern hasPrefix:@".*"] ? [pattern substringFromIndex:2] : pattern]
+                                                           : [NSString stringWithFormat:@"%@([/:?#].*)?$", DNRHostPrefix(d)]];
+    } else [filters addObject:pattern ?: @".*"];
+
+    NSMutableArray *out = [NSMutableArray array];
+    if (allowAll) {   // the pages this matches, and everything they load, are exempt
+        for (NSString *f in filters) [out addObject:@{@"trigger": @{@"url-filter": @".*", @"if-top-url": @[f]}, @"action": @{@"type": wkAction}}];
+        return out;
+    }
+    for (NSString *f in filters) { NSMutableDictionary *t = [base mutableCopy]; t[@"url-filter"] = f; [out addObject:@{@"trigger": t, @"action": @{@"type": wkAction}}]; }
+    // "except requests to these domains": an exemption scoped to this rule's other conditions
+    if (*kind == DNRBlock && extraAllows) for (NSString *d in [c[@"excludedRequestDomains"] isKindOfClass:NSArray.class] ? c[@"excludedRequestDomains"] : @[]) {
+        NSString *x = DNRDomain(d); if (!x) continue;
+        NSMutableDictionary *t = [base mutableCopy]; t[@"url-filter"] = [NSString stringWithFormat:@"%@([/:?#].*)?$", DNRHostPrefix(x)];
+        [extraAllows addObject:@{@"trigger": t, @"action": @{@"type": @"ignore-previous-rules"}}];
+    }
+    return out;
+}
+
+#pragma mark Per-extension state
+
+@interface FDNRExt : NSObject
+@property (copy) NSString *ident, *dir;
+@property (strong) NSArray<NSDictionary *> *resources;           // manifest rule_resources: {id, enabled, path}
+@property (strong) NSMutableOrderedSet<NSString *> *enabled;     // enabled static rulesets
+@property (strong) NSMutableArray<NSDictionary *> *dynamicRules, *sessionRules;
+@property (strong) NSMutableDictionary<NSString *, NSArray *> *disabledStatic;   // ruleset id → rule ids turned off
+@property (strong) NSMutableArray *waiters;                      // replies waiting for the next compile to finish
+@property BOOL compiling, again;
+@property NSUInteger ruleCount, skipped;
+@end
+@implementation FDNRExt
+@end
+
+@interface FDNR : NSObject
++ (instancetype)shared;
+- (void)loadExtension:(NSString *)ident dir:(NSString *)dir manifest:(NSDictionary *)m storeDir:(NSString *)storeDir;
+- (void)op:(NSString *)op ext:(NSString *)ident args:(NSArray *)args reply:(void (^)(id result, NSString *error))reply;
+- (void)forget:(NSString *)ident;
+@end
+
+@implementation FDNR {
+    NSMutableDictionary<NSString *, FDNRExt *> *_exts;
+    NSString *_storeDir;
+}
++ (instancetype)shared {
+    static FDNR *d; static dispatch_once_t once;
+    dispatch_once(&once, ^{ d = [FDNR new]; d->_exts = [NSMutableDictionary dictionary]; if (!gExtRuleLists) gExtRuleLists = [NSMutableDictionary dictionary]; });
+    return d;
+}
+
+- (NSString *)statePath:(FDNRExt *)x { return [_storeDir stringByAppendingPathComponent:[x.ident stringByAppendingString:@"-dnr.json"]]; }
+- (void)saveState:(FDNRExt *)x {
+    NSDictionary *s = @{@"enabled": x.enabled.array, @"dynamic": x.dynamicRules, @"disabledStatic": x.disabledStatic};
+    [[NSJSONSerialization dataWithJSONObject:s options:0 error:nil] writeToFile:[self statePath:x] atomically:YES];
+}
+
+- (void)loadExtension:(NSString *)ident dir:(NSString *)dir manifest:(NSDictionary *)m storeDir:(NSString *)storeDir {
+    _storeDir = storeDir;
+    id dnr = m[@"declarative_net_request"];
+    NSArray *res = [dnr isKindOfClass:NSDictionary.class] && [dnr[@"rule_resources"] isKindOfClass:NSArray.class] ? dnr[@"rule_resources"] : @[];
+    NSArray *perms = [m[@"permissions"] isKindOfClass:NSArray.class] ? m[@"permissions"] : @[];
+    if (!res.count && ![perms containsObject:@"declarativeNetRequest"] && ![perms containsObject:@"declarativeNetRequestWithHostAccess"]) return;
+    static dispatch_once_t probe;
+    dispatch_once(&probe, ^{   // learn once whether this WebKit knows "load-context"
+        NSString *json = @"[{\"trigger\":{\"url-filter\":\"^flint-probe:\",\"resource-type\":[\"document\"],\"load-context\":[\"child-frame\"]},\"action\":{\"type\":\"block\"}}]";
+        [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"flint-dnr-probe" encodedContentRuleList:json completionHandler:^(WKContentRuleList *l, NSError *e) { gDNRLoadContext = l != nil; }];
+    });
+    FDNRExt *x = [FDNRExt new];
+    x.ident = ident; x.dir = dir; x.resources = res;
+    x.waiters = [NSMutableArray array]; x.sessionRules = [NSMutableArray array];
+    NSDictionary *saved = nil;
+    NSData *d = [NSData dataWithContentsOfFile:[self statePath:x]];
+    if (d) saved = [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingMutableContainers error:nil];
+    NSMutableOrderedSet *en = [NSMutableOrderedSet orderedSet];
+    if ([saved[@"enabled"] isKindOfClass:NSArray.class]) [en addObjectsFromArray:saved[@"enabled"]];
+    else for (NSDictionary *r in res) if ([r isKindOfClass:NSDictionary.class] && [r[@"enabled"] boolValue] && r[@"id"]) [en addObject:r[@"id"]];
+    x.enabled = en;
+    x.dynamicRules = [saved[@"dynamic"] isKindOfClass:NSArray.class] ? [saved[@"dynamic"] mutableCopy] : [NSMutableArray array];
+    x.disabledStatic = [saved[@"disabledStatic"] isKindOfClass:NSDictionary.class] ? [saved[@"disabledStatic"] mutableCopy] : [NSMutableDictionary dictionary];
+    _exts[ident] = x;
+    // give the probe a moment, then bring the rules up (from WebKit's compiled cache when nothing changed)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self rebuild:x reply:nil]; });
+}
+
+- (void)forget:(NSString *)ident { [_exts removeObjectForKey:ident]; [gExtRuleLists removeObjectForKey:ident]; FlintApplyRules(); }
+
+- (NSString *)fingerprint:(FDNRExt *)x {
+    NSMutableString *fp = [NSMutableString stringWithFormat:@"v2|lc%d|", gDNRLoadContext];   // bump when the translation changes
+    for (NSString *rid in x.enabled) {
+        for (NSDictionary *r in x.resources) if ([r[@"id"] isEqual:rid]) {
+            NSDictionary *a = [NSFileManager.defaultManager attributesOfItemAtPath:[x.dir stringByAppendingPathComponent:r[@"path"] ?: @""] error:nil];
+            [fp appendFormat:@"%@:%llu:%.0f|", rid, a.fileSize, a.fileModificationDate.timeIntervalSince1970];
+        }
+    }
+    NSData *dyn = [NSJSONSerialization dataWithJSONObject:@[x.dynamicRules, x.sessionRules, x.disabledStatic] options:NSJSONWritingSortedKeys error:nil];
+    unsigned char h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(dyn.bytes, (CC_LONG)dyn.length, h);
+    for (int i = 0; i < 8; i++) [fp appendFormat:@"%02x", h[i]];
+    return fp;
+}
+
+// Gather every active rule, translate, and compile — or reuse WebKit's compiled copy when nothing changed.
+- (void)rebuild:(FDNRExt *)x reply:(void (^)(void))done {
+    if (done) [x.waiters addObject:[done copy]];
+    if (x.compiling) { x.again = YES; return; }
+    x.compiling = YES; x.again = NO;
+    NSString *fp = [self fingerprint:x];
+    NSString *fpKey = [@"dnr.fp." stringByAppendingString:x.ident], *idsKey = [@"dnr.lists." stringByAppendingString:x.ident];
+    void (^finish)(NSArray *) = ^(NSArray *lists) {
+        gExtRuleLists[x.ident] = lists ?: @[];
+        FlintApplyRules();
+        x.compiling = NO;
+        NSArray *w = x.waiters.copy; [x.waiters removeAllObjects];
+        for (void (^b)(void) in w) b();
+        if (x.again) [self rebuild:x reply:nil];
+    };
+    NSArray *cachedIds = [Defaults() arrayForKey:idsKey];
+    if ([[Defaults() stringForKey:fpKey] isEqualToString:fp] && cachedIds) {
+        NSMutableArray *found = [NSMutableArray array];
+        __block NSUInteger pending = cachedIds.count; __block BOOL missing = NO;
+        if (!pending) { finish(@[]); return; }
+        for (NSString *lid in cachedIds) [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:lid completionHandler:^(WKContentRuleList *l, NSError *e) {
+            if (l) [found addObject:l]; else missing = YES;
+            if (--pending) return;
+            if (!missing) { DLog(@"extension rules: %@ from cache (%lu lists)", x.ident, (unsigned long)found.count); finish(found); }
+            else { [Defaults() removeObjectForKey:fpKey]; x.compiling = NO; [self rebuild:x reply:nil]; }
+        }];
+        return;
+    }
+    NSArray *enabled = x.enabled.array, *resources = x.resources, *dynamic = x.dynamicRules.copy, *session = x.sessionRules.copy;
+    NSDictionary *disabled = x.disabledStatic.copy; NSString *dir = x.dir;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDate *t0 = NSDate.date;
+        NSMutableArray *rules = [NSMutableArray array];
+        for (NSString *rid in enabled) for (NSDictionary *r in resources) if ([r[@"id"] isEqual:rid] && [r[@"path"] isKindOfClass:NSString.class]) {
+            NSData *d = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:r[@"path"]]];
+            NSArray *a = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+            NSSet *off = [NSSet setWithArray:[disabled[rid] isKindOfClass:NSArray.class] ? disabled[rid] : @[]];
+            if ([a isKindOfClass:NSArray.class]) for (NSDictionary *rule in a) if ([rule isKindOfClass:NSDictionary.class] && ![off containsObject:rule[@"id"] ?: @-1]) [rules addObject:rule];
+        }
+        [rules addObjectsFromArray:dynamic]; [rules addObjectsFromArray:session];
+        // translate; blocks and exemptions kept apart, each with its priority
+        NSMutableArray *blocks = [NSMutableArray array], *allows = [NSMutableArray array];
+        NSUInteger skipped = 0;
+        for (NSDictionary *rule in rules) {
+            DNRKind k; NSMutableArray *extra = [NSMutableArray array];
+            NSArray *wk = DNRConvert(rule, &k, extra);
+            if (k == DNRSkip || !wk.count) { skipped++; continue; }
+            NSInteger pr = [rule[@"priority"] isKindOfClass:NSNumber.class] ? [rule[@"priority"] integerValue] : 1;
+            for (NSDictionary *w in wk) [(k == DNRAllow ? allows : blocks) addObject:@[@(pr), w]];
+            for (NSDictionary *w in extra) [allows addObject:@[@(pr), w]];
+        }
+        NSComparator byPriority = ^NSComparisonResult(NSArray *a, NSArray *b) { return [a[0] compare:b[0]]; };
+        [blocks sortWithOptions:NSSortStable usingComparator:byPriority];
+        [allows sortWithOptions:NSSortStable usingComparator:byPriority];
+        // WebKit's exemptions only reach rules earlier in the same list, so every list carries all exemptions,
+        // interleaved by priority (a higher-priority block still wins over a lower-priority allow, as in Chrome)
+        NSUInteger per = MAX(10000, MIN(60000, 140000 - MIN(allows.count, 80000)));
+        NSMutableArray<NSArray *> *chunks = [NSMutableArray array];
+        for (NSUInteger i = 0; i < blocks.count || (i == 0 && allows.count); i += per) {
+            NSArray *slice = blocks.count ? [blocks subarrayWithRange:NSMakeRange(i, MIN(per, blocks.count - i))] : @[];
+            NSMutableArray *merged = [NSMutableArray arrayWithCapacity:slice.count + allows.count];
+            NSUInteger bi = 0, ai = 0;
+            while (bi < slice.count || ai < allows.count) {
+                BOOL takeBlock = ai >= allows.count || (bi < slice.count && [slice[bi][0] integerValue] <= [allows[ai][0] integerValue]);
+                [merged addObject:takeBlock ? slice[bi++][1] : allows[ai++][1]];
+            }
+            [chunks addObject:merged];
+            if (!blocks.count) break;
+        }
+        NSUInteger total = blocks.count + allows.count;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            x.ruleCount = total; x.skipped = skipped;
+            if (!chunks.count) { [Defaults() setObject:fp forKey:fpKey]; [Defaults() setObject:@[] forKey:idsKey]; finish(@[]); return; }
+            NSMutableArray *lists = [NSMutableArray array], *ids = [NSMutableArray array];
+            __block NSUInteger pending = chunks.count;
+            for (NSUInteger k = 0; k < chunks.count; k++) {
+                [self compile:chunks[k] ident:[NSString stringWithFormat:@"flint-dnr-%@-%lu", x.ident, (unsigned long)k] into:lists ids:ids done:^{
+                    if (--pending) return;
+                    [Defaults() setObject:fp forKey:fpKey]; [Defaults() setObject:ids forKey:idsKey];
+                    DLog(@"extension rules: %@ → %lu WebKit rules in %lu lists (%lu Chrome rules not expressible), %.1fs", x.ident, (unsigned long)total, (unsigned long)lists.count, (unsigned long)skipped, -t0.timeIntervalSinceNow);
+                    finish(lists);
+                }];
+            }
+        });
+    });
+}
+
+// Compile one list; if WebKit rejects it, split it until the rule it can't take is set aside (the rest still work).
+- (void)compile:(NSArray *)rules ident:(NSString *)ident into:(NSMutableArray *)lists ids:(NSMutableArray *)ids done:(void (^)(void))done {
+    NSData *d = [NSJSONSerialization dataWithJSONObject:rules options:0 error:nil];
+    NSString *json = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *l, NSError *err) {
+        if (l) { [lists addObject:l]; [ids addObject:ident]; done(); return; }
+        if (rules.count <= 1) { DLog(@"extension rule set aside: %@", err.localizedDescription); done(); return; }
+        // keep exemptions with both halves (they must follow the rules they exempt)
+        NSMutableArray *a = [NSMutableArray array], *b = [NSMutableArray array];
+        NSUInteger half = rules.count / 2, blocksSeen = 0, blockTotal = 0;
+        for (NSDictionary *r in rules) if (![r[@"action"][@"type"] isEqual:@"ignore-previous-rules"]) blockTotal++;
+        for (NSDictionary *r in rules) {
+            BOOL allow = [r[@"action"][@"type"] isEqual:@"ignore-previous-rules"];
+            if (allow && blockTotal > 1) { [a addObject:r]; [b addObject:r]; continue; }
+            if (blockTotal > 1) { [(blocksSeen++ < blockTotal / 2 ? a : b) addObject:r]; }
+            else [(a.count < half ? a : b) addObject:r];
+        }
+        if (!a.count || !b.count || a.count == rules.count) { DLog(@"extension rule list %@ failed: %@", ident, err.localizedDescription); done(); return; }
+        __block int left = 2;
+        void (^both)(void) = ^{ if (--left == 0) done(); };
+        [self compile:a ident:[ident stringByAppendingString:@"a"] into:lists ids:ids done:both];
+        [self compile:b ident:[ident stringByAppendingString:@"b"] into:lists ids:ids done:both];
+    }];
+}
+
+#pragma mark chrome.declarativeNetRequest calls
+
+static NSArray *DNRFilterRules(NSArray *rules, id ids) {
+    if (![ids isKindOfClass:NSArray.class]) return rules;
+    NSSet *want = [NSSet setWithArray:ids];
+    NSMutableArray *out = [NSMutableArray array]; for (NSDictionary *r in rules) if ([want containsObject:r[@"id"] ?: @-1]) [out addObject:r];
+    return out;
+}
+// add/remove by id, as Chrome does: removals first, then additions (duplicate ids are an error)
+static NSString *DNRUpdate(NSMutableArray *rules, NSDictionary *opts, NSUInteger limit) {
+    NSArray *remove = [opts[@"removeRuleIds"] isKindOfClass:NSArray.class] ? opts[@"removeRuleIds"] : @[];
+    NSArray *add = [opts[@"addRules"] isKindOfClass:NSArray.class] ? opts[@"addRules"] : @[];
+    NSMutableArray *next = [NSMutableArray array];
+    NSSet *gone = [NSSet setWithArray:remove];
+    for (NSDictionary *r in rules) if (![gone containsObject:r[@"id"] ?: @-1]) [next addObject:r];
+    NSMutableSet *seen = [NSMutableSet set]; for (NSDictionary *r in next) if (r[@"id"]) [seen addObject:r[@"id"]];
+    for (NSDictionary *r in add) {
+        if (![r isKindOfClass:NSDictionary.class] || ![r[@"id"] isKindOfClass:NSNumber.class]) return @"Rule with an invalid id";
+        if ([seen containsObject:r[@"id"]]) return [NSString stringWithFormat:@"Rule with id %@ does not have a unique ID.", r[@"id"]];
+        [seen addObject:r[@"id"]]; [next addObject:r];
+    }
+    if (next.count > limit) return @"Rule count exceeds the limit";
+    [rules setArray:next];
+    return nil;
+}
+
+- (void)op:(NSString *)op ext:(NSString *)ident args:(NSArray *)args reply:(void (^)(id, NSString *))reply {
+    FDNRExt *x = _exts[ident];
+    id a0 = args.count ? args[0] : nil; if (a0 == NSNull.null) a0 = nil;
+    NSDictionary *o = [a0 isKindOfClass:NSDictionary.class] ? a0 : @{};
+    if ([op isEqualToString:@"dnr.isRegexSupported"]) {
+        NSString *why = nil; BOOL okRx = [o[@"regex"] isKindOfClass:NSString.class] && DNRRegex(o[@"regex"], &why) != nil;
+        reply(okRx ? @{@"isSupported": @YES} : @{@"isSupported": @NO, @"reason": @"syntaxError"}, nil); return;
+    }
+    if ([op isEqualToString:@"dnr.getMatchedRules"]) { reply(@{@"rulesMatchedInfo": @[]}, nil); return; }
+    if ([op isEqualToString:@"dnr.testMatchOutcome"]) { reply(@{@"matchedRules": @[]}, nil); return; }
+    if ([op isEqualToString:@"dnr.setExtensionActionOptions"]) { reply(NSNull.null, nil); return; }
+    if (!x) {   // no rules declared: answer as an empty engine
+        if ([op hasPrefix:@"dnr.get"]) reply(@[], nil); else if ([op isEqualToString:@"dnr.getAvailableStaticRuleCount"]) reply(@300000, nil); else reply(NSNull.null, nil);
+        return;
+    }
+    void (^saveAndApply)(void) = ^{ [self saveState:x]; [self rebuild:x reply:^{ reply(NSNull.null, nil); }]; };
+    if ([op isEqualToString:@"dnr.getEnabledRulesets"]) reply(x.enabled.array, nil);
+    else if ([op isEqualToString:@"dnr.updateEnabledRulesets"]) {
+        NSMutableSet *known = [NSMutableSet set]; for (NSDictionary *r in x.resources) if (r[@"id"]) [known addObject:r[@"id"]];
+        for (NSString *rid in [o[@"enableRulesetIds"] isKindOfClass:NSArray.class] ? o[@"enableRulesetIds"] : @[]) if (![known containsObject:rid]) { reply(nil, [NSString stringWithFormat:@"Invalid ruleset id: %@.", rid]); return; }
+        for (NSString *rid in [o[@"disableRulesetIds"] isKindOfClass:NSArray.class] ? o[@"disableRulesetIds"] : @[]) [x.enabled removeObject:rid];
+        for (NSString *rid in [o[@"enableRulesetIds"] isKindOfClass:NSArray.class] ? o[@"enableRulesetIds"] : @[]) [x.enabled addObject:rid];
+        saveAndApply();
+    }
+    else if ([op isEqualToString:@"dnr.getDynamicRules"]) reply(DNRFilterRules(x.dynamicRules, o[@"ruleIds"]), nil);
+    else if ([op isEqualToString:@"dnr.getSessionRules"]) reply(DNRFilterRules(x.sessionRules, o[@"ruleIds"]), nil);
+    else if ([op isEqualToString:@"dnr.updateDynamicRules"] || [op isEqualToString:@"dnr.updateSessionRules"]) {
+        BOOL dyn = [op isEqualToString:@"dnr.updateDynamicRules"];
+        NSString *err = DNRUpdate(dyn ? x.dynamicRules : x.sessionRules, o, dyn ? 30000 : 5000);
+        if (err) { reply(nil, err); return; }
+        if (dyn) saveAndApply(); else [self rebuild:x reply:^{ reply(NSNull.null, nil); }];
+    }
+    else if ([op isEqualToString:@"dnr.updateStaticRules"]) {
+        NSString *rid = o[@"rulesetId"]; if (![rid isKindOfClass:NSString.class]) { reply(nil, @"Missing rulesetId"); return; }
+        NSMutableSet *off = [NSMutableSet setWithArray:[x.disabledStatic[rid] isKindOfClass:NSArray.class] ? x.disabledStatic[rid] : @[]];
+        [off addObjectsFromArray:[o[@"disableRuleIds"] isKindOfClass:NSArray.class] ? o[@"disableRuleIds"] : @[]];
+        for (id i in [o[@"enableRuleIds"] isKindOfClass:NSArray.class] ? o[@"enableRuleIds"] : @[]) [off removeObject:i];
+        x.disabledStatic[rid] = off.allObjects;
+        saveAndApply();
+    }
+    else if ([op isEqualToString:@"dnr.getDisabledRuleIds"]) { NSString *rid = o[@"rulesetId"]; reply([rid isKindOfClass:NSString.class] && [x.disabledStatic[rid] isKindOfClass:NSArray.class] ? x.disabledStatic[rid] : @[], nil); }
+    else if ([op isEqualToString:@"dnr.getAvailableStaticRuleCount"]) reply(@(MAX(0, 330000 - (NSInteger)x.ruleCount)), nil);
+    else reply(nil, [@"Flint doesn't support " stringByAppendingString:op]);
+}
+@end
 #pragma mark - Extensions: Flint's own Chrome-extension layer on WebKit
 // Unpacked Chrome extensions live in ~/Library/Application Support/Flint/Extensions/<name>/.
 // Content scripts run in a WebKit content world per extension (Chrome's "isolated world"),
@@ -4620,13 +5475,50 @@ static NSDictionary *TabInfo(VTab *t) {
              @"incognito": @NO, @"audible": @NO, @"discarded": @(t.web == nil), @"autoDiscardable": @YES, @"groupId": @-1};
 }
 
+// Frames: Chrome gives every frame a number (0 = the page). WebKit's frames carry an id of their own; Flint
+// remembers each frame that has talked to an extension, so later calls (executeScript, insertCSS, sendMessage
+// with frameIds) can reach that exact frame.
+static NSMapTable<WKWebView *, NSMutableDictionary<NSNumber *, WKFrameInfo *> *> *gFrames;
+static NSNumber *FrameIDFor(WKFrameInfo *f) {
+    if (!f || f.isMainFrame) return @0;
+    @try { id h = [f valueForKey:@"_handle"]; id n = [h valueForKey:@"frameID"]; if ([n isKindOfClass:NSNumber.class] && [n unsignedLongLongValue]) return n; } @catch (NSException *x) {}
+    return @1;
+}
+static void RememberFrame(WKWebView *v, WKFrameInfo *f) {
+    if (!v || !f || f.isMainFrame) return;
+    if (!gFrames) gFrames = [NSMapTable weakToStrongObjectsMapTable];
+    NSMutableDictionary *d = [gFrames objectForKey:v]; if (!d) { d = [NSMutableDictionary dictionary]; [gFrames setObject:d forKey:v]; }
+    if (d.count > 200) [d removeAllObjects];
+    d[FrameIDFor(f)] = f;
+}
+// The frames a call targets: given ids, all frames, or the page.
+static NSArray *TargetFrames(WKWebView *v, NSDictionary *target) {
+    NSMutableArray *out = [NSMutableArray array];   // each: @[frameId, WKFrameInfo or NSNull (the page)]
+    NSDictionary *known = [gFrames objectForKey:v] ?: @{};
+    if ([target[@"frameIds"] isKindOfClass:NSArray.class]) {
+        for (NSNumber *n in target[@"frameIds"]) { if (n.longLongValue == 0) [out addObject:@[@0, NSNull.null]]; else if (known[n]) [out addObject:@[n, known[n]]]; }
+    } else {
+        [out addObject:@[@0, NSNull.null]];
+        if ([target[@"allFrames"] boolValue]) for (NSNumber *n in known) [out addObject:@[n, known[n]]];
+    }
+    return out;
+}
+
 // logs message types only, never contents (they can carry keys); on only while developing, when an "extdebug" file sits beside Flint.app
 static BOOL gExtDebug = NO;
 __attribute__((constructor)) static void FlintExtDebugInit(void) { gExtDebug = [NSBundle.mainBundle pathForResource:@"extdebug" ofType:nil] != nil; }
 
+@interface FExtHost () <WKNavigationDelegate>
+@end
+
 @implementation FExtHost {
     NSMutableDictionary<NSString *, FExt *> *_exts, *_disabled;
     NSMutableDictionary<NSString *, FPort *> *_ports;
+    NSMutableDictionary<NSString *, NSMutableArray<NSMutableDictionary *> *> *_menus;     // extension → its context-menu items, in order
+    NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *_regScripts;       // extension → scripts it registered at run time
+    NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *_userScripts;      // extension → chrome.userScripts entries
+    NSHashTable<WKUserScript *> *_dynScripts;   // the WebKit scripts made from those (swapped out when they change)
+    WKUserContentController *_ucc;
     BOOL _installed;
     NSString *_shim;
     NSPopover *_popover;
@@ -4639,6 +5531,10 @@ __attribute__((constructor)) static void FlintExtDebugInit(void) { gExtDebug = [
     _exts = [NSMutableDictionary dictionary];
     _disabled = [NSMutableDictionary dictionary];
     _ports = [NSMutableDictionary dictionary];
+    _menus = [NSMutableDictionary dictionary];
+    _regScripts = [NSMutableDictionary dictionary];
+    _userScripts = [NSMutableDictionary dictionary];
+    _dynScripts = [NSHashTable weakObjectsHashTable];
     _shim = [NSString stringWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"ext-shim" ofType:@"js"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
     NSString *root = ExtRoot();
     for (NSString *n in [NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:nil]) {
@@ -4664,6 +5560,12 @@ __attribute__((constructor)) static void FlintExtDebugInit(void) { gExtDebug = [
         if ([[Defaults() arrayForKey:kExtDisabled] containsObject:e.ident]) { _disabled[e.ident] = e; continue; }
         _exts[e.ident] = e;
         DLog(@"extension %@ (%@) from %@", e.name, e.ident, n);
+        // scripts it registered last time (persistAcrossSessions) and its network rules
+        NSArray *reg = JSONFile([self storePath:e area:@"scripts"]);
+        _regScripts[e.ident] = [reg isKindOfClass:NSArray.class] ? [reg mutableCopy] : [NSMutableArray array];
+        NSArray *us = JSONFile([self storePath:e area:@"userscripts"]);
+        _userScripts[e.ident] = [us isKindOfClass:NSArray.class] ? [us mutableCopy] : [NSMutableArray array];
+        [FDNR.shared loadExtension:e.ident dir:e.dir manifest:m storeDir:[self storePath:e area:@"x"].stringByDeletingLastPathComponent];
     }
 }
 
@@ -4745,44 +5647,262 @@ static WKUserScript *MatchedScript(NSString *src, WKUserScriptInjectionTime when
     for (FExt *e in _exts.allValues) {
         [ucc addScriptMessageHandlerWithReply:self contentWorld:e.world name:@"flintExt"];
         [ucc addUserScript:[[WKUserScript alloc] initWithSource:[self shimFor:@"content" ext:e] injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:e.world]];
-        for (NSDictionary *cs in e.manifest[@"content_scripts"] ?: @[]) {
-            if (![cs isKindOfClass:NSDictionary.class]) continue;
-            BOOL mainWorld = [cs[@"world"] isEqual:@"MAIN"];
-            WKContentWorld *world = mainWorld ? WKContentWorld.pageWorld : e.world;
-            BOOL mainOnly = ![cs[@"all_frames"] boolValue];
-            NSString *at = cs[@"run_at"] ?: @"document_idle";
-            WKUserScriptInjectionTime when = [at isEqualToString:@"document_start"] ? WKUserScriptInjectionTimeAtDocumentStart : WKUserScriptInjectionTimeAtDocumentEnd;
-            NSArray *inc = ChromePatterns(cs[@"matches"]), *exc = ChromePatterns(cs[@"exclude_matches"]);
-            // CSS first, then each JS file as its own script in the same scope, exactly like Chrome
-            // (so one file's top-level `const config` is visible to the next).
-            NSMutableArray<NSString *> *pieces = [NSMutableArray array];
-            NSMutableString *css = [NSMutableString string];
-            for (NSString *f in cs[@"css"] ?: @[]) {
-                NSString *text = [NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil] ?: @"";
-                NSString *lit = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:@[text] options:0 error:nil] encoding:NSUTF8StringEncoding];
-                [css appendFormat:@"(()=>{const s=document.createElement('style');s.textContent=%@[0];const put=()=>(document.head||document.documentElement).appendChild(s);document.documentElement?put():document.addEventListener('readystatechange',put,{once:true});})();\n", lit];
-            }
-            if (css.length) [pieces addObject:css];
-            for (NSString *f in cs[@"js"] ?: @[]) {
-                NSString *text = [NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil];
-                if (!text) continue;
-                // page-world scripts expect Chrome's requestIdleCallback, which WebKit lacks
-                if (mainWorld) text = [PageWorldPolyfills() stringByAppendingString:text];
-                [pieces addObject:[text stringByAppendingFormat:@"\n//# sourceURL=chrome-extension://%@/%@", e.ident, f]];
-            }
-            for (NSString *src in pieces) {
-                WKUserScript *us = MatchedScript(src, when, mainOnly, inc, exc, world);
-                if (gExtDebug) DLog(@"ext %@: content script %@ via %@", e.name, [[src componentsSeparatedByString:@"sourceURL="].lastObject lastPathComponent], us ? @"per-site" : @"fallback");
-                if (!us) {   // older WebKit without per-site scripts: check the address in JavaScript (files then share no top-level scope)
-                    NSString *matches = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:cs[@"matches"] ?: @[] options:0 error:nil] encoding:NSUTF8StringEncoding];
-                    NSString *excludes = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:cs[@"exclude_matches"] ?: @[] options:0 error:nil] encoding:NSUTF8StringEncoding];
-                    NSString *wrapped = [NSString stringWithFormat:@"{\n%@if (__flintMatch(%@, location.href) && !__flintMatch(%@, location.href)) {\n%@\n}\n}\n", mainWorld ? MatchJS() : @"", matches, excludes, src];
-                    us = [[WKUserScript alloc] initWithSource:wrapped injectionTime:when forMainFrameOnly:mainOnly inContentWorld:world];
-                }
-                [ucc addUserScript:us];
-            }
+        for (NSDictionary *cs in e.manifest[@"content_scripts"] ?: @[]) for (WKUserScript *us in [self userScriptsFor:cs ext:e]) [ucc addUserScript:us];
+    }
+    _ucc = ucc;
+    [self addRegisteredScripts];
+}
+
+// One content-script entry (from the manifest, or registered at run time in manifest form) → WebKit user scripts.
+- (NSArray<WKUserScript *> *)userScriptsFor:(NSDictionary *)cs ext:(FExt *)e {
+    NSMutableArray *out = [NSMutableArray array];
+    if (![cs isKindOfClass:NSDictionary.class]) return out;
+    BOOL mainWorld = [cs[@"world"] isEqual:@"MAIN"];
+    // user scripts (chrome.userScripts) get a world of their own, apart from the extension's content scripts
+    WKContentWorld *world = mainWorld ? WKContentWorld.pageWorld : [cs[@"world"] isEqual:@"USER_SCRIPT"] ? [WKContentWorld worldWithName:[@"flint-us-" stringByAppendingString:e.ident]] : e.world;
+    BOOL mainOnly = ![cs[@"all_frames"] boolValue];
+    NSString *at = [cs[@"run_at"] isKindOfClass:NSString.class] ? cs[@"run_at"] : @"document_idle";
+    WKUserScriptInjectionTime when = [at isEqualToString:@"document_start"] ? WKUserScriptInjectionTimeAtDocumentStart : WKUserScriptInjectionTimeAtDocumentEnd;
+    NSArray *inc = ChromePatterns(cs[@"matches"]), *exc = ChromePatterns(cs[@"exclude_matches"]);
+    // CSS first, then each JS file as its own script in the same scope, exactly like Chrome
+    // (so one file's top-level `const config` is visible to the next).
+    NSMutableArray<NSString *> *pieces = [NSMutableArray array];
+    NSMutableString *css = [NSMutableString string];
+    for (NSString *f in [cs[@"css"] isKindOfClass:NSArray.class] ? cs[@"css"] : @[]) {
+        NSString *text = [NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil] ?: @"";
+        NSString *lit = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:@[text] options:0 error:nil] encoding:NSUTF8StringEncoding];
+        [css appendFormat:@"(()=>{const s=document.createElement('style');s.textContent=%@[0];const put=()=>(document.head||document.documentElement).appendChild(s);document.documentElement?put():document.addEventListener('readystatechange',put,{once:true});})();\n", lit];
+    }
+    if (css.length) [pieces addObject:css];
+    // scripts as files (content scripts) or a mix of files and inline code, in order (user scripts)
+    NSMutableArray *sources = [NSMutableArray array];
+    for (NSString *f in [cs[@"js"] isKindOfClass:NSArray.class] ? cs[@"js"] : @[]) if ([f isKindOfClass:NSString.class]) [sources addObject:@{@"file": f}];
+    for (NSDictionary *p in [cs[@"pieces"] isKindOfClass:NSArray.class] ? cs[@"pieces"] : @[]) if ([p isKindOfClass:NSDictionary.class]) [sources addObject:p];
+    for (NSDictionary *src in sources) {
+        NSString *f = [src[@"file"] isKindOfClass:NSString.class] ? src[@"file"] : [NSString stringWithFormat:@"userscript-%lu.js", (unsigned long)pieces.count];
+        NSString *text = [src[@"code"] isKindOfClass:NSString.class] ? src[@"code"] : [NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil];
+        if (!text) continue;
+        // page-world scripts expect Chrome's requestIdleCallback, which WebKit lacks
+        if (mainWorld) text = [PageWorldPolyfills() stringByAppendingString:text];
+        [pieces addObject:[text stringByAppendingFormat:@"\n//# sourceURL=chrome-extension://%@/%@", e.ident, [f hasPrefix:@"/"] ? [f substringFromIndex:1] : f]];
+    }
+    for (NSString *src in pieces) {
+        WKUserScript *us = MatchedScript(src, when, mainOnly, inc, exc, world);
+        if (!us) {   // older WebKit without per-site scripts: check the address in JavaScript (files then share no top-level scope)
+            NSString *matches = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:cs[@"matches"] ?: @[] options:0 error:nil] encoding:NSUTF8StringEncoding];
+            NSString *excludes = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:cs[@"exclude_matches"] ?: @[] options:0 error:nil] encoding:NSUTF8StringEncoding];
+            NSString *wrapped = [NSString stringWithFormat:@"{\n%@if (__flintMatch(%@, location.href) && !__flintMatch(%@, location.href)) {\n%@\n}\n}\n", mainWorld ? MatchJS() : @"", matches, excludes, src];
+            us = [[WKUserScript alloc] initWithSource:wrapped injectionTime:when forMainFrameOnly:mainOnly inContentWorld:world];
+        }
+        [out addObject:us];
+    }
+    return out;
+}
+
+#pragma mark Scripts registered at run time (chrome.scripting.registerContentScripts)
+
+// Chrome's RegisteredContentScript → the manifest's content_scripts form
+static NSDictionary *ManifestFormOf(NSDictionary *r) {
+    NSMutableDictionary *cs = [NSMutableDictionary dictionary];
+    if (r[@"js"]) cs[@"js"] = r[@"js"];
+    if (r[@"css"]) cs[@"css"] = r[@"css"];
+    if (r[@"matches"]) cs[@"matches"] = r[@"matches"];
+    if (r[@"excludeMatches"]) cs[@"exclude_matches"] = r[@"excludeMatches"];
+    if (r[@"allFrames"]) cs[@"all_frames"] = r[@"allFrames"];
+    if (r[@"runAt"]) cs[@"run_at"] = r[@"runAt"];
+    if (r[@"world"]) cs[@"world"] = r[@"world"];
+    return cs;
+}
+- (void)addRegisteredScripts {
+    if (!_ucc) return;
+    for (FExt *e in _exts.allValues) {
+        for (NSDictionary *r in _regScripts[e.ident] ?: @[]) for (WKUserScript *us in [self userScriptsFor:ManifestFormOf(r) ext:e]) { [_dynScripts addObject:us]; [_ucc addUserScript:us]; }
+        for (NSDictionary *r in _userScripts[e.ident] ?: @[]) {
+            NSMutableDictionary *cs = [ManifestFormOf(r) mutableCopy]; [cs removeObjectForKey:@"js"];
+            cs[@"pieces"] = [r[@"js"] isKindOfClass:NSArray.class] ? r[@"js"] : @[];
+            cs[@"world"] = [r[@"world"] isEqual:@"MAIN"] ? @"MAIN" : @"USER_SCRIPT";
+            for (WKUserScript *us in [self userScriptsFor:cs ext:e]) { [_dynScripts addObject:us]; [_ucc addUserScript:us]; }
         }
     }
+}
+// Swap the old set for the new: everything else in the controller stays exactly as it was. Pages pick it up as they load.
+- (void)resyncRegisteredScripts {
+    if (!_ucc) return;
+    NSMutableArray *keep = [NSMutableArray array];
+    for (WKUserScript *us in _ucc.userScripts) if (![_dynScripts containsObject:us]) [keep addObject:us];
+    [_ucc removeAllUserScripts];
+    [_dynScripts removeAllObjects];
+    for (WKUserScript *us in keep) [_ucc addUserScript:us];
+    [self addRegisteredScripts];
+}
+- (void)saveRegistered:(FExt *)e {
+    NSMutableArray *persist = [NSMutableArray array];
+    for (NSDictionary *r in _regScripts[e.ident]) if (![r[@"persistAcrossSessions"] isEqual:@NO]) [persist addObject:r];
+    [[NSJSONSerialization dataWithJSONObject:persist options:0 error:nil] writeToFile:[self storePath:e area:@"scripts"] atomically:YES];
+    [[NSJSONSerialization dataWithJSONObject:_userScripts[e.ident] ?: @[] options:0 error:nil] writeToFile:[self storePath:e area:@"userscripts"] atomically:YES];
+}
+// chrome.scripting.*ContentScripts and chrome.userScripts.* share one implementation (same shape, different list)
+- (void)registeredOp:(NSString *)op ext:(FExt *)e arg:(id)a ok:(void (^)(id))ok fail:(void (^)(NSString *))fail {
+    BOOL user = [op hasPrefix:@"userScripts."];
+    if (user) op = @{@"userScripts.register": @"scripting.registerContentScripts", @"userScripts.update": @"scripting.updateContentScripts",
+                      @"userScripts.unregister": @"scripting.unregisterContentScripts", @"userScripts.getScripts": @"scripting.getRegisteredContentScripts"}[op] ?: op;
+    NSMutableDictionary *store = user ? _userScripts : _regScripts;
+    NSMutableArray *list = store[e.ident] ?: (store[e.ident] = [NSMutableArray array]);
+    NSSet *ids = [a isKindOfClass:NSDictionary.class] && [a[@"ids"] isKindOfClass:NSArray.class] ? [NSSet setWithArray:a[@"ids"]] : nil;
+    if ([op isEqualToString:@"scripting.getRegisteredContentScripts"]) {
+        NSMutableArray *out = [NSMutableArray array]; for (NSDictionary *r in list) if (!ids || [ids containsObject:r[@"id"]]) [out addObject:r];
+        ok(out); return;
+    }
+    if ([op isEqualToString:@"scripting.unregisterContentScripts"]) {
+        if (ids) for (NSString *i in ids) { BOOL found = NO; for (NSDictionary *r in list) if ([r[@"id"] isEqual:i]) found = YES; if (!found) { fail([NSString stringWithFormat:@"Nonexistent script ID '%@'", i]); return; } }
+        [list filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *r, NSDictionary *b) { return ids && ![ids containsObject:r[@"id"]]; }]];
+    } else {
+        BOOL update = [op isEqualToString:@"scripting.updateContentScripts"];
+        for (NSDictionary *r in [a isKindOfClass:NSArray.class] ? a : @[]) {
+            if (![r isKindOfClass:NSDictionary.class] || ![r[@"id"] isKindOfClass:NSString.class] || [r[@"id"] hasPrefix:@"_"]) { fail(@"Invalid script ID"); return; }
+            NSUInteger at = [list indexOfObjectPassingTest:^BOOL(NSDictionary *x, NSUInteger i, BOOL *stop) { return [x[@"id"] isEqual:r[@"id"]]; }];
+            if (!update && at != NSNotFound) { fail([NSString stringWithFormat:@"Duplicate script ID '%@'", r[@"id"]]); return; }
+            if (update && at == NSNotFound) { fail([NSString stringWithFormat:@"Script with ID '%@' does not exist", r[@"id"]]); return; }
+        }
+        for (NSDictionary *r in a) {
+            NSUInteger at = [list indexOfObjectPassingTest:^BOOL(NSDictionary *x, NSUInteger i, BOOL *stop) { return [x[@"id"] isEqual:r[@"id"]]; }];
+            if (at == NSNotFound) [list addObject:r];
+            else { NSMutableDictionary *m = [list[at] mutableCopy]; [m addEntriesFromDictionary:r]; list[at] = m; }
+        }
+    }
+    [self saveRegistered:e];
+    [self resyncRegisteredScripts];
+    ok(nil);
+}
+
+#pragma mark Context menus (chrome.contextMenus)
+
+- (void)menuOp:(NSString *)op ext:(FExt *)e args:(NSArray *)args ok:(void (^)(id))ok fail:(void (^)(NSString *))fail {
+    NSMutableArray *items = _menus[e.ident] ?: (_menus[e.ident] = [NSMutableArray array]);
+    id a0 = args.count ? args[0] : nil, a1 = args.count > 1 ? args[1] : nil;
+    NSUInteger (^find)(id) = ^NSUInteger(id ident) { return [items indexOfObjectPassingTest:^BOOL(NSDictionary *x, NSUInteger i, BOOL *stop) { return [x[@"id"] isEqual:ident]; }]; };
+    if ([op isEqualToString:@"contextMenus.create"]) {
+        NSMutableDictionary *p = [a0 isKindOfClass:NSDictionary.class] ? [a0 mutableCopy] : nil;
+        if (!p || !p[@"id"]) { fail(@"Invalid menu item"); return; }
+        if (find(p[@"id"]) != NSNotFound) { fail([NSString stringWithFormat:@"Cannot create item with duplicate id %@", p[@"id"]]); return; }
+        if (p[@"parentId"] && find(p[@"parentId"]) == NSNotFound) { fail([NSString stringWithFormat:@"Cannot find menu item with id %@", p[@"parentId"]]); return; }
+        [items addObject:p]; ok(p[@"id"]);
+    } else if ([op isEqualToString:@"contextMenus.update"]) {
+        NSUInteger i = find(a0); if (i == NSNotFound) { fail([NSString stringWithFormat:@"Cannot find menu item with id %@", a0]); return; }
+        if ([a1 isKindOfClass:NSDictionary.class]) [items[i] addEntriesFromDictionary:a1];
+        ok(nil);
+    } else if ([op isEqualToString:@"contextMenus.remove"]) {
+        if (find(a0) == NSNotFound) { fail([NSString stringWithFormat:@"Cannot find menu item with id %@", a0]); return; }
+        NSMutableSet *gone = [NSMutableSet setWithObject:a0];   // and everything under it
+        BOOL more = YES; while (more) { more = NO; for (NSDictionary *x in items) if (x[@"parentId"] && [gone containsObject:x[@"parentId"]] && ![gone containsObject:x[@"id"]]) { [gone addObject:x[@"id"]]; more = YES; } }
+        [items filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *x, NSDictionary *b) { return ![gone containsObject:x[@"id"]]; }]];
+        ok(nil);
+    } else if ([op isEqualToString:@"contextMenus.removeAll"]) { [items removeAllObjects]; ok(nil); }
+    else fail([@"Flint doesn't support " stringByAppendingString:op]);
+}
+
+static BOOL MenuPatternsMatch(id patterns, NSString *url) {
+    if (![patterns isKindOfClass:NSArray.class] || ![patterns count]) return YES;
+    if (!url.length) return NO;
+    for (NSString *p in patterns) {
+        if (![p isKindOfClass:NSString.class]) continue;
+        if ([p isEqualToString:@"<all_urls>"]) { if ([url hasPrefix:@"http"] || [url hasPrefix:@"file:"]) return YES; continue; }
+        NSRegularExpression *rx = [NSRegularExpression regularExpressionWithPattern:@"^(\\*|https?|file|ftp|wss?)://([^/]*)(/.*)$" options:0 error:nil];
+        NSTextCheckingResult *m = [rx firstMatchInString:p options:0 range:NSMakeRange(0, p.length)]; if (!m) continue;
+        NSString *scheme = [p substringWithRange:[m rangeAtIndex:1]], *host = [p substringWithRange:[m rangeAtIndex:2]], *path = [p substringWithRange:[m rangeAtIndex:3]];
+        NSString *(^esc)(NSString *) = ^NSString *(NSString *s) { return [NSRegularExpression escapedPatternForString:s]; };
+        NSString *sx = [scheme isEqualToString:@"*"] ? @"(https?|wss?)" : esc(scheme);
+        NSString *hx = [host isEqualToString:@"*"] ? @"[^/]*" : [host hasPrefix:@"*."] ? [@"([^/]*\\.)?" stringByAppendingString:esc([host substringFromIndex:2])] : esc(host);
+        NSString *px = [esc(path) stringByReplacingOccurrencesOfString:@"\\*" withString:@".*"];
+        NSRegularExpression *full = [NSRegularExpression regularExpressionWithPattern:[NSString stringWithFormat:@"^%@://%@(:\\d+)?%@$", sx, hx, px] options:0 error:nil];
+        if ([full firstMatchInString:url options:0 range:NSMakeRange(0, url.length)]) return YES;
+    }
+    return NO;
+}
+
+// Add every extension's items that apply to what was right-clicked. One item shows as itself; several go
+// under the extension's name, as in Chrome.
+- (void)addMenuItemsTo:(NSMenu *)menu context:(NSDictionary *)c pageURL:(NSString *)page view:(WKWebView *)v {
+    NSString *(^str)(NSString *) = ^NSString *(NSString *k) { id x = c[k]; return [x isKindOfClass:NSString.class] && [x length] ? x : nil; };
+    NSString *link = str(@"link"), *image = str(@"image"), *video = str(@"video"), *sel = str(@"selection");
+    BOOL editable = [c[@"editable"] boolValue];
+    NSMutableSet *here = [NSMutableSet setWithObject:@"all"];
+    if (link) [here addObject:@"link"];
+    if (image) [here addObject:@"image"];
+    if (video) { [here addObject:@"video"]; [here addObject:@"audio"]; }
+    if (sel) [here addObject:@"selection"];
+    if (editable) [here addObject:@"editable"];
+    if (!link && !image && !video && !sel && !editable) [here addObject:@"page"];
+    VTab *tab = TabForView(v);
+    BOOL first = YES;
+    for (FExt *e in self.extensions) {
+        NSArray *items = _menus[e.ident]; if (!items.count) continue;
+        BOOL (^applies)(NSDictionary *) = ^BOOL(NSDictionary *x) {
+            if ([x[@"visible"] isEqual:@NO]) return NO;
+            NSArray *ctx = [x[@"contexts"] isKindOfClass:NSArray.class] ? x[@"contexts"] : @[@"page"];
+            BOOL hit = NO; for (NSString *k in ctx) if ([here containsObject:k]) hit = YES;
+            if (!hit) return NO;
+            if (!MenuPatternsMatch(x[@"documentUrlPatterns"], page)) return NO;
+            NSString *target = link ?: image ?: video;
+            if (x[@"targetUrlPatterns"] && target && !MenuPatternsMatch(x[@"targetUrlPatterns"], target)) return NO;
+            return YES;
+        };
+        NSMenuItem *(^build)(NSDictionary *) = nil;
+        __block __weak NSMenuItem *(^weakBuild)(NSDictionary *);
+        build = ^NSMenuItem *(NSDictionary *x) {
+            if ([x[@"type"] isEqual:@"separator"]) return NSMenuItem.separatorItem;
+            NSString *t = [x[@"title"] isKindOfClass:NSString.class] ? x[@"title"] : e.name;
+            if (sel) t = [t stringByReplacingOccurrencesOfString:@"%s" withString:sel.length > 30 ? [[sel substringToIndex:29] stringByAppendingString:@"…"] : sel];
+            NSMenuItem *it = [[NSMenuItem alloc] initWithTitle:t action:@selector(extMenuClicked:) keyEquivalent:@""];
+            it.target = self; it.enabled = ![x[@"enabled"] isEqual:@NO];
+            if ([x[@"type"] isEqual:@"checkbox"] || [x[@"type"] isEqual:@"radio"]) it.state = [x[@"checked"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+            NSMutableDictionary *info = [@{@"menuItemId": x[@"id"], @"editable": @(editable)} mutableCopy];
+            if (x[@"parentId"]) info[@"parentMenuItemId"] = x[@"parentId"];
+            if (page) { info[@"pageUrl"] = page; info[@"frameUrl"] = page; }
+            if (link) info[@"linkUrl"] = link;
+            if (image) { info[@"srcUrl"] = image; info[@"mediaType"] = @"image"; }
+            else if (video) { info[@"srcUrl"] = video; info[@"mediaType"] = @"video"; }
+            if (sel) info[@"selectionText"] = sel;
+            it.representedObject = @{@"ext": e.ident, @"item": x, @"info": info, @"tab": tab ? TabInfo(tab) : @{}};
+            NSMutableArray *kids = [NSMutableArray array];
+            for (NSDictionary *k in items) if ([k[@"parentId"] isEqual:x[@"id"]] && applies(k)) [kids addObject:k];
+            if (kids.count) {
+                NSMenu *sub = [[NSMenu alloc] initWithTitle:t];
+                for (NSDictionary *k in kids) [sub addItem:weakBuild(k)];
+                it.submenu = sub; it.action = nil;
+            }
+            return it;
+        };
+        weakBuild = build;
+        NSMutableArray *top = [NSMutableArray array];
+        for (NSDictionary *x in items) if (!x[@"parentId"] && applies(x)) [top addObject:x];
+        if (!top.count) continue;
+        if (first) { [menu addItem:NSMenuItem.separatorItem]; first = NO; }
+        NSImage *icon = [self iconFor:e]; if (icon) { icon = [icon copy]; icon.size = NSMakeSize(16, 16); }
+        if (top.count == 1) { NSMenuItem *it = build(top[0]); if (!it.isSeparatorItem) it.image = icon; [menu addItem:it]; }
+        else {
+            NSMenuItem *group = [[NSMenuItem alloc] initWithTitle:e.name action:nil keyEquivalent:@""];
+            group.image = icon;
+            NSMenu *sub = [[NSMenu alloc] initWithTitle:e.name];
+            for (NSDictionary *x in top) [sub addItem:build(x)];
+            group.submenu = sub;
+            [menu addItem:group];
+        }
+    }
+}
+
+- (void)extMenuClicked:(NSMenuItem *)it {
+    NSDictionary *r = it.representedObject; FExt *e = _exts[r[@"ext"] ?: @""]; if (!e) return;
+    NSMutableDictionary *item = nil;
+    for (NSMutableDictionary *x in _menus[e.ident]) if ([x[@"id"] isEqual:r[@"item"][@"id"]]) item = x;
+    NSMutableDictionary *info = [r[@"info"] mutableCopy];
+    if ([item[@"type"] isEqual:@"checkbox"]) { BOOL was = [item[@"checked"] boolValue]; item[@"checked"] = @(!was); info[@"wasChecked"] = @(was); info[@"checked"] = @(!was); }
+    else if ([item[@"type"] isEqual:@"radio"]) {   // one of its group (same parent) is on
+        BOOL was = [item[@"checked"] boolValue];
+        for (NSMutableDictionary *x in _menus[e.ident]) if ([x[@"type"] isEqual:@"radio"] && ((!x[@"parentId"] && !item[@"parentId"]) || [x[@"parentId"] isEqual:item[@"parentId"]])) x[@"checked"] = @NO;
+        item[@"checked"] = @YES; info[@"wasChecked"] = @(was); info[@"checked"] = @YES;
+    }
+    [self toBackground:e body:@"return globalThis.__flintMenuClicked ? __flintMenuClicked(info, tab) : false" args:@{@"info": info, @"tab": r[@"tab"] ?: @{}} done:nil];
 }
 
 #pragma mark Background pages
@@ -4824,8 +5944,8 @@ static double ProcessCPUSeconds(pid_t pid) {
     NSDictionary *bg = e.manifest[@"background"];
     NSMutableString *h = [NSMutableString stringWithString:@"<!doctype html><meta charset=utf-8><title>background</title>\n"];
     if ([bg[@"service_worker"] isKindOfClass:NSString.class])
-        [h appendFormat:@"<script src=\"/%@\"%@></script>\n", bg[@"service_worker"], [bg[@"type"] isEqual:@"module"] ? @" type=\"module\"" : @""];
-    for (NSString *s in bg[@"scripts"] ?: @[]) [h appendFormat:@"<script src=\"/%@\"></script>\n", s];
+        [h appendFormat:@"<script src=\"/%@\"%@></script>\n", [bg[@"service_worker"] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]], [bg[@"type"] isEqual:@"module"] ? @" type=\"module\"" : @""];
+    for (NSString *s in bg[@"scripts"] ?: @[]) [h appendFormat:@"<script src=\"/%@\"></script>\n", [s stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]]];
     if ([bg[@"page"] isKindOfClass:NSString.class]) {
         NSString *page = [NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:bg[@"page"]] encoding:NSUTF8StringEncoding error:nil];
         if (page) return [page dataUsingEncoding:NSUTF8StringEncoding];
@@ -4872,7 +5992,7 @@ static double ProcessCPUSeconds(pid_t pid) {
     WKSecurityOrigin *o = m.frameInfo.securityOrigin;
     s[@"origin"] = o.port ? [NSString stringWithFormat:@"%@://%@:%ld", o.protocol, o.host, (long)o.port] : [NSString stringWithFormat:@"%@://%@", o.protocol, o.host];
     VTab *t = TabForView(m.webView);
-    if (t) { s[@"tab"] = TabInfo(t); s[@"frameId"] = m.frameInfo.isMainFrame ? @0 : @1; }
+    if (t) { s[@"tab"] = TabInfo(t); s[@"frameId"] = FrameIDFor(m.frameInfo); }
     return s;
 }
 
@@ -4889,6 +6009,7 @@ static double ProcessCPUSeconds(pid_t pid) {
         reply(NSNull.null, nil); return;
     }
     WKContentWorld *world = m.world;
+    RememberFrame(m.webView, m.frameInfo);
     BOOL fromPage = world == WKContentWorld.pageWorld;
     NSString *proto = m.frameInfo.securityOrigin.protocol;
     // who may call: the extension's own pages, its content world, and its externally_connectable sites
@@ -4975,10 +6096,17 @@ static double ProcessCPUSeconds(pid_t pid) {
         if (!t.web.web) { fail(@"Could not establish connection. Receiving end does not exist."); return; }
         NSMutableDictionary *sender = [@{@"id": e.ident} mutableCopy];
         if (m.frameInfo.request.URL) sender[@"url"] = m.frameInfo.request.URL.absoluteString;
-        [self call:@"return await __flintOnMessage(msg, sender, false)" args:@{@"msg": arg(1) ?: NSNull.null, @"sender": sender} view:t.web.web world:e.world frame:nil
+        // options.frameId: one frame of the tab (one that has talked to the extension), otherwise the page
+        NSDictionary *opts = [arg(2) isKindOfClass:NSDictionary.class] ? arg(2) : nil;
+        WKFrameInfo *fi = nil;
+        if ([opts[@"frameId"] isKindOfClass:NSNumber.class] && [opts[@"frameId"] longLongValue] != 0) { fi = [gFrames objectForKey:t.web.web][opts[@"frameId"]]; if (!fi) { fail(@"Could not establish connection. Receiving end does not exist."); return; } }
+        [self call:@"return await __flintOnMessage(msg, sender, false)" args:@{@"msg": arg(1) ?: NSNull.null, @"sender": sender} view:t.web.web world:e.world frame:fi
               done:^(id r, NSError *err) { if (err) fail(@"Could not establish connection. Receiving end does not exist."); else ok(r); }];
     }
-    else if ([op isEqualToString:@"scripting.executeScript"] || [op isEqualToString:@"scripting.insertCSS"]) [self scripting:op ext:e details:arg(0) ok:ok fail:fail];
+    else if ([op isEqualToString:@"scripting.executeScript"] || [op isEqualToString:@"scripting.insertCSS"] || [op isEqualToString:@"scripting.removeCSS"]) [self scripting:op ext:e details:arg(0) ok:ok fail:fail];
+    else if (([op hasPrefix:@"scripting."] && [op hasSuffix:@"ContentScripts"]) || [op hasPrefix:@"userScripts."]) [self registeredOp:op ext:e arg:arg(0) ok:ok fail:fail];
+    else if ([op hasPrefix:@"dnr."]) [FDNR.shared op:op ext:e.ident args:args reply:^(id r, NSString *err) { if (err) fail(err); else ok(r); }];
+    else if ([op hasPrefix:@"contextMenus."]) [self menuOp:op ext:e args:args ok:ok fail:fail];
     else if ([op isEqualToString:@"action.openPopup"]) { [self openPopup:e from:nil]; ok(nil); }
     else if ([op isEqualToString:@"runtime.openOptionsPage"]) {
         [self openOptions:e];
@@ -5042,28 +6170,58 @@ static double ProcessCPUSeconds(pid_t pid) {
     WKWebView *v = t.web.web;
     if (!v) { fail(@"No tab with id"); return; }
     WKContentWorld *w = [d[@"world"] isEqual:@"MAIN"] ? WKContentWorld.pageWorld : e.world;
+    NSArray *frames = TargetFrames(v, [d[@"target"] isKindOfClass:NSDictionary.class] ? d[@"target"] : @{});
+    if (!frames.count) { fail(@"No frame with id"); return; }
     NSMutableString *code = [NSMutableString string];
-    if ([op isEqualToString:@"scripting.insertCSS"]) {
-        NSMutableString *css = [NSMutableString stringWithString:[d[@"css"] isKindOfClass:NSString.class] ? d[@"css"] : @""];
-        for (NSString *f in [d[@"files"] isKindOfClass:NSArray.class] ? d[@"files"] : @[]) [css appendString:[NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil] ?: @""];
-        [code appendString:@"const s = document.createElement('style'); s.textContent = css; (document.head || document.documentElement).appendChild(s); return null;"];
-        [v callAsyncJavaScript:code arguments:@{@"css": css} inFrame:nil inContentWorld:w completionHandler:^(id r, NSError *err) { ok(nil); }];
-        return;
-    }
-    if ([d[@"func"] isKindOfClass:NSString.class]) {
-        [code appendFormat:@"return await (%@)(...args);", d[@"func"]];
+    NSDictionary *jsArgs;
+    BOOL css = [op isEqualToString:@"scripting.insertCSS"] || [op isEqualToString:@"scripting.removeCSS"];
+    if (css) {
+        NSMutableString *text = [NSMutableString stringWithString:[d[@"css"] isKindOfClass:NSString.class] ? d[@"css"] : @""];
+        for (NSString *f in [d[@"files"] isKindOfClass:NSArray.class] ? d[@"files"] : @[]) [text appendString:[NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil] ?: @""];
+        // each inserted sheet is labelled with a hash of its text, so the same text can be removed again
+        NSData *bytes = [text dataUsingEncoding:NSUTF8StringEncoding]; unsigned char h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(bytes.bytes, (CC_LONG)bytes.length, h);
+        NSMutableString *key = [NSMutableString stringWithString:e.ident]; for (int i = 0; i < 8; i++) [key appendFormat:@"%02x", h[i]];
+        if ([op isEqualToString:@"scripting.removeCSS"])
+            [code appendString:@"for (const s of document.querySelectorAll('style[data-flint-css]')) if (s.dataset.flintCss === key) { s.remove(); break; } return null;"];
+        else [code appendString:@"const s = document.createElement('style'); s.dataset.flintCss = key; s.textContent = css; (document.head || document.documentElement).appendChild(s); return null;"];
+        jsArgs = @{@"css": text, @"key": key};
+        w = WKContentWorld.pageWorld;   // a style is part of the page whichever world adds it
     } else {
-        for (NSString *f in [d[@"files"] isKindOfClass:NSArray.class] ? d[@"files"] : @[]) {
-            NSString *t2 = [NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil];
-            if (t2) [code appendFormat:@"%@\n;", t2];
+        if ([d[@"func"] isKindOfClass:NSString.class]) [code appendFormat:@"return await (%@)(...args);", d[@"func"]];
+        else {
+            for (NSString *f in [d[@"files"] isKindOfClass:NSArray.class] ? d[@"files"] : @[]) {
+                NSString *t2 = [NSString stringWithContentsOfFile:[e.dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil];
+                if (t2) [code appendFormat:@"%@\n;", t2];
+            }
+            // run as the body of an injected function: WebKit injects it like a user script, so the page's CSP doesn't apply
+            [code appendString:@"\nreturn null;"];
         }
-        // run as the body of an injected function: WebKit injects it like a user script, so the page's CSP doesn't apply
-        [code appendString:@"\nreturn null;"];
+        jsArgs = @{@"args": [d[@"args"] isKindOfClass:NSArray.class] ? d[@"args"] : @[]};
     }
-    [v callAsyncJavaScript:code arguments:@{@"args": [d[@"args"] isKindOfClass:NSArray.class] ? d[@"args"] : @[]} inFrame:nil inContentWorld:w completionHandler:^(id r, NSError *err) {
-        if (err) DLog(@"executeScript error: %@", err.userInfo[@"WKJavaScriptExceptionMessage"] ?: err);
-        ok(@[@{@"frameId": @0, @"result": r ?: NSNull.null, @"documentId": @"main"}]);
-    }];
+    NSString *shim = w == e.world ? [[self shimFor:@"content" ext:e] stringByAppendingString:@";true"] : nil;
+    NSMutableArray *results = [NSMutableArray array];
+    __block NSUInteger pending = frames.count;
+    for (NSArray *fr in frames) {
+        WKFrameInfo *fi = fr[1] == NSNull.null ? nil : fr[1];
+        NSNumber *fid = fr[0];
+        void (^finished)(id) = ^(id r) {
+            [results addObject:@{@"frameId": fid, @"result": r ?: NSNull.null, @"documentId": fid.longLongValue ? fid.stringValue : @"main"}];
+            if (--pending == 0) ok(css ? nil : results);
+        };
+        void (^run)(void) = ^{
+            [v callAsyncJavaScript:code arguments:jsArgs inFrame:fi inContentWorld:w completionHandler:^(id r, NSError *err) {
+                if (err && !css) DLog(@"executeScript error: %@", err.userInfo[@"WKJavaScriptExceptionMessage"] ?: err.localizedDescription);
+                finished(r);
+            }];
+        };
+        if (!shim) { run(); continue; }
+        // the extension's own world must have chrome.* before its code runs (a page loaded before the extension, or one
+        // its content scripts don't match, has a bare world): give it the API first, as Chrome always does
+        [v evaluateJavaScript:@"!!globalThis.__flintExtLoaded" inFrame:fi inContentWorld:w completionHandler:^(id has, NSError *err) {
+            if ([has boolValue]) { run(); return; }
+            [v evaluateJavaScript:shim inFrame:fi inContentWorld:w completionHandler:^(id r2, NSError *e2) { run(); }];
+        }];
+    }
 }
 
 - (void)fetch:(NSDictionary *)r ok:(void (^)(id))ok {
@@ -5222,6 +6380,10 @@ static double ProcessCPUSeconds(pid_t pid) {
 
 - (void)evalIn:(NSString *)where code:(NSString *)code {
     FExt *e = self.extensions.firstObject;
+    if ([code hasPrefix:@"@"]) {   // "@<extension id> code": a particular extension
+        NSRange sp = [code rangeOfString:@" "];
+        if (sp.location != NSNotFound) { FExt *x = _exts[[code substringWithRange:NSMakeRange(1, sp.location - 1)]]; if (x) e = x; code = [code substringFromIndex:sp.location + 1]; }
+    }
     WKWebView *v = [where isEqualToString:@"bg"] ? e.background : (WKWebView *)_popover.contentViewController.view;
     if (![v isKindOfClass:WKWebView.class]) { CtlOut([where stringByAppendingString:@" not open"]); return; }
     [v callAsyncJavaScript:[NSString stringWithFormat:@"const r = await (%@); return typeof r === 'object' ? JSON.stringify(r) : String(r);", code]
@@ -5249,6 +6411,27 @@ static double ProcessCPUSeconds(pid_t pid) {
     return ([ui isKindOfClass:NSDictionary.class] && ui[@"page"]) || [e.manifest[@"options_page"] isKindOfClass:NSString.class];
 }
 
+// Popups take the size of their content (Chrome: between 25×25 and 800×600). The page is measured at its natural
+// size: the root laid out at max-content, so an element that fills the width doesn't fill the old window instead.
+static NSString *const kPopupMeasureJS = @"(()=>{const d=document.documentElement,b=document.body;if(!b)return null;"
+    "const sw=d.style.width,sh=d.style.height,bw=b.style.width,bh=b.style.height;"
+    "d.style.width='max-content';d.style.height='max-content';b.style.height='auto';"
+    "const r=d.getBoundingClientRect();let w=Math.ceil(r.width),h=Math.ceil(Math.max(r.height,b.scrollHeight));"
+    "d.style.width=sw;d.style.height=sh;b.style.width=bw;b.style.height=bh;return[w,h]})()";
+- (void)fitPopup:(WKWebView *)v {
+    if (!_popover || _popover.contentViewController.view != v) return;
+    [v evaluateJavaScript:kPopupMeasureJS completionHandler:^(id r, NSError *err) {
+        if (![r isKindOfClass:NSArray.class] || [r count] != 2 || self->_popover.contentViewController.view != v) return;
+        CGFloat w = MIN(800, MAX(25, [r[0] doubleValue])), h = MIN(600, MAX(25, [r[1] doubleValue]));
+        if (fabs(w - self->_popover.contentSize.width) > 1 || fabs(h - self->_popover.contentSize.height) > 1) self->_popover.contentSize = NSMakeSize(w, h);
+    }];
+}
+- (void)webView:(WKWebView *)v didFinishNavigation:(WKNavigation *)n {
+    [self fitPopup:v];
+    // pages that build themselves after loading settle a moment later
+    for (NSNumber *ms in @[@150, @500, @1200]) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms.longLongValue * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [self fitPopup:v]; });
+}
+
 - (void)openPopup:(FExt *)e from:(NSView *)anchor {
     if (!e) e = self.extensions.firstObject;
     NSDictionary *action = e.manifest[@"action"] ?: e.manifest[@"browser_action"];
@@ -5265,6 +6448,7 @@ static double ProcessCPUSeconds(pid_t pid) {
     WKWebView *v = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 380, 600) configuration:FlintConfig()];
     if (@available(macOS 13.3, *)) v.inspectable = YES;
     @try { [v setValue:@NO forKey:@"drawsBackground"]; } @catch (NSException *x) {}
+    v.navigationDelegate = self;   // sized to its content once it has loaded, as Chrome does
     [v loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"chrome-extension://%@/%@", e.ident, page]]]];
     NSViewController *vc = [NSViewController new]; vc.view = v;
     _popover = [NSPopover new];
@@ -5450,7 +6634,6 @@ static NSArray *ImportTree(NSString *source, NSString **err) {
     return nil;
 }
 
-static void BookmarksChanged(void) { for (VWindow *w in gWindows) { [w.bookmarksBar reload]; [w refreshChrome]; } }
 
 static NSMutableDictionary<NSString *, NSDictionary *> *gReader;   // reader articles, by one-time id (in memory only)
 
@@ -5646,7 +6829,7 @@ static NSURL *WebURL(id s) {
             if (r != NSAlertFirstButtonReturn) { reply(@NO, nil); return; }
             if (since <= 0) [VHistory.shared clear]; else [VHistory.shared removeSince:since];
             if (a.suppressionButton.state == NSControlStateValueOn)
-                [WKWebsiteDataStore.defaultDataStore removeDataOfTypes:WKWebsiteDataStore.allWebsiteDataTypes modifiedSince:[NSDate dateWithTimeIntervalSince1970:since] completionHandler:^{}];
+                [ProfileStore(gWin && !gWin.isPrivate ? gWin.profile : @"") removeDataOfTypes:WKWebsiteDataStore.allWebsiteDataTypes modifiedSince:[NSDate dateWithTimeIntervalSince1970:since] completionHandler:^{}];
             [gWin showToast:@"History cleared"];
             reply(@YES, nil);
         }];
@@ -5823,6 +7006,9 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
     if (!(self = [super initWithWindow:w])) return nil;
     _isPrivate = priv;
     if (priv) _privateStore = WKWebsiteDataStore.nonPersistentDataStore;
+    NSString *pid = [state[@"profile"] isKindOfClass:NSString.class] ? state[@"profile"] : @"";
+    BOOL known = NO; for (NSDictionary *p in Profiles()) if ([p[@"id"] isEqualToString:pid]) known = YES;
+    _profile = priv || !known ? @"" : [pid copy];   // a deleted profile's window comes back in the first profile
     VWindow *previous = gWin;
     BOOL firstNormal = !priv && ![gWindows filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"isPrivate == NO"]].count;
     if (!gWindows) gWindows = [NSMutableArray array];
@@ -5833,7 +7019,7 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
     w.appearance = ThemeAppearance();
     w.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
     w.delegate = self;
-    w.title = priv ? @"Flint · Private" : @"Flint";
+    w.title = priv ? @"Flint · Private" : _profile.length ? [@"Flint · " stringByAppendingString:ProfileName(_profile)] : @"Flint";
     // An empty unified-compact toolbar gives a native ~40pt title bar: macOS itself centres the
     // traffic lights and keeps the height right on every screen, so our bar is never clipped.
     NSToolbar *tb = [[NSToolbar alloc] initWithIdentifier:@"FlintToolbar"];
@@ -5898,10 +7084,56 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
 
 #pragma mark Pages
 
+#pragma mark Profiles
+
+// The window for a profile: the frontmost one already open, or a new one.
+static VWindow *OpenProfileWindow(NSString *pid) {
+    for (VWindow *w in gWindows.reverseObjectEnumerator) if (!w.isPrivate && [w.profile isEqualToString:pid ?: @""]) { [w.window makeKeyAndOrderFront:nil]; return w; }
+    VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"profile": pid ?: @""}];
+    [w showWindow:nil]; [w windowDidResize:nil];
+    return w;
+}
+static NSString *CreateProfile(NSString *name) {
+    NSString *pid = NSUUID.UUID.UUIDString;
+    NSMutableArray *a = [[Defaults() arrayForKey:kProfiles] ?: @[] mutableCopy];
+    [a addObject:@{@"id": pid, @"name": name.length ? name : [NSString stringWithFormat:@"Profile %lu", (unsigned long)a.count + 2]}];
+    [Defaults() setObject:a forKey:kProfiles];
+    for (VWindow *w in gWindows) [w.toolbar layoutBar];
+    return pid;
+}
+- (void)profileMenu:(id)s {
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
+    for (NSDictionary *p in Profiles()) {
+        NSMenuItem *i = [m addItemWithTitle:p[@"name"] action:@selector(openProfile:) keyEquivalent:@""];
+        i.target = self; i.representedObject = p[@"id"]; i.state = [p[@"id"] isEqualToString:self.profile] && !self.isPrivate ? NSControlStateValueOn : NSControlStateValueOff;
+        i.image = Symbol(@"person.crop.circle", 13, NSFontWeightRegular);
+    }
+    [m addItem:NSMenuItem.separatorItem];
+    [m addItemWithTitle:@"New Profile…" action:@selector(newProfile:) keyEquivalent:@""].target = self;
+    [m addItemWithTitle:@"Manage Profiles…" action:@selector(manageProfiles:) keyEquivalent:@""].target = self;
+    NSView *at = [s isKindOfClass:NSView.class] ? s : self.toolbar;
+    PopMenu(m, NSMakePoint(0, NSHeight(at.bounds) + 4), at);
+}
+- (void)openProfile:(NSMenuItem *)i { OpenProfileWindow(i.representedObject); }
+- (void)manageProfiles:(id)s { [self showSettingsSection:@"profiles"]; }
+- (void)newProfile:(id)s {
+    NSAlert *a = [NSAlert new]; a.messageText = @"New profile";
+    a.informativeText = @"A profile keeps its own sign-ins, cookies, history and tabs. Bookmarks and extensions are shared.";
+    NSTextField *f = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)]; f.placeholderString = @"Name, e.g. Work";
+    a.accessoryView = f; [a addButtonWithTitle:@"Create"]; [a addButtonWithTitle:@"Cancel"];
+    a.window.initialFirstResponder = f;
+    [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+        if (r != NSAlertFirstButtonReturn) return;
+        OpenProfileWindow(CreateProfile(Trim(f.stringValue)));
+    }];
+}
+
+- (WKWebViewConfiguration *)pageConfig { return self.isPrivate ? PrivateConfig(self.privateStore) : ProfileConfig(self.profile); }
+
 - (VPage *)makePage:(VTab *)t {
     t.owner = self;
-    VPage *p = self.isPrivate ? [[VPage alloc] initWithFrame:self.content.bounds web:[[FWebView alloc] initWithFrame:self.content.bounds configuration:PrivateConfig(self.privateStore)]]
-                              : [[VPage alloc] initWithFrame:self.content.bounds];
+    VPage *p = (self.isPrivate || self.profile.length) ? [[VPage alloc] initWithFrame:self.content.bounds web:[[FWebView alloc] initWithFrame:self.content.bounds configuration:[self pageConfig]]]
+                                                       : [[VPage alloc] initWithFrame:self.content.bounds];
     p.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     p.tab = t;
     t.web = p; t.isHome = NO;
@@ -6124,7 +7356,7 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
         if (at > 0 && t.mediaKey.length) { d[@"mediaTime"] = @(at); d[@"mediaKey"] = t.mediaKey; }
         [a addObject:d];
     }
-    return @{@"tabs": a, @"current": @(self.current ? (NSInteger)[self.tabs indexOfObject:self.current] : 0), @"frame": NSStringFromRect(self.window.frame)};
+    return @{@"tabs": a, @"current": @(self.current ? (NSInteger)[self.tabs indexOfObject:self.current] : 0), @"frame": NSStringFromRect(self.window.frame), @"profile": self.profile ?: @""};
 }
 // Every normal window is saved (the first as the main one); private windows never are.
 - (void)saveSession {
@@ -6175,7 +7407,7 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
     if (!t || ![self.tabs containsObject:t]) return;
     if (self.tabs.count == 1) { [self showToast:@"This is the only tab in the window"]; return; }
     if ([self.splitPair containsObject:t]) { [self endSplit]; [self placePages]; }
-    VWindow *nw = [[VWindow alloc] initPrivate:self.isPrivate state:@{@"empty": @YES}];
+    VWindow *nw = [[VWindow alloc] initPrivate:self.isPrivate state:@{@"empty": @YES, @"profile": self.profile ?: @""}];
     NSUInteger i = [self.tabs indexOfObject:t];
     [self.tabs removeObjectAtIndex:i];
     if (t == self.current) { self.current = nil; [self selectTab:self.tabs[MIN(i, self.tabs.count - 1)]]; }
@@ -6500,7 +7732,7 @@ static NSArray *MatchCommands(NSString *q, NSUInteger limit) {
             if (out.count >= 3) break;
         }
     }
-    for (NSDictionary *e in [VHistory.shared match:text limit:8]) {
+    for (NSDictionary *e in [[VHistory forProfile:self.profile] match:text limit:8]) {
         if ([seen containsObject:e[@"u"]]) continue;
         NSURL *eu = [NSURL URLWithString:e[@"u"]];
         NSString *bare = [[eu.host ?: @"" stringByAppendingString:eu.path ?: @""] stringByReplacingOccurrencesOfString:@"www." withString:@""];
@@ -6592,7 +7824,7 @@ static NSArray *MatchCommands(NSString *q, NSUInteger limit) {
     if (typed.length <= self.lastTyped || [typed containsString:@" "] || typed.length < 2) { self.lastTyped = typed.length; return; }
     self.lastTyped = typed.length;
     NSString *q = typed.lowercaseString;
-    for (NSDictionary *e in [VHistory.shared match:typed limit:6]) {
+    for (NSDictionary *e in [[VHistory forProfile:self.profile] match:typed limit:6]) {
         NSString *h = HostOf([NSURL URLWithString:e[@"u"]]);
         if ([h hasPrefix:q] && h.length > q.length) {
             self.completion = h;
@@ -6754,7 +7986,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 }
 - (void)deleteBookmark:(NSMenuItem *)m {
     NSMutableDictionary *n = m.representedObject;
-    RemoveNode(VBookmarks.shared.bar, n);
+    BMRemove(VBookmarks.shared.bar, n);
     [VBookmarks.shared save]; [self.bookmarksBar reload]; [self refreshChrome];
 }
 
@@ -6813,7 +8045,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     al.informativeText = @"You'll be signed out of this site."; [al addButtonWithTitle:@"Clear"]; [al addButtonWithTitle:@"Cancel"];
     [al beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
         if (r != NSAlertFirstButtonReturn) return;
-        WKWebsiteDataStore *ds = WKWebsiteDataStore.defaultDataStore;
+        WKWebsiteDataStore *ds = self.isPrivate ? self.privateStore : ProfileStore(self.profile);
         [ds fetchDataRecordsOfTypes:WKWebsiteDataStore.allWebsiteDataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *recs) {
             NSMutableArray *mine = [NSMutableArray array];
             for (WKWebsiteDataRecord *rec in recs) if ([rec.displayName isEqualToString:h] || [h hasSuffix:[@"." stringByAppendingString:rec.displayName]] || [rec.displayName hasSuffix:[@"." stringByAppendingString:h]]) [mine addObject:rec];
@@ -6885,7 +8117,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     [m addItem:NSMenuItem.separatorItem];
     NSMenuItem *hist = [m addItemWithTitle:@"History" action:nil keyEquivalent:@""];
     NSMenu *hm = [[NSMenu alloc] initWithTitle:@"History"];
-    for (NSDictionary *e in [VHistory.shared recent:20]) {
+    for (NSDictionary *e in [[VHistory forProfile:self.profile] recent:20]) {
         NSString *title = [e[@"ti"] length] ? e[@"ti"] : e[@"u"];
         if (title.length > 60) title = [[title substringToIndex:59] stringByAppendingString:@"…"];
         NSMenuItem *i = [hm addItemWithTitle:title action:@selector(openBookmarkItem:) keyEquivalent:@""];
@@ -7006,7 +8238,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     [a addButtonWithTitle:@"Clear"]; [a addButtonWithTitle:@"Cancel"];
     [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
         if (r != NSAlertFirstButtonReturn) return;
-        [VHistory.shared clear];
+        [[VHistory forProfile:self.profile] clear];
         [self showToast:@"History cleared"];
     }];
 }
@@ -7146,7 +8378,7 @@ static NSString *ReaderExtractJS(void) {
     VButton *open = [VButton symbol:@"arrow.up.forward.square" size:13 tip:@"Open in tab" target:self action:@selector(adoptPeek:)]; open.tag = 1;
     VButton *close = [VButton symbol:@"xmark" size:11 tip:@"Close (esc)" target:self action:@selector(closePeek:)]; close.tag = 2;
     [card addSubview:open]; [card addSubview:close];
-    pk.web = [[FWebView alloc] initWithFrame:NSZeroRect configuration:self.isPrivate ? PrivateConfig(self.privateStore) : FlintConfig()];
+    pk.web = [[FWebView alloc] initWithFrame:NSZeroRect configuration:[self pageConfig]];
     pk.web.allowsBackForwardNavigationGestures = YES;
     if (@available(macOS 12.0, *)) pk.web.underPageBackgroundColor = vContentBg;
     [card addSubview:pk.web];
@@ -7830,6 +9062,13 @@ static void CtlOut(NSString *s) {
         }
         else if ([cmd isEqualToString:@"sidebar"]) { CGFloat wdt = arg.doubleValue; if (wdt >= 40 && wdt <= 420) { [Defaults() setDouble:wdt forKey:kSidebarW]; RelayoutAll(); } CtlOut([NSString stringWithFormat:@"sidebar %.0f", SidebarWidth()]); }
         else if ([cmd isEqualToString:@"bookmarksbar"]) { [Defaults() setBool:[arg isEqualToString:@"on"] forKey:kShowBookmarks]; RelayoutAll(); }
+        else if ([cmd isEqualToString:@"extinstall"]) {   // a Chrome Web Store link or extension id (takes effect at the next launch)
+            [FExtHost.shared installFromWebStore:arg done:^(NSString *name, NSString *err) { CtlOut([NSString stringWithFormat:@"extinstall %@ %@", name ?: @"-", err ?: @"ok"]); }];
+        }
+        else if ([cmd isEqualToString:@"rules"]) {
+            for (NSString *k in gExtRuleLists) CtlOut([NSString stringWithFormat:@"rules %@: %lu lists", k, (unsigned long)gExtRuleLists[k].count]);
+            CtlOut([NSString stringWithFormat:@"rules gUCC total lists attached: (blocker %lu)", (unsigned long)gRules.count]);
+        }
         else if ([cmd isEqualToString:@"media"]) {
             for (VTab *t in self.tabs) CtlOut([NSString stringWithFormat:@"media tab=%@ key=%@ time=%.0f saved=%.0f resume=%.0f web=%d", t.url ?: @"-", t.mediaKey ?: @"-", t.mediaTime, t.savedMedia, t.resumeAt, t.web != nil]);
             for (NSDictionary *d in [Defaults() dictionaryForKey:kTabsState][@"tabs"]) CtlOut([NSString stringWithFormat:@"media saved url=%@ key=%@ time=%@", d[@"url"], d[@"mediaKey"] ?: @"-", d[@"mediaTime"] ?: @"-"]);
@@ -8099,7 +9338,7 @@ static void RunBuildScript(NSString *stamp) {
     }];
     return NSTerminateLater;
 }
-- (void)applicationWillTerminate:(NSNotification *)n { [VGovernor stop]; if (!gQuitting) [self.win saveSession]; gQuitting = YES; [VHistory.shared performSelector:@selector(flush)]; }
+- (void)applicationWillTerminate:(NSNotification *)n { [VGovernor stop]; if (!gQuitting) [self.win saveSession]; gQuitting = YES; [VHistory flushAll]; }
 
 - (BOOL)application:(NSApplication *)a openFile:(NSString *)f { [gWin openURL:[NSURL fileURLWithPath:f] newTab:YES]; return YES; }
 - (void)application:(NSApplication *)a openURLs:(NSArray<NSURL *> *)urls { for (NSURL *u in urls) [gWin openURL:u newTab:YES]; }
@@ -8149,6 +9388,8 @@ static void RunBuildScript(NSString *stamp) {
     [self item:@"New Tab" action:@selector(newTabAction:) key:@"t" mods:C in:file target:nil];
     [self item:@"New Window" action:@selector(newWindow:) key:@"n" mods:C in:file target:self];
     [self item:@"New Private Window" action:@selector(newPrivateWindow:) key:@"n" mods:C | S in:file target:self];
+    NSMenuItem *profs = [file addItemWithTitle:@"Profiles" action:nil keyEquivalent:@""];
+    NSMenu *pm = [[NSMenu alloc] initWithTitle:@"Profiles"]; pm.delegate = self; profs.submenu = pm;   // filled in each time it opens
     [self item:@"Reopen Closed Tab" action:@selector(reopenClosed:) key:@"t" mods:C | S in:file target:nil];
     [self item:@"Open Location…" action:@selector(openLocation:) key:@"l" mods:C in:file target:nil];
     [self item:@"Open File…" action:@selector(openFile:) key:@"o" mods:C in:file target:nil];
@@ -8258,6 +9499,16 @@ static void RunBuildScript(NSString *stamp) {
 
 // The History menu, rebuilt as it opens: recently closed tabs, then the latest pages.
 - (void)menuNeedsUpdate:(NSMenu *)menu {
+    if ([menu.title isEqualToString:@"Profiles"]) {
+        [menu removeAllItems];
+        for (NSDictionary *p in Profiles()) {
+            NSMenuItem *i = [menu addItemWithTitle:p[@"name"] action:@selector(openProfileItem:) keyEquivalent:@""]; i.target = self; i.representedObject = p[@"id"];
+            i.state = gWin && !gWin.isPrivate && [gWin.profile isEqualToString:p[@"id"]] ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+        [menu addItem:NSMenuItem.separatorItem];
+        [menu addItemWithTitle:@"New Profile…" action:@selector(newProfileAction:) keyEquivalent:@""].target = self;
+        return;
+    }
     if (![menu.title isEqualToString:@"History"]) return;
     while (menu.numberOfItems && [menu itemAtIndex:menu.numberOfItems - 1].tag == 77) [menu removeItemAtIndex:menu.numberOfItems - 1];
     NSMenuItem *(^add)(NSString *, SEL, id, NSString *) = ^NSMenuItem *(NSString *t, SEL a, id obj, NSString *url) {
@@ -8281,7 +9532,10 @@ static void RunBuildScript(NSString *stamp) {
 }
 
 // New windows from the menu or the Dock.
-- (void)newWindow:(id)s { VWindow *w = [[VWindow alloc] initPrivate:NO state:@{}]; [w showWindow:nil]; [w windowDidResize:nil]; }
+// ⌘N opens a window in the profile you're using, as Chrome does
+- (void)newWindow:(id)s { VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"profile": gWin && !gWin.isPrivate ? gWin.profile ?: @"" : @""}]; [w showWindow:nil]; [w windowDidResize:nil]; }
+- (void)openProfileItem:(NSMenuItem *)i { OpenProfileWindow(i.representedObject); }
+- (void)newProfileAction:(id)s { [gWin newProfile:nil]; }
 - (void)newPrivateWindow:(id)s { VWindow *w = [[VWindow alloc] initPrivate:YES state:@{}]; [w showWindow:nil]; [w windowDidResize:nil]; }
 - (NSMenu *)applicationDockMenu:(NSApplication *)a {
     NSMenu *m = [NSMenu new];
@@ -8583,6 +9837,54 @@ static NSArray *SettingsSchema(VWindow *win) {
                     ^(NSInteger i) { [Defaults() setInteger:[limits[(NSUInteger)i] integerValue] forKey:kDLLimit]; }) ])
     ])];
 
+    // ── Profiles
+    NSMutableArray *profRows = [NSMutableArray array];
+    for (NSDictionary *p in Profiles()) {
+        NSString *pid = p[@"id"];
+        NSUInteger open = 0; for (VWindow *w in gWindows) if (!w.isPrivate && [w.profile isEqualToString:pid]) open++;
+        NSString *detail = [NSString stringWithFormat:@"%@%@", pid.length ? @"Its own sign-ins, cookies, history and tabs" : @"The first profile",
+                            open ? [NSString stringWithFormat:@" · %lu window%@ open", (unsigned long)open, open == 1 ? @"" : @"s"] : @""];
+        NSMutableDictionary *row = SButton([@"prof." stringByAppendingString:pid.length ? pid : @"main"], p[@"name"], detail, @"Rename…", ^(NSDictionary *a, void (^done)(NSString *)) {
+            if ([a[@"remove"] boolValue] && pid.length) {
+                BOOL others = NO; for (VWindow *w in gWindows) if (w.isPrivate || ![w.profile isEqualToString:pid]) others = YES;
+                if (!others) OpenProfileWindow(@"");   // never close Flint's last window
+                for (VWindow *w in gWindows.copy) if (!w.isPrivate && [w.profile isEqualToString:pid]) [w.window performClose:nil];
+                NSMutableArray *all = [[Defaults() arrayForKey:kProfiles] ?: @[] mutableCopy];
+                [all filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *x, NSDictionary *b) { return ![x[@"id"] isEqualToString:pid]; }]];
+                [Defaults() setObject:all forKey:kProfiles];
+                [NSFileManager.defaultManager removeItemAtPath:SupportFile([NSString stringWithFormat:@"history-%@.json", pid]) error:nil];
+                [gProfileStores removeObjectForKey:pid];
+                if (@available(macOS 14.0, *)) {   // its website data goes too (once its pages have closed)
+                    NSUUID *u = [[NSUUID alloc] initWithUUIDString:pid];
+                    if (u) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [WKWebsiteDataStore removeDataStoreForIdentifier:u completionHandler:^(NSError *e) { if (e) DLog(@"profile data not removed: %@", e.localizedDescription); }]; });
+                }
+                RelayoutAll(); done(@"Profile deleted"); return;
+            }
+            NSString *n = Trim([a[@"name"] description] ?: @""); if (!n.length) { done(@"Needs a name"); return; }
+            if (!pid.length) [Defaults() setObject:n forKey:kMainProfileName];
+            else {
+                NSMutableArray *all = [NSMutableArray array];
+                for (NSDictionary *x in [Defaults() arrayForKey:kProfiles] ?: @[]) [all addObject:[x[@"id"] isEqualToString:pid] ? @{@"id": pid, @"name": n} : x];
+                [Defaults() setObject:all forKey:kProfiles];
+            }
+            for (VWindow *w in gWindows) if (!w.isPrivate && [w.profile isEqualToString:pid]) w.window.title = pid.length ? [@"Flint · " stringByAppendingString:n] : @"Flint";
+            RelayoutAll(); done(@"Profile renamed");
+        });
+        row[@"prompt"] = @{@"title": @"Profile", @"text": pid.length ? @"Deleting a profile closes its windows and erases its sign-ins, cookies and history." : @"The first profile can be renamed but not deleted.",
+                           @"ok": @"Save", @"remove": pid.length ? @"Delete Profile" : @"", @"fields": @[@{@"name": @"name", @"placeholder": @"Name", @"value": p[@"name"]}]};
+        NSString *openId = [@"profopen." stringByAppendingString:pid.length ? pid : @"main"];
+        gSAct[openId] = ^(NSDictionary *a, void (^done)(NSString *)) { OpenProfileWindow(pid); done(nil); };
+        row[@"more"] = @[@{@"id": openId, @"label": @"Open"}];
+        [profRows addObject:row];
+    }
+    NSMutableDictionary *newProf = SButton(@"profNew", @"New profile", @"For work, study or anything you keep apart. Bookmarks and extensions are shared.", @"Add…", ^(NSDictionary *a, void (^done)(NSString *)) {
+        NSString *n = Trim([a[@"name"] description] ?: @"");
+        OpenProfileWindow(CreateProfile(n)); RelayoutAll(); done(@"Profile created");
+    });
+    newProf[@"prompt"] = @{@"title": @"New profile", @"text": @"A profile keeps its own sign-ins, cookies, history and tabs.", @"ok": @"Create", @"fields": @[@{@"name": @"name", @"placeholder": @"Name, e.g. Work"}]};
+    [S addObject:SSection(@"profiles", @"Profiles", @"Separate sign-ins, cookies, history and tabs, one window per profile. Switch from the badge beside the address bar.", @"person", @[
+        SGroup(@"Your profiles", profRows), SGroup(nil, @[ newProf ]) ])];
+
     // ── Bookmarks & Import
     NSMutableDictionary *helium = SButton(@"reimport", @"Helium", @"Replaces Flint's bookmarks with Helium's, including folders and icons.", @"Import…", ^(NSDictionary *a, void (^done)(NSString *)) {
         [NSFileManager.defaultManager removeItemAtPath:SupportFile(@"bookmarks.json") error:nil];
@@ -8660,7 +9962,7 @@ static void SettingsOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply
     }
     // cookies and website data, listed and removed from the page
     if ([op isEqualToString:@"settings.data"]) {
-        WKWebsiteDataStore *ds = WKWebsiteDataStore.defaultDataStore;
+        WKWebsiteDataStore *ds = ProfileStore(gWin && !gWin.isPrivate ? gWin.profile : @"");
         [ds fetchDataRecordsOfTypes:WKWebsiteDataStore.allWebsiteDataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *recs) {
             NSArray *remove = [b[@"remove"] isKindOfClass:NSArray.class] ? b[@"remove"] : nil;
             BOOL all = [b[@"all"] boolValue];
