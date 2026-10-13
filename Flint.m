@@ -91,6 +91,8 @@ static NSUserDefaults *Defaults(void) { return NSUserDefaults.standardUserDefaul
 // Toolbar customisation. Core buttons are on unless hidden; extras (home, reader…) are off unless added.
 static NSString *const kShowExtra     = @"shownToolbarButtons";
 static NSString *const kAddrWidth     = @"addressBarWidth";      // 0 full, 1 medium, 2 compact
+static NSString *const kShelfNoHover  = @"shelfNoHover";         // Monolith: the bottom edge doesn't bring the tabs up
+static NSString *const kShelfNoHint   = @"shelfNoHint";          // Monolith: no handle at the bottom of the page
 static NSString *const kExtPinned     = @"pinnedExtensions";     // ids; missing = everything pinned
 static NSArray<NSString *> *OptInButtons(void) { return @[@"home", @"newtab", @"reader", @"share", @"dlalways"]; }
 static BOOL ToolbarShows(NSString *key) {
@@ -497,9 +499,11 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)setSitePermission:(NSMenuItem *)m;
 - (NSMenu *)profilesMenu;
 - (void)clearSiteData:(NSMenuItem *)m;
+- (void)updateListsNow:(id)s;
 @end
 @interface VWindow (Panels)   // v4k_panels.m
 - (void)toggleLens:(id)s;
+- (void)showBookmarkPopup:(id)s;
 - (void)toggleSitePanel:(id)s;
 - (void)toggleShieldPanel:(id)s;
 - (void)showAddressPanel;
@@ -1846,7 +1850,7 @@ static NSString *gUpdateNotes;
     self.profileBtn.toolTip = @"Profiles"; self.profileBtn.hidden = YES; [self addSubview:self.profileBtn];
     VAddressField *f = [[VAddressField alloc] initWithFrame:NSZeroRect];
     f.bezeled = NO; f.bordered = NO; f.drawsBackground = NO; f.focusRingType = NSFocusRingTypeNone;
-    f.font = UIFont(13, NSFontWeightRegular); f.textColor = vText;
+    f.font = UIFont(12.5, NSFontWeightRegular); f.textColor = vText;
     f.cell.usesSingleLineMode = YES; f.cell.scrollable = YES; f.cell.lineBreakMode = NSLineBreakByTruncatingTail;
     f.alignment = NSTextAlignmentCenter;
     f.placeholderAttributedString = [[NSAttributedString alloc] initWithString:w.isPrivate ? @"Search privately or enter address" : @"Search or enter address"
@@ -1860,7 +1864,7 @@ static NSString *gUpdateNotes;
         VTab *ct = w.current;   // editing shows the whole address, left-aligned, ready to copy or change
         NSString *full = (ct.url && !ct.isHome && ![ct.url hasPrefix:@"flint://reader"]) ? ct.url : @"";
         NSMutableParagraphStyle *lp = [NSMutableParagraphStyle new]; lp.alignment = NSTextAlignmentLeft; lp.lineBreakMode = NSLineBreakByClipping;
-        NSDictionary *ta = @{NSFontAttributeName: UIFont(13, NSFontWeightRegular), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: lp};
+        NSDictionary *ta = @{NSFontAttributeName: UIFont(12.5, NSFontWeightRegular), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: lp};
         ws.field.alignment = NSTextAlignmentLeft;
         ws.field.attributedStringValue = [[NSAttributedString alloc] initWithString:full attributes:ta];
         ws.editing = YES; ws.needsDisplay = YES;
@@ -1902,35 +1906,45 @@ static NSString *gUpdateNotes;
 // Monolith: back/forward, the address, Lens and your profile float over the top of the page as capsules.
 // Everything between them belongs to the page (clicks pass straight through).
 - (void)layoutCapsule {
-    CGFloat W = NSWidth(self.bounds), y = 4;
+    CGFloat W = NSWidth(self.bounds), y = 4;   // slim: 28-point capsules in a 36-point band
     VWindow *ow = WinFor(self);
-    for (NSView *v in @[self.sideBtn, self.homeBtn, self.addTabBtn, self.readerBtn, self.shareBtn, self.extMenuBtn]) v.hidden = YES;
+    self.sideBtn.hidden = YES; self.extMenuBtn.hidden = YES;   // no sidebar any more; extensions live in Lens
+    // the left capsule: whichever of back, forward, home and new tab you've chosen
+    NSMutableArray *navBtns = [NSMutableArray array];
+    for (NSArray *b in @[@[@"back", self.backBtn], @[@"forward", self.fwdBtn], @[@"home", self.homeBtn], @[@"newtab", self.addTabBtn]]) {
+        VButton *v = b[1]; v.hidden = !ToolbarShows(b[0]);
+        if (!v.hidden) { [navBtns addObject:v]; v.symbolSize = 12.5; }
+    }
+    self.readerBtn.hidden = !ToolbarShows(@"reader"); self.shareBtn.hidden = !ToolbarShows(@"share");
+    self.reloadBtn.hidden = !ToolbarShows(@"reload");
     self.privateBadge = NSZeroRect; self.profileRect = NSZeroRect;
     BOOL dl = VDownloads.shared.worthShowing || ToolbarShows(@"dlalways");
     self.dlBtn.hidden = !dl;
     for (NSButton *b in self.extBtns) b.hidden = !ExtensionPinned(b.identifier);
     CGFloat upW = gUpdateReady ? (gUpdating ? 84 : 64) : 0;
-    CGFloat fixed = 78 + 8 + (dl ? 48 : 0) + (upW > 0 ? upW + 8 : 0);
-    CGFloat avail = W - self.leftInset - 8 - 56;   // Lens keeps the far right corner
-    CGFloat pillW = MAX(220, MIN(560, avail - fixed));
+    CGFloat navW = navBtns.count ? 6 + navBtns.count * 29 : 0;
+    CGFloat fixed = (navW ? navW + 6 : 0) + (dl ? 34 : 0) + (upW > 0 ? upW + 6 : 0);
+    NSInteger widthMode = [Defaults() integerForKey:kAddrWidth];   // Full, Medium, Compact
+    CGFloat maxPill = widthMode == 2 ? 420 : widthMode == 1 ? 560 : 720;
+    CGFloat avail = W - self.leftInset - 8 - 44;   // Lens keeps the far right corner
+    CGFloat pillW = MAX(220, MIN(maxPill, avail - fixed));
     CGFloat total = fixed + pillW;
     CGFloat x = MAX(self.leftInset, round((W - total) / 2));
-    self.navRect = NSMakeRect(x, y, 78, 40);
-    self.backBtn.hidden = self.fwdBtn.hidden = self.reloadBtn.hidden = NO;
-    self.backBtn.frame = NSMakeRect(x + 5, y + 6, 34, 28); self.fwdBtn.frame = NSMakeRect(x + 39, y + 6, 34, 28);
-    x += 86;
-    self.pill = NSMakeRect(x, y, pillW, 40);
-    self.infoBtn.frame = NSMakeRect(x + 9, y + 8, 24, 24);
-    x += pillW + 8;
-    if (dl) { self.dlRect = NSMakeRect(x, y, 40, 40); self.dlBtn.frame = NSInsetRect(self.dlRect, 5, 6); x += 48; } else self.dlRect = NSZeroRect;
-    self.lensRect = NSMakeRect(W - 12 - 40, y, 40, 40); self.menuBtn.frame = NSInsetRect(self.lensRect, 5, 6);
-    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 15; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
+    self.navRect = navW ? NSMakeRect(x, y, navW, 28) : NSZeroRect;
+    for (NSUInteger i = 0; i < navBtns.count; i++) ((NSView *)navBtns[i]).frame = NSMakeRect(x + 3 + i * 29, y, 29, 28);
+    if (navW) x += navW + 6;
+    self.pill = NSMakeRect(x, y, pillW, 28);
+    self.infoBtn.frame = NSMakeRect(x + 7, y + 3, 22, 22);
+    x += pillW + 6;
+    if (dl) { self.dlRect = NSMakeRect(x, y, 28, 28); self.dlBtn.frame = self.dlRect; self.dlBtn.symbolSize = 11.5; x += 34; } else self.dlRect = NSZeroRect;
+    self.lensRect = NSMakeRect(W - 12 - 28, y, 28, 28); self.menuBtn.frame = self.lensRect;
+    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
     self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);   // Lens: the browser; the shield: blocking; the lock: this site
     self.avatarRect = NSZeroRect; self.profileBtn.hidden = YES;   // your profile lives in Lens
     (void)ow;
     self.updateBtn.hidden = !gUpdateReady;
     if (gUpdateReady) {
-        self.updateBtn.frame = NSMakeRect(x, y + 6, upW, 28);
+        self.updateBtn.frame = NSMakeRect(x, y + 2, upW, 24);
         self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Flint is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Flint is ready: click to switch to it (your tabs come back).";
         self.updateBtn.needsDisplay = YES;
     }
@@ -2011,19 +2025,20 @@ static NSString *gUpdateNotes;
 - (void)placePillButtons {
     if (self.capsule) {
         CGFloat y = NSMinY(self.pill), r = NSMaxX(self.pill) - 6;
-        self.reloadBtn.frame = NSMakeRect(r - 30, y + 6, 30, 28); r -= 32;
+        if (!self.reloadBtn.hidden) { self.reloadBtn.frame = NSMakeRect(r - 26, y, 26, 28); self.reloadBtn.symbolSize = 11.5; r -= 28; }
         if (!self.shieldBtn.hidden) {
             NSString *n = self.blocked > 0 ? (self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked]) : @"";
-            CGFloat sw = n.length ? 28 + ceil([n sizeWithAttributes:@{NSFontAttributeName: MMono(12, NSFontWeightMedium)}].width) + 10 : 30;
-            self.shieldRect = NSMakeRect(r - sw, y + 6, sw, 28);
-            self.shieldBtn.frame = self.shieldRect; self.shieldBtn.symbolShift = n.length ? round(15 - sw / 2) : 0; self.shieldBtn.symbolSize = 12.5;
+            CGFloat sw = n.length ? 24 + ceil([n sizeWithAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium)}].width) + 9 : 26;
+            self.shieldRect = NSMakeRect(r - sw, y + 3, sw, 22);
+            self.shieldBtn.frame = self.shieldRect; self.shieldBtn.symbolShift = n.length ? round(13 - sw / 2) : 0; self.shieldBtn.symbolSize = 11;
             r -= sw + 4;
         } else self.shieldRect = NSZeroRect;
-        if (!self.pipBtn.hidden) { self.pipBtn.frame = NSMakeRect(r - 26, y + 8, 26, 24); r -= 27; }
-        if (!self.starBtn.hidden) { self.starBtn.frame = NSMakeRect(r - 26, y + 8, 26, 24); r -= 27; }
-        for (NSButton *b in self.extBtns.reverseObjectEnumerator) if (!b.hidden) { b.frame = NSMakeRect(r - 26, y + 9, 26, 22); r -= 27; }
-        CGFloat fx = NSMaxX(self.infoBtn.frame) + 6;
-        self.field.frame = NSMakeRect(fx, y + 11, MAX(60, r - fx - 6), 18);
+        for (VButton *b in @[self.shareBtn, self.readerBtn]) if (!b.hidden) { b.frame = NSMakeRect(r - 24, y + 3, 24, 22); b.symbolSize = 11.5; r -= 25; }
+        if (!self.pipBtn.hidden) { self.pipBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.pipBtn.symbolSize = 11.5; r -= 25; }
+        if (!self.starBtn.hidden) { self.starBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.starBtn.symbolSize = 11.5; r -= 25; }
+        for (NSButton *b in self.extBtns.reverseObjectEnumerator) if (!b.hidden) { b.frame = NSMakeRect(r - 24, y + 5, 24, 18); r -= 25; }
+        CGFloat fx = NSMaxX(self.infoBtn.frame) + 4;
+        self.field.frame = NSMakeRect(fx, y + 6, MAX(60, r - fx - 6), 17);
         return;
     }
     CGFloat y = NSMinY(self.pill), r = NSMaxX(self.pill) - 3;
@@ -2057,9 +2072,8 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         [m addItem:NSMenuItem.separatorItem];
     }
     NSMenuItem *head = [m addItemWithTitle:@"Show in Toolbar" action:nil keyEquivalent:@""]; head.enabled = NO;
-    NSArray *items = @[@[@"sidebar", @"Sidebar Button"], @[@"back", @"Back"], @[@"forward", @"Forward"], @[@"reload", @"Reload"], @[@"home", @"Home"],
-                       @[@"star", @"Bookmark Star"], @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"newtab", @"New Tab"],
-                       @[@"dlalways", @"Downloads (always)"], @[@"extensions", @"Extensions Menu"], @[@"shield", @"Ad Blocking Shield"]];
+    NSArray *items = @[@[@"back", @"Back"], @[@"forward", @"Forward"], @[@"home", @"Home"], @[@"newtab", @"New Tab"], @[@"reload", @"Reload"],
+                       @[@"star", @"Bookmark Star"], @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"shield", @"Ad Blocking Shield"], @[@"dlalways", @"Downloads (always)"]];
     for (NSArray *it in items) {
         NSMenuItem *mi = [m addItemWithTitle:it[1] action:@selector(toggleShown:) keyEquivalent:@""];
         mi.target = self; mi.representedObject = it[0]; mi.state = ToolbarShows(it[0]) ? NSControlStateValueOn : NSControlStateValueOff;
@@ -2074,7 +2088,6 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         x.target = self; x.tag = (NSInteger)i; x.state = [Defaults() integerForKey:kAddrWidth] == (NSInteger)i ? NSControlStateValueOn : NSControlStateValueOff;
     }
     wi.submenu = wm;
-    NSMenuItem *bb = [m addItemWithTitle:[Defaults() boolForKey:kShowBookmarks] ? @"Hide Bookmarks Bar" : @"Show Bookmarks Bar" action:@selector(toggleBookmarksBar:) keyEquivalent:@""]; bb.target = WinFor(self);
     [m addItem:NSMenuItem.separatorItem];
     NSMenuItem *rs = [m addItemWithTitle:@"Reset Toolbar" action:@selector(resetToolbar:) keyEquivalent:@""]; rs.target = self;
     NSMenuItem *more = [m addItemWithTitle:@"Customise in Settings…" action:@selector(showSettings:) keyEquivalent:@""]; more.target = gApp;
@@ -2110,21 +2123,21 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
 - (void)drawRect:(NSRect)dirty {
     if (self.capsule) {
         VWindow *ow = WinFor(self);
-        NSArray *round = @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill]];
+        NSArray *round = NSIsEmptyRect(self.navRect) ? @[[NSValue valueWithRect:self.pill]] : @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill]];
         NSMutableArray *circles = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.lensRect], nil];
         if (!NSIsEmptyRect(self.avatarRect)) [circles addObject:[NSValue valueWithRect:self.avatarRect]];
         if (!NSIsEmptyRect(self.dlRect)) [circles addObject:[NSValue valueWithRect:self.dlRect]];
         MShadowed(^{
-            for (NSValue *v in round) RoundRect(v.rectValue, 20, MGlass());
+            for (NSValue *v in round) RoundRect(v.rectValue, 14, MGlass());
             for (NSValue *v in circles) { [MGlass() setFill]; [[NSBezierPath bezierPathWithOvalInRect:v.rectValue] fill]; }
         });
-        for (NSValue *v in round) ShardStroke(v.rectValue, 20, MGlassEdge(), 1);
+        for (NSValue *v in round) ShardStroke(v.rectValue, 14, MGlassEdge(), 1);
         for (NSValue *v in circles) { NSBezierPath *o = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(v.rectValue, 0.5, 0.5)]; o.lineWidth = 1; [MGlassEdge() setStroke]; [o stroke]; }
-        if (self.editing) ShardStroke(self.pill, 20, [vText colorWithAlphaComponent:0.22], 1);
+        if (self.editing) ShardStroke(self.pill, 14, [vText colorWithAlphaComponent:0.22], 1);
         if (!NSIsEmptyRect(self.shieldRect) && self.blocked > 0) {
-            RoundRect(self.shieldRect, 14, MChip());
+            RoundRect(self.shieldRect, 11, MChip());
             NSString *n = self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked];
-            [n drawAtPoint:NSMakePoint(NSMinX(self.shieldRect) + 26, NSMinY(self.shieldRect) + 6) withAttributes:@{NSFontAttributeName: MMono(12, NSFontWeightMedium), NSForegroundColorAttributeName: vDim}];
+            [n drawAtPoint:NSMakePoint(NSMinX(self.shieldRect) + 23, NSMinY(self.shieldRect) + 4) withAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium), NSForegroundColorAttributeName: vDim}];
         }
         NSRect av = self.avatarRect;
         if (NSIsEmptyRect(av)) return;
@@ -7152,7 +7165,7 @@ static void FlintInternalInstall(WKWebViewConfiguration *c, WKUserContentControl
 }
 - (void)mouseEntered:(NSEvent *)e { self.hover = YES; self.needsDisplay = YES; }
 - (void)mouseExited:(NSEvent *)e { self.hover = NO; self.needsDisplay = YES; }
-- (NSRect)dot:(NSInteger)i { return NSMakeRect(11 + i * 20, round((NSHeight(self.bounds) - 12) / 2), 12, 12); }
+- (NSRect)dot:(NSInteger)i { return NSMakeRect(9 + i * 17, round((NSHeight(self.bounds) - 10) / 2), 10, 10); }
 - (void)drawRect:(NSRect)r {
     NSRect b = self.bounds;
     MShadowed(^{ RoundRect(b, NSHeight(b) / 2, MGlass()); });
@@ -7163,7 +7176,7 @@ static void FlintInternalInstall(WKWebViewConfiguration *c, WKUserContentControl
         NSRect d = [self dot:i];
         NSColor *c = self.hover ? (ThemeIsLight() ? Hex(0x9a9ca2) : Hex(0x6e7178)) : (key ? (ThemeIsLight() ? Hex(0xb9bbc0) : Hex(0x3a3c42)) : (ThemeIsLight() ? Hex(0xd4d5d8) : Hex(0x2a2c30)));
         [c setFill]; [[NSBezierPath bezierPathWithOvalInRect:d] fill];
-        if (self.hover) { NSImage *g = Tinted(Symbol(glyphs[i], 7, NSFontWeightBold), ThemeIsLight() ? Hex(0xffffff) : Hex(0x0a0b0d)); DrawImage(g, CenterIn(g.size, d)); }
+        if (self.hover) { NSImage *g = Tinted(Symbol(glyphs[i], 6, NSFontWeightBold), ThemeIsLight() ? Hex(0xffffff) : Hex(0x0a0b0d)); DrawImage(g, CenterIn(g.size, d)); }
     }
 }
 - (void)mouseDown:(NSEvent *)e {
@@ -7340,7 +7353,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (void)rightMouseDown:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     NSInteger i = [self indexAt:p];
-    if (i >= 0) { self.shelf.sticky = YES; [self.shelf.owner tabMenu:self.shelf.items[(NSUInteger)i] at:p inView:self]; }
+    if (i >= 0) [self.shelf.owner tabMenu:self.shelf.items[(NSUInteger)i] at:p inView:self];
 }
 - (void)scrollWheel:(NSEvent *)e {   // a plain wheel or two-finger swipe up and down moves along the timeline
     if (fabs(e.scrollingDeltaX) > fabs(e.scrollingDeltaY)) { [super scrollWheel:e]; return; }
@@ -7405,7 +7418,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (void)rightMouseDown:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
     NSInteger i = [self indexAt:p];
-    if (i >= 0) { self.shelf.sticky = YES; [self.shelf.owner tabMenu:self.shelf.pinned[(NSUInteger)i] at:p inView:self]; }
+    if (i >= 0) [self.shelf.owner tabMenu:self.shelf.pinned[(NSUInteger)i] at:p inView:self];
 }
 @end
 
@@ -7531,7 +7544,7 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
     [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect owner:self userInfo:nil]];
 }
-- (void)mouseEntered:(NSEvent *)e { self.hover = YES; self.needsDisplay = YES; [WinFor(self) showShelf:YES]; }
+- (void)mouseEntered:(NSEvent *)e { self.hover = YES; self.needsDisplay = YES; if (![Defaults() boolForKey:kShelfNoHover]) [WinFor(self) showShelf:YES]; }
 - (void)mouseExited:(NSEvent *)e { self.hover = NO; self.needsDisplay = YES; }
 - (void)drawRect:(NSRect)r {
     NSRect p = NSMakeRect(round(NSMidX(self.bounds) - 28), NSHeight(self.bounds) - 9, 56, 5);
@@ -7564,7 +7577,7 @@ static void InstallShelfMonitor(void) {
             return e;
         }
         if (!s.shown) {
-            if (p.y >= H - 6 && p.y <= H + 1 && p.x > 16 && p.x < W - 16 && w.window.isKeyWindow) [w showShelf:YES];
+            if (p.y >= H - 6 && p.y <= H + 1 && p.x > 16 && p.x < W - 16 && w.window.isKeyWindow && ![Defaults() boolForKey:kShelfNoHover]) [w showShelf:YES];
         } else if (!s.sticky && !NSPointInRect(p, NSInsetRect(s.frame, -30, -40))) [w showShelf:NO];
         return e;
     }];
@@ -7601,7 +7614,7 @@ static void InstallShelfMonitor(void) {
             ctx.duration = 0.14;
             s.animator.frame = NSOffsetRect(f, 0, 14); s.animator.alphaValue = 0;
         } completionHandler:^{
-            if (!s.shown) { s.hidden = YES; ws.shelfHandle.hidden = [[ws valueForKey:@"pageFull"] boolValue]; }
+            if (!s.shown) { s.hidden = YES; ws.shelfHandle.hidden = [[ws valueForKey:@"pageFull"] boolValue] || [Defaults() boolForKey:kShelfNoHint]; }
         }];
     }
 }
@@ -8183,6 +8196,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     if (p.shown) { p.frame = NSMakeRect(px, NSMaxY(pr) + 8, W, NSHeight(p.frame)); return; }
     [p present:NSMakeRect(px, NSMaxY(pr) + 8, W, NSHeight(p.frame))];
 }
+- (void)showBookmarkPopup:(id)s { [self focusAddress]; }   // ⇧⌘B: the address, with your bookmarks under it
 - (void)hideAddressPanel { [(VPanel *)self.addressPanel dismiss]; }
 - (void)closePanels { [(VPanel *)self.lensPanel dismiss]; [(VPanel *)self.addressPanel dismiss]; }
 - (BOOL)panelOpen { return ((VPanel *)self.lensPanel).shown || ((VPanel *)self.addressPanel).shown; }
@@ -8334,7 +8348,7 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
     self.suggest = [VSuggest new];
     self.toolbar.capsule = YES;
     [root addSubview:self.toolbar positioned:NSWindowAbove relativeTo:self.content];
-    self.lights = [[VLights alloc] initWithFrame:NSMakeRect(22, 22, 72, 28)];
+    self.lights = [[VLights alloc] initWithFrame:NSMakeRect(12, 7, 62, 22)];
     self.shelfHandle = [[VShelfHandle alloc] initWithFrame:NSZeroRect];
     self.shelf = [[VTabShelf alloc] initWithOwner:self];
     for (NSView *v in @[self.lights, self.shelfHandle, self.shelf]) [root addSubview:v positioned:NSWindowAbove relativeTo:nil];
@@ -8736,19 +8750,19 @@ static NSString *CreateProfile(NSString *name) {
     }
     // The capsules float in their own band of the window's ground, so they never cover the page;
     // the page fills everything below it, edge to edge.
-    CGFloat top = 52;
+    CGFloat top = 36;   // slim band
     self.content.frame = NSMakeRect(0, top, W, H - top);
     self.toolbar.hidden = NO; self.toolbar.capsule = YES;
-    self.toolbar.leftInset = fs ? 8 : 92;
-    self.toolbar.frame = NSMakeRect(0, 2, W, 60);
+    self.toolbar.leftInset = fs ? 8 : 84;
+    self.toolbar.frame = NSMakeRect(0, 0, W, 56);
     self.toolbar.autoresizingMask = NSViewNotSizable;
     [self.toolbar layoutBar];
     self.lights.hidden = fs;
-    self.lights.frame = NSMakeRect(12, 12, 72, 28);
+    self.lights.frame = NSMakeRect(12, 7, 62, 22);
     VTabShelf *sh = (VTabShelf *)self.shelf;
     if (sh.shown) sh.frame = [self shelfFrame];
     self.shelfHandle.frame = NSMakeRect(round(W / 2 - 50), H - 18, 100, 18);
-    self.shelfHandle.hidden = sh.shown;
+    self.shelfHandle.hidden = sh.shown || [Defaults() boolForKey:kShelfNoHint];
     if (np) {
         [np setValue:@YES forKey:@"floating"];
         np.frame = NSMakeRect(10, H - 10 - 64, 300, 64);
@@ -8849,8 +8863,8 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
 // The address at rest reads like an instrument: the site in full strength, the rest of the path quietly after it.
 - (NSAttributedString *)identityFor:(VTab *)t url:(NSURL *)u extension:(NSString *)extName {
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentLeft; ps.lineBreakMode = NSLineBreakByTruncatingTail;
-    NSDictionary *strong = @{NSFontAttributeName: UIFont(13.5, NSFontWeightMedium), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: ps};
-    NSDictionary *quiet = @{NSFontAttributeName: UIFont(13.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps};
+    NSDictionary *strong = @{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: ps};
+    NSDictionary *quiet = @{NSFontAttributeName: UIFont(12.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps};
     NSMutableAttributedString *a = [NSMutableAttributedString new];
     if (t.isHome || !u) return a;
     if (extName) { [a appendAttributedString:[[NSAttributedString alloc] initWithString:extName attributes:strong]]; return a; }
@@ -8961,7 +8975,7 @@ static NSArray<NSDictionary *> *StrikeCommands(void) {
              @{@"title": @"Find on Page", @"sel": @"showFind:", @"keys": @"⌘F", @"symbol": @"text.magnifyingglass"},
              @{@"title": @"Export as PDF", @"sel": @"exportPDF:", @"keys": @"", @"symbol": @"doc.richtext"},
              @{@"title": @"Share Page", @"sel": @"sharePage:", @"keys": @"", @"symbol": @"square.and.arrow.up"},
-             @{@"title": @"Toggle Sidebar", @"sel": @"toggleSidebar:", @"keys": @"⌘S", @"symbol": @"sidebar.left"},
+             @{@"title": @"Show Tabs", @"sel": @"toggleSidebar:", @"keys": @"⌘S", @"symbol": @"rectangle.stack"},
              @{@"title": @"Split View", @"sel": @"toggleSplit:", @"keys": @"⌃⌘S", @"symbol": @"rectangle.split.2x1"},
              @{@"title": @"Close Other Tabs", @"sel": @"closeOtherTabs:", @"keys": @"⌥⌘W", @"symbol": @"xmark.square"},
              @{@"title": @"Move Tab to New Window", @"sel": @"moveCurrentToNewWindow:", @"keys": @"", @"symbol": @"rectangle.portrait.and.arrow.right"},
@@ -9181,7 +9195,7 @@ static NSArray *MatchCommands(NSString *q, NSUInteger limit) {
 - (void)printPage:(id)s { [self.current.web print]; }
 - (void)stopLoading:(id)s { [self.current.web stop]; }
 - (void)toggleSidebar:(id)s { [self toggleShelf]; }   // Monolith: ⌘S brings up the tabs
-- (void)toggleBookmarksBar:(id)s { [Defaults() setBool:![Defaults() boolForKey:kShowBookmarks] forKey:kShowBookmarks]; [self layout]; }
+- (void)toggleBookmarksBar:(id)s { [self showBookmarkPopup:s]; }   // Monolith: bookmarks live under the address now
 - (void)newTabAction:(id)s { [self newTab:nil select:YES]; }
 - (void)openLocation:(id)s { [self focusAddress]; }
 - (void)closeTabAction:(id)s {
@@ -9415,7 +9429,6 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     hist.submenu = hm;
     add(@"Bookmarks", @selector(showBookmarks:), self);
     add(@"Downloads", @selector(showDownloadManager:), self);
-    add([Defaults() boolForKey:kShowBookmarks] ? @"Hide Bookmarks Bar" : @"Show Bookmarks Bar", @selector(toggleBookmarksBar:), self);
     [m addItem:NSMenuItem.separatorItem];
     VPage *w = self.current.web;
     if (w) {
@@ -10721,7 +10734,7 @@ static void RunBuildScript(NSString *stamp) {
     [view addItem:NSMenuItem.separatorItem];
     [self item:@"Show Tabs" action:@selector(toggleSidebar:) key:@"s" mods:C in:view target:nil];
     [self item:@"Lens" action:@selector(toggleLens:) key:@"." mods:C in:view target:nil];
-    [self item:@"Toggle Bookmarks Bar" action:@selector(toggleBookmarksBar:) key:@"b" mods:C | S in:view target:nil];
+    [self item:@"Show Bookmarks" action:@selector(showBookmarkPopup:) key:@"b" mods:C | S in:view target:nil];
     [view addItem:NSMenuItem.separatorItem];
     [self item:@"Reader" action:@selector(toggleReader:) key:@"r" mods:C | K in:view target:nil];
     [view addItem:NSMenuItem.separatorItem];
@@ -10959,8 +10972,8 @@ static NSArray *SettingsSchema(VWindow *win) {
     accentRow[@"options"] = accents; accentRow[@"value"] = @([Defaults() integerForKey:kAccent]);
     gSSet[@"accent"] = ^(id v) { [Defaults() setInteger:[v integerValue] forKey:kAccent]; FlintApplyTheme(); };
     NSMutableArray *tb = [NSMutableArray array];
-    for (NSArray *b in @[@[@"sidebar", @"Sidebar"], @[@"back", @"Back"], @[@"forward", @"Forward"], @[@"reload", @"Reload"], @[@"home", @"Home"], @[@"star", @"Bookmark star"],
-                          @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"newtab", @"New tab"], @[@"dlalways", @"Downloads, always"], @[@"extensions", @"Extensions menu"], @[@"shield", @"Ad blocking shield"]]) {
+    for (NSArray *b in @[@[@"back", @"Back"], @[@"forward", @"Forward"], @[@"home", @"Home"], @[@"newtab", @"New tab"], @[@"reload", @"Reload"], @[@"star", @"Bookmark star"],
+                          @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"shield", @"Ad blocking shield"], @[@"dlalways", @"Downloads, always"]]) {
         NSString *k = b[0];
         [tb addObject:SSwitch([@"tb." stringByAppendingString:k], b[1], nil, ToolbarShows(k), ^(id v) { SetToolbarShows(k, [v boolValue]); RelayoutAll(); })];
     }
@@ -10970,13 +10983,11 @@ static NSArray *SettingsSchema(VWindow *win) {
         SGroup(@"Theme", @[
             SSelect(@"theme", @"Theme", @"Carbon is near-black, like Flint's icon. Pages follow light or dark where they support it.", @[@"Follow macOS", @"Graphite", @"Carbon", @"Light"], [Defaults() integerForKey:kTheme],
                     ^(NSInteger i) { [Defaults() setInteger:i forKey:kTheme]; FlintApplyTheme(); }),
-            accentRow,
-            SSelect(@"density", @"Density", @"How much room each tab gets in the sidebar.", @[@"Compact", @"Comfortable", @"Roomy"], [Defaults() integerForKey:kDensity], ^(NSInteger i) { [Defaults() setInteger:i forKey:kDensity]; RelayoutAll(); }) ]),
-        SGroup(@"Layout", @[
-            SKey(kSidebarHidden, @"Show the tab sidebar", @"⌘S toggles it at any time.", YES, ^{ RelayoutAll(); }),
-            SKey(kSidebarRight, @"Sidebar on the right", nil, NO, ^{ RelayoutAll(); }),
-            SKey(kShowBookmarks, @"Show the bookmarks bar", @"⇧⌘B toggles it at any time.", NO, ^{ RelayoutAll(); }) ]),
-        SGroup(@"Toolbar", [@[ SSelect(@"addrWidth", @"Address bar width", @"Right-click the toolbar to change these right where they are.", @[@"Full", @"Medium", @"Compact"], [Defaults() integerForKey:kAddrWidth],
+            accentRow ]),
+        SGroup(@"Tabs", @[
+            SKey(kShelfNoHover, @"Show tabs when the pointer reaches the bottom edge", @"⌘S brings them up at any time. Bookmarks open from the address.", YES, ^{ RelayoutAll(); }),
+            SKey(kShelfNoHint, @"Show the handle at the bottom of the page", @"A small bar that hints where the tabs are; hover or click it.", YES, ^{ RelayoutAll(); }) ]),
+        SGroup(@"Top bar", [@[ SSelect(@"addrWidth", @"Address width", @"How wide the address capsule grows. Right-click the top bar to change these right where they are.", @[@"Wide", @"Medium", @"Compact"], [Defaults() integerForKey:kAddrWidth],
                                       ^(NSInteger i) { [Defaults() setInteger:i forKey:kAddrWidth]; RelayoutAll(); }) ] arrayByAddingObjectsFromArray:tb]),
         SGroup(@"New tab page", @[ SKey(kHomeTopSites, @"Show your most visited sites", nil, NO, ^{ RelayoutAll(); }) ]),
         SGroup(@"Text", @[ SSelect(@"minFont", @"Minimum font size", @"Tiny text on pages is enlarged to at least this size. Applies to pages you open next.", @[@"None", @"9 pt", @"10 pt", @"11 pt", @"12 pt", @"14 pt", @"16 pt"], (NSInteger)mi,
@@ -11221,7 +11232,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     for (NSArray *g in @[
         @[@"Tabs", @[@[@"New tab", @"⌘T"], @[@"Close tab", @"⌘W"], @[@"Reopen closed tab", @"⇧⌘T"], @[@"Next / previous tab", @"⌃⇥  ⌃⇧⇥"], @[@"Go to tab 1–9", @"⌘1 … ⌘9"], @[@"Pin tab", @"⇧⌘P"], @[@"Duplicate tab", @"⇧⌘K"], @[@"Mute tab", @"⌃⌘M"], @[@"Split view", @"⌃⌘S"]]],
         @[@"Pages", @[@[@"Address bar", @"⌘L"], @[@"Reload / hard reload", @"⌘R  ⇧⌘R"], @[@"Back / forward", @"⌘[  ⌘]"], @[@"Find on page", @"⌘F  ⌘G  ⇧⌘G"], @[@"Zoom in / out / reset", @"⌘+  ⌘−  ⌘0"], @[@"Bookmark page", @"⌘D"], @[@"Save page", @"⇧⌘S"], @[@"View source", @"⌥⌘U"], @[@"Picture in Picture", @"⌃⌘P"], @[@"Reader", @"⌃⌘R"]]],
-        @[@"Flint", @[@[@"Toggle sidebar", @"⌘S"], @[@"Toggle bookmarks bar", @"⇧⌘B"], @[@"History", @"⌘Y"], @[@"Bookmarks", @"⌥⌘B"], @[@"Downloads", @"⌥⌘L"], @[@"Settings", @"⌘,"], @[@"Full screen", @"⌃⌘F"], @[@"Clear browsing data", @"⇧⌘⌫"]]]]) {
+        @[@"Flint", @[@[@"Show tabs", @"⌘S"], @[@"Lens", @"⌘."], @[@"Bookmarks under the address", @"⇧⌘B"], @[@"History", @"⌘Y"], @[@"Bookmarks", @"⌥⌘B"], @[@"Downloads", @"⌥⌘L"], @[@"Settings", @"⌘,"], @[@"Full screen", @"⌃⌘F"], @[@"Clear browsing data", @"⇧⌘⌫"]]]]) {
         NSMutableArray *rows = [NSMutableArray array]; for (NSArray *r in g[1]) [rows addObject:SValue(r[0], nil, r[1])];
         [sg addObject:SGroup(g[0], rows)];
     }
