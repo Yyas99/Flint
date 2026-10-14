@@ -206,6 +206,11 @@ static NSString *SourceViewerURL(NSString *u, NSString *ident) {
 }
 
 static BOOL AccentChosen(void) { return [Defaults() integerForKey:kAccent] != 0; }
+// Where the tabs live: along the bottom edge (0), or down the left (1) or right (2) side, turned vertical.
+static NSString *const kShelfSide = @"shelfSide";
+static NSInteger ShelfSide(void) { NSInteger s = [Defaults() integerForKey:kShelfSide]; return s >= 0 && s <= 2 ? s : 0; }
+static BOOL ShelfVertical(void) { return ShelfSide() != 0; }
+static CGFloat ShelfMidY(CGFloat H) { return round((48 + H) / 2); }   // the middle of the page area, below the toolbar
 // YES when Iris itself handles http(s) links; then "Open in Default Browser" would just reopen here, so it's hidden.
 static BOOL IrisIsDefaultBrowser(void) {
     static BOOL cached; static CFAbsoluteTime at;
@@ -558,6 +563,7 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)showShelf:(BOOL)on;
 - (void)toggleShelf;
 - (NSRect)shelfFrame;
+- (NSRect)shelfRestFrame;
 @end
 
 @interface VWindow (Downloads)
@@ -8333,6 +8339,7 @@ static void ShelfIcon(VTab *t, NSRect r, CGFloat radius) {
 @property (strong) NSArray<VTab *> *items, *pinned;
 - (void)scrollToCurrent;
 @property CGFloat wantHeight;   // just tall enough for what's in it
+@property CGFloat wantWidth;    // just wide enough for every tab's card (searching doesn't shrink it)
 - (instancetype)initWithOwner:(VWindow *)w;
 - (void)reload;
 - (void)scrollToNewest;
@@ -8362,7 +8369,12 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
     [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
 }
-- (NSRect)card:(NSInteger)i { return NSMakeRect(6 + i * (kCardW + kCardGap) + (self.pinnedCount > 0 && i >= self.pinnedCount ? 22 : 0), kCardTop, kCardW, kCardH); }
+static const CGFloat kRowPitch = 88 + 26 + 10;   // vertical: a card, its line underneath, a gap
+- (NSRect)card:(NSInteger)i {
+    CGFloat extra = self.pinnedCount > 0 && i >= self.pinnedCount ? 22 : 0;
+    if (ShelfVertical()) return NSMakeRect(round((NSWidth(self.bounds) - kCardW) / 2), (self.pinnedCount > 0 ? kCardTop : 8) + i * kRowPitch + extra, kCardW, kCardH);
+    return NSMakeRect(6 + i * (kCardW + kCardGap) + extra, kCardTop, kCardW, kCardH);
+}
 // Close and pin: 28 pt discs inside the card's corner, and each answers a little beyond its edge (a 36 pt target).
 - (NSRect)closeRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 34, NSMinY(c) + 6, 28, 28); }
 - (NSRect)pinRect:(NSInteger)i { NSRect c = [self card:i]; return NSMakeRect(NSMaxX(c) - 66, NSMinY(c) + 6, 28, 28); }
@@ -8480,7 +8492,11 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     }
     if (self.pinnedCount > 0) {   // the pinned group: labelled, and a hairline before the rest
         [@"PINNED" drawAtPoint:NSMakePoint(NSMinX([self card:0]), kCardTop - 22) withAttributes:@{NSFontAttributeName: MMono(10, NSFontWeightMedium), NSForegroundColorAttributeName: vFaint, NSKernAttributeName: @1.2}];
-        if (self.pinnedCount < (NSInteger)items.count) { [[vText colorWithAlphaComponent:0.1] setFill]; Blend(NSMakeRect(NSMinX([self card:self.pinnedCount]) - 17, kCardTop, 1, kCardH + 22)); }
+        if (self.pinnedCount < (NSInteger)items.count) {
+            NSRect nx = [self card:self.pinnedCount];
+            [[vText colorWithAlphaComponent:0.1] setFill];
+            Blend(ShelfVertical() ? NSMakeRect(NSMinX(nx), NSMinY(nx) - 21, kCardW, 1) : NSMakeRect(NSMinX(nx) - 17, kCardTop, 1, kCardH + 22));
+        }
     }
 }
 // Press, then either let go (open, close or pin) or drag the card along to put it somewhere else.
@@ -8492,14 +8508,19 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     NSInteger from = self.pressIndex; NSArray<VTab *> *items = self.shelf.items;
     if (from < 0 || from >= (NSInteger)items.count || self.shelf.search.stringValue.length) return;   // not while searching: only matches show
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
-    if (!self.dragging && fabs(p.x - self.pressAt.x) < 6) return;
+    BOOL v = ShelfVertical();   // along the strip: across when it's at the bottom, down when it's at a side
+    CGFloat at = v ? p.y : p.x, was = v ? self.pressAt.y : self.pressAt.x;
+    if (!self.dragging && fabs(at - was) < 6) return;
     self.dragging = YES;
     VTab *t = items[(NSUInteger)from];
     // the slot under the pointer, within the card's own group (pinned stay with pinned)
     NSInteger lo = t.pinned ? 0 : self.pinnedCount, hi = t.pinned ? self.pinnedCount - 1 : (NSInteger)items.count - 1, to = from;
-    for (NSInteger k = lo; k <= hi; k++) { NSRect c = [self card:k]; if (p.x >= NSMinX(c) - kCardGap / 2 && p.x < NSMaxX(c) + kCardGap / 2) { to = k; break; } }
-    if (p.x < NSMinX([self card:lo])) to = lo;
-    if (p.x > NSMaxX([self card:hi])) to = hi;
+    CGFloat (^start)(NSRect) = ^CGFloat(NSRect c) { return v ? NSMinY(c) : NSMinX(c); };
+    CGFloat (^end)(NSRect) = ^CGFloat(NSRect c) { return v ? NSMinY(c) + kRowPitch - 10 : NSMaxX(c); };
+    CGFloat half = (v ? 10 : kCardGap) / 2;
+    for (NSInteger k = lo; k <= hi; k++) { NSRect c = [self card:k]; if (at >= start(c) - half && at < end(c) + half) { to = k; break; } }
+    if (at < start([self card:lo])) to = lo;
+    if (at > end([self card:hi])) to = hi;
     if (to == from) return;
     VWindow *w = self.shelf.owner;
     NSUInteger dest = [w.tabs indexOfObjectIdenticalTo:items[(NSUInteger)to]];
@@ -8539,22 +8560,24 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (void)scrollWheel:(NSEvent *)e {
     NSScrollView *sv = self.enclosingScrollView; NSClipView *cv = sv.contentView; if (!cv) return;
     CGFloat dx = e.scrollingDeltaX, dy = e.scrollingDeltaY;
-    CGFloat d = fabs(dx) >= fabs(dy) ? dx : dy;
+    BOOL v = ShelfVertical();
+    CGFloat d = v ? (fabs(dy) >= fabs(dx) ? dy : dx) : (fabs(dx) >= fabs(dy) ? dx : dy);
     if (d == 0) return;
-    CGFloat maxX = MAX(0, NSWidth(self.frame) - NSWidth(cv.bounds));
+    CGFloat maxO = v ? MAX(0, NSHeight(self.frame) - NSHeight(cv.bounds)) : MAX(0, NSWidth(self.frame) - NSWidth(cv.bounds));
+    CGFloat cur = v ? cv.bounds.origin.y : cv.bounds.origin.x;
     if (e.hasPreciseScrollingDeltas) {
         if (self.gliding) { self.gliding = NO; [cv.layer removeAllAnimations]; }
-        NSPoint o = cv.bounds.origin; o.x = round(MAX(0, MIN(maxX, o.x - d)));
-        [cv setBoundsOrigin:o]; [sv reflectScrolledClipView:cv];
+        CGFloat o = round(MAX(0, MIN(maxO, cur - d)));
+        [cv setBoundsOrigin:v ? NSMakePoint(cv.bounds.origin.x, o) : NSMakePoint(o, cv.bounds.origin.y)]; [sv reflectScrolledClipView:cv];
         return;
     }
-    CGFloat from = self.gliding ? self.glideTo : cv.bounds.origin.x;
-    CGFloat to = round(MAX(0, MIN(maxX, from - d * 26)));
+    CGFloat from = self.gliding ? self.glideTo : cur;
+    CGFloat to = round(MAX(0, MIN(maxO, from - d * 26)));
     self.glideTo = to; self.gliding = YES;
     __weak VShelfStrip *ws = self;
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) {
         c.duration = 0.24; c.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.2 :0.7 :0.3 :1];
-        [cv.animator setBoundsOrigin:NSMakePoint(to, cv.bounds.origin.y)];
+        [cv.animator setBoundsOrigin:v ? NSMakePoint(cv.bounds.origin.x, to) : NSMakePoint(to, cv.bounds.origin.y)];
     } completionHandler:^{
         VShelfStrip *me = ws; if (!me) return;
         [sv reflectScrolledClipView:cv];
@@ -8673,7 +8696,9 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 - (BOOL)control:(NSControl *)c textView:(NSTextView *)tv doCommandBySelector:(SEL)sel {
     VShelfStrip *st = (VShelfStrip *)self.strip;
     BOOL typing = self.search.stringValue.length > 0;
-    if ((sel == @selector(moveLeft:) || sel == @selector(moveRight:)) && (!typing || st.kbd >= 0)) {   // arrows walk the cards
+    BOOL vert = ShelfVertical();
+    if (vert && (sel == @selector(moveUp:) || sel == @selector(moveDown:))) sel = sel == @selector(moveUp:) ? @selector(moveLeft:) : @selector(moveRight:);   // down the side: up and down walk them
+    if ((sel == @selector(moveLeft:) || sel == @selector(moveRight:)) && (!typing || st.kbd >= 0 || vert)) {   // arrows walk the cards
         NSInteger n = (NSInteger)self.items.count; if (!n) return YES;
         NSInteger k = st.kbd < 0 ? [self.items indexOfObjectIdenticalTo:self.owner.current] : st.kbd;
         if (k == NSNotFound || k < 0) k = 0;
@@ -8703,12 +8728,32 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     ((VShelfStrip *)self.strip).pinnedCount = (NSInteger)pins.count;
     VShelfStrip *st = (VShelfStrip *)self.strip; if (st.kbd >= (NSInteger)items.count) st.kbd = -1;
     CGFloat want = 54 + 150 + 8;
-    if (fabs(want - self.wantHeight) > 0.5) { self.wantHeight = want; if (self.shown) self.frame = [self.owner shelfFrame]; }
+    BOOL anyPin = NO; for (VTab *t in w.tabs) if (t.pinned) { anyPin = YES; break; }
+    CGFloat wantW = 16 + 12 + (w.tabs.count + 1) * (kCardW + kCardGap) + (anyPin ? 22 : 0) + 16;
+    if (ShelfVertical()) {   // a column: header, every card stacked, the count at the foot
+        wantW = kCardW + 48;
+        want = 84 + (anyPin ? kCardTop + 22 : 8) + (w.tabs.count + 1) * kRowPitch + 34;
+    }
+    if (fabs(want - self.wantHeight) > 0.5 || fabs(wantW - self.wantWidth) > 0.5) {
+        self.wantHeight = want; self.wantWidth = wantW;
+        if (self.shown) self.frame = [self.owner shelfFrame];
+    }
     [self layoutShelf];
     self.needsDisplay = YES; self.strip.needsDisplay = YES; self.pinnedView.needsDisplay = YES;
 }
 - (void)layoutShelf {
     CGFloat W = NSWidth(self.bounds), H = NSHeight(self.bounds);
+    BOOL vert = ShelfVertical();
+    self.scroll.hasHorizontalScroller = !vert; self.scroll.hasVerticalScroller = vert;
+    self.scroll.verticalScrollElasticity = NSScrollElasticityNone;
+    if (vert) {
+        self.search.frame = NSMakeRect(28, 51, W - 56, 17);
+        self.addBtn.hidden = YES; self.pinnedView.hidden = YES;
+        self.scroll.frame = NSMakeRect(0, 84, W, MAX(40, H - 84 - 34));
+        CGFloat docH = MAX(NSHeight(self.scroll.contentView.bounds), (self.pinned.count ? kCardTop + 22 : 8) + (self.items.count + 1) * kRowPitch);
+        [self.strip setFrameSize:NSMakeSize(NSWidth(self.scroll.contentView.bounds), docH)];
+        return;
+    }
     CGFloat sx = 260;
     self.search.frame = NSMakeRect(84 + 12, 19, 214, 17);
     self.addBtn.hidden = YES;   // New tab is the last card in the strip
@@ -8726,17 +8771,35 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
     NSUInteger i = [self.items indexOfObjectIdenticalTo:self.owner.current];
     if (i == NSNotFound) { [self scrollToNewest]; return; }
     NSClipView *cv = self.scroll.contentView; NSRect c = [st card:(NSInteger)i];
+    if (ShelfVertical()) {
+        CGFloat y = MAX(0, MIN(NSHeight(st.frame) - NSHeight(cv.bounds), NSMidY(c) - NSHeight(cv.bounds) / 2));
+        [cv scrollToPoint:NSMakePoint(0, round(y))]; [self.scroll reflectScrolledClipView:cv]; return;
+    }
     CGFloat x = MAX(0, MIN(NSWidth(st.frame) - NSWidth(cv.bounds), NSMidX(c) - NSWidth(cv.bounds) / 2));
     [cv scrollToPoint:NSMakePoint(round(x), 0)]; [self.scroll reflectScrolledClipView:cv];
 }
 - (void)scrollToNewest {
     NSClipView *cv = self.scroll.contentView;
+    if (ShelfVertical()) { [cv scrollToPoint:NSMakePoint(0, MAX(0, NSHeight(self.strip.frame) - NSHeight(cv.bounds)))]; [self.scroll reflectScrolledClipView:cv]; return; }
     [cv scrollToPoint:NSMakePoint(MAX(0, NSWidth(self.strip.frame) - NSWidth(cv.bounds)), 0)];
     [self.scroll reflectScrolledClipView:cv];
 }
 - (void)drawRect:(NSRect)dirty {
     NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
-    RoundRect(b, 22, ThemeIsLight() ? Hex(0xf6f6f4) : Hex(0x111215));   // solid: the page never shows through ShardStroke(b, 22, ThemeIsLight() ? HexA(0x000000, 0.1) : HexA(0xffffff, 0.1), 1);
+    NSInteger side = ShelfSide();
+    if (side) {   // a column out of the side edge: rounded only on the inner corners
+        NSRect body = side == 1 ? NSMakeRect(NSMinX(b) - 40, NSMinY(b), NSWidth(b) + 40, NSHeight(b)) : NSMakeRect(NSMinX(b), NSMinY(b), NSWidth(b) + 40, NSHeight(b));
+        RoundRect(body, 22, ThemeIsLight() ? Hex(0xf6f6f4) : Hex(0x111215));
+        [@"TABS" drawAtPoint:NSMakePoint(24, 21) withAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSKernAttributeName: @1.3}];
+        RoundRect(NSMakeRect(16, 44, NSWidth(self.bounds) - 32, 30), 15, ThemeIsLight() ? HexA(0x000000, 0.05) : Hex(0x1a1c20));
+        NSUInteger sleeping = 0; for (VTab *t in self.owner.tabs) if (!t.web && !t.isHome) sleeping++;
+        NSString *cnt = [NSString stringWithFormat:@"%@%lu open%@", self.pinned.count ? [NSString stringWithFormat:@"%lu pinned · ", (unsigned long)self.pinned.count] : @"", (unsigned long)(self.items.count - self.pinned.count), sleeping ? [NSString stringWithFormat:@" · %lu asleep", (unsigned long)sleeping] : @""];
+        NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail; ps.alignment = NSTextAlignmentCenter;
+        [cnt drawInRect:NSMakeRect(16, NSHeight(self.bounds) - 25, NSWidth(self.bounds) - 32, 14) withAttributes:@{NSFontAttributeName: MMono(10.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps}];
+        [[vText colorWithAlphaComponent:0.07] setFill]; Blend(NSMakeRect(16, NSHeight(self.bounds) - 34, NSWidth(self.bounds) - 32, 1));
+        return;
+    }
+    RoundRect(NSMakeRect(NSMinX(b), NSMinY(b), NSWidth(b), NSHeight(b) + 40), 22, ThemeIsLight() ? Hex(0xf6f6f4) : Hex(0x111215));   // rounded on top only: it rises out of the edge   // solid: the page never shows through ShardStroke(b, 22, ThemeIsLight() ? HexA(0x000000, 0.1) : HexA(0xffffff, 0.1), 1);
     [@"TABS" drawAtPoint:NSMakePoint(24, 21) withAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium), NSForegroundColorAttributeName: vDim, NSKernAttributeName: @1.3}];
     NSRect sr = NSMakeRect(84, 13, 240, 30);
     RoundRect(sr, 15, ThemeIsLight() ? HexA(0x000000, 0.05) : Hex(0x1a1c20));
@@ -8756,27 +8819,56 @@ static const CGFloat kCardW = 136, kCardH = 88, kCardGap = 12, kCardTop = 30;
 @property CFTimeInterval flashStart;   // a tab just opened in the background: the hint lights up and a spark runs to the right,
 @property (strong) NSTimer *flashTimer; // where the new tab now sits in the strip
 @property (readonly) BOOL flashing;
+@property CGFloat lift, liftTarget;     // 0…1: how far it leans up toward the cursor as it comes near
+@property (strong) NSTimer *liftTimer;
 - (void)flashNewTab;
+- (void)setApproach:(CGFloat)target;
+- (NSRect)edgeRect;
 @end
 @implementation VShelfHandle
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }   // one click works even while another app is in front
 - (BOOL)mouseDownCanMoveWindow { return NO; }
+// The view is taller than the bar so the bar has room to rise; only the bottom strip (plus however far it has risen)
+// takes the pointer, so the page above stays clickable.
+- (CGFloat)hitDepth { return 24; }   // fixed: a hit area that grew with the lean flipped the cursor back and forth
+// The 24 pt band along whichever window edge it sits on: that's where it takes the pointer.
+- (NSRect)edgeRect {
+    NSRect b = self.bounds; NSInteger s = ShelfSide();
+    return s == 0 ? NSMakeRect(0, NSHeight(b) - 24, NSWidth(b), 24) : s == 1 ? NSMakeRect(0, 0, 24, NSHeight(b)) : NSMakeRect(NSWidth(b) - 24, 0, 24, NSHeight(b));
+}
 - (void)updateTrackingAreas {
     [super updateTrackingAreas];
     for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
-    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:self.edgeRect options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways owner:self userInfo:nil]];
 }
-- (void)mouseEntered:(NSEvent *)e {   // a short beat first, so passing over it on the way to the Dock doesn't pop the tabs up
-    self.hover = YES; self.needsDisplay = YES;
-    if ([Defaults() boolForKey:kShelfNoHover]) return;
+// No cursor of its own: the page underneath sets the cursor on every move, so a second opinion here made it flicker.
+- (NSView *)hitTest:(NSPoint)p {
+    NSPoint q = [self convertPoint:p fromView:self.superview];
+    return NSPointInRect(q, self.edgeRect) ? [super hitTest:p] : nil;
+}
+// Eased toward the target at 60 fps, so it glides rather than tracking every jitter of the mouse; stops when settled.
+- (void)setApproach:(CGFloat)target {
+    target = MAX(0, MIN(1, target));
+    if (fabs(target - self.liftTarget) < 0.005 && fabs(self.lift - target) < 0.005) return;
+    self.liftTarget = target;
+    if (self.liftTimer) return;
     __weak VShelfHandle *ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ if (ws.hover) [WinFor(ws) showShelf:YES]; });
+    self.liftTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) {
+        VShelfHandle *me = ws; if (!me) { [t invalidate]; return; }
+        CGFloat d = me.liftTarget - me.lift;
+        me.lift = fabs(d) < 0.004 ? me.liftTarget : me.lift + d * 0.42;
+        me.needsDisplay = YES;
+        if (me.lift == me.liftTarget) { [t invalidate]; me.liftTimer = nil; }
+    }];
+    [NSRunLoop.mainRunLoop addTimer:self.liftTimer forMode:NSRunLoopCommonModes];
 }
+- (void)mouseEntered:(NSEvent *)e { self.hover = YES; self.needsDisplay = YES; }   // opening on hover is ShelfTrack's call (it waits for intent)
 - (void)scrollWheel:(NSEvent *)e {   // swipe up on the bar: the tabs come up and stay
-    CGFloat dy = e.scrollingDeltaY; BOOL up = e.isDirectionInvertedFromDevice ? dy < 0 : dy > 0;
+    CGFloat dy = e.scrollingDeltaY, dx = e.scrollingDeltaX; NSInteger side = ShelfSide();
+    BOOL up = side == 0 ? (e.isDirectionInvertedFromDevice ? dy < 0 : dy > 0) : fabs(dx) > fabs(dy);   // at a side: a sideways swipe
     if (e.phase == NSEventPhaseBegan) self.swipe = 0;
-    if (up) self.swipe += fabs(dy);
+    if (up) self.swipe += side == 0 ? fabs(dy) : fabs(dx);
     if (self.swipe > 18) { self.swipe = 0; VWindow *w = WinFor(self); [w showShelf:YES]; VTabShelf *s = (VTabShelf *)w.shelf; s.sticky = YES; [w.window makeFirstResponder:s.search]; }
 }
 - (void)mouseExited:(NSEvent *)e { self.hover = NO; self.needsDisplay = YES; }
@@ -8808,20 +8900,43 @@ static const CFTimeInterval kFlashLen = 1.35;
     VWindow *w = WinFor(self);
     NSArray<VTab *> *tabs = w.tabs ?: @[];
     NSInteger n = MIN(40, (NSInteger)tabs.count);
-    CGFloat dot = 5, curW = 16, gap = n > 1 ? MIN(4, (NSWidth(self.bounds) - 20 - curW - (n - 1) * dot) / (n - 1)) : 0;
-    if (gap < 1.5) { gap = 1.5; dot = MAX(2, (NSWidth(self.bounds) - 20 - curW - (n - 1) * gap) / MAX(1, n - 1)); }
+    // Drawn as if along the bottom edge (length across, depth up from the edge); at a side the drawing is turned
+    // so the same map runs down the left or right edge, leaning inward.
+    NSInteger side = ShelfSide();
+    CGFloat len = side ? NSHeight(self.bounds) : NSWidth(self.bounds), H = side ? NSWidth(self.bounds) : NSHeight(self.bounds);
+    if (side) {
+        NSAffineTransform *tf = [NSAffineTransform transform];
+        NSAffineTransformStruct m = {0, 1, side == 1 ? -1 : 1, 0, side == 1 ? H : 0, 0};
+        tf.transformStruct = m; [tf concat];
+    }
+    CGFloat dot = 5, curW = 16, gap = n > 1 ? MIN(4, (len - 20 - curW - (n - 1) * dot) / (n - 1)) : 0;
+    if (gap < 1.5) { gap = 1.5; dot = MAX(2, (len - 20 - curW - (n - 1) * gap) / MAX(1, n - 1)); }
     CGFloat total = n ? curW + (n - 1) * (dot + gap) : 56;
-    CGFloat x = round(NSMidX(self.bounds) - total / 2), y = NSHeight(self.bounds) - 9;
-    NSRect group = NSMakeRect(x - 6, y - 4, total + 12, dot + 8);
+    CGFloat L = self.lift, ease = L * L * (3 - 2 * L);   // smoothstep: barely moves far away, leans in near
+    CGFloat x = round(len / 2 - total / 2), y = H - 7 - 12 * ease;
+    NSRect group = NSMakeRect(x - 7, y - 5, total + 14, dot + 10);
+    if (n == 1) group = NSMakeRect(round(len / 2 - 27), y - 5, 54, 14);   // one tab: the backing fits the 40 pt bar
+    // as it leans up, its backing grows out of the window's edge to meet it (a tab being drawn up, no gap under it)
+    CGFloat back = MAX(ease, self.hover ? 1 : 0);
+    if (back > 0.02) {
+        NSRect tab = NSMakeRect(NSMinX(group), NSMinY(group), NSWidth(group), H - NSMinY(group) + NSHeight(group));
+        RoundRect(tab, NSHeight(group) / 2, [vText colorWithAlphaComponent:(ThemeIsLight() ? 0.06 : 0.085) * back]);
+    }
     if (e > 0.001) for (int k = 3; k >= 1; k--)   // a soft halo in your highlight colour when a tab opens behind
         RoundRect(NSInsetRect(group, -2.2 * k, -1.6 * k), NSHeight(group) / 2 + 2.2 * k, [vEmber colorWithAlphaComponent:0.075 * e]);
-    if (self.hover) RoundRect(group, NSHeight(group) / 2, [vText colorWithAlphaComponent:ThemeIsLight() ? 0.06 : 0.08]);
+
     if (!n) { RoundRect(NSMakeRect(x, y, 56, dot), 2.5, [Hex(0x787a80) colorWithAlphaComponent:0.5]); return; }
+    // one tab: there's no position to show, so just a quiet bar (a lone bright pill read as a spike at the window's edge)
+    if (n == 1 && e <= 0.001) {
+        CGFloat bw = 40, bx = round(len / 2 - bw / 2);
+        RoundRect(NSMakeRect(bx, y + 0.5, bw, 4), 2, [Hex(0x8a8c93) colorWithAlphaComponent:self.hover ? 0.8 : 0.45 + 0.35 * ease]);
+        return;
+    }
     NSColor *pick = PickColor(w.isPrivate, w.profile);
     for (NSInteger i = 0; i < n; i++) {
         VTab *t = tabs[(NSUInteger)i]; BOOL cur = t == w.current;
         CGFloat wd = cur ? curW : dot;
-        NSColor *c = cur ? pick : [Hex(0x8a8c93) colorWithAlphaComponent:(t.audible && !t.muted) ? 0.95 : (self.hover ? 0.8 : 0.55)];
+        NSColor *c = cur ? pick : [Hex(0x8a8c93) colorWithAlphaComponent:(t.audible && !t.muted) ? 0.95 : (self.hover ? 0.8 : 0.55 + 0.25 * ease)];
         if (e > 0.001 && i == n - 1 && !cur) c = [c blendedColorWithFraction:e ofColor:vEmber] ?: c;   // the new one, at the right end
         RoundRect(NSMakeRect(x, y, wd, dot), dot / 2, c);
         x += wd + gap;
@@ -8836,37 +8951,108 @@ static const CFTimeInterval kFlashLen = 1.35;
 
 // Hovering the bottom edge of a Iris window brings its tabs up, even while another app is in front
 // (as long as nothing covers that edge); moving well away puts them back. Esc closes them.
+// The hover zone: a band around the tab map at the middle of the bottom edge (360 × 24 pt), not the whole edge,
+// so reaching for a link low on the page doesn't bring the tabs up.
+static BOOL ShelfZone(NSView *root, NSPoint p) {
+    CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds); NSInteger side = ShelfSide();
+    if (side == 1) return fabs(p.y - ShelfMidY(H)) <= 180 && p.x >= -1 && p.x <= 24;
+    if (side == 2) return fabs(p.y - ShelfMidY(H)) <= 180 && p.x >= W - 24 && p.x <= W + 1;
+    return fabs(p.x - W / 2) <= 180 && p.y >= H - 24 && p.y <= H + 1;
+}
+// How far the pointer is from the tab map: along the edge beyond its ends, and in from the edge.
+static CGFloat ShelfDistance(NSView *root, NSPoint p) {
+    CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds); NSInteger side = ShelfSide();
+    if (side == 1) return hypot(MAX(0, fabs(p.y - ShelfMidY(H)) - 130), MAX(0, p.x));
+    if (side == 2) return hypot(MAX(0, fabs(p.y - ShelfMidY(H)) - 130), MAX(0, W - p.x));
+    return hypot(MAX(0, fabs(p.x - W / 2) - 130), MAX(0, H - p.y));
+}
+// Intent, not passing through: the tabs open once the pointer has been in the zone for 30 ms moving slowly.
+// A fast pass (travel toward the Dock or across the page) keeps restarting the clock and leaves before it runs out.
+static NSInteger gShelfGen; static BOOL gShelfIn; static CFTimeInterval gShelfSince, gShelfLastT; static NSPoint gShelfLastP;
+
+// While the pointer is over the tab strip or the tab map, the page underneath stops hearing mouse moves: otherwise it
+// keeps setting its own cursor (a hand, a text beam) for whatever lies hidden behind the widget.
+static __weak VWindow *gMuted;
+static void PageHearsMouse(VWindow *w, BOOL hears) {
+    if (!w) return;
+    NSMutableArray<WKWebView *> *webs = [NSMutableArray array];
+    for (VTab *t in w.tabs) if (t.web.web) [webs addObject:t.web.web];
+    SEL a = NSSelectorFromString(@"_setIgnoresMouseMoveEvents:"), b = NSSelectorFromString(@"_setIgnoresNonWheelEvents:");
+    for (WKWebView *v in webs) {
+        if ([v respondsToSelector:a]) ((void (*)(id, SEL, BOOL))objc_msgSend)(v, a, !hears);
+        else if ([v respondsToSelector:b]) ((void (*)(id, SEL, BOOL))objc_msgSend)(v, b, !hears);
+    }
+    if (!hears) [NSCursor.arrowCursor set];
+}
+static void ShelfMuteFor(VWindow *w) {   // w: the window whose widget is under the pointer, or nil
+    VWindow *cur = gMuted;
+    if (cur == w) { if (w) [NSCursor.arrowCursor set]; return; }
+    if (cur) PageHearsMouse(cur, YES);
+    gMuted = w;
+    if (w) PageHearsMouse(w, NO);
+}
 static void ShelfTrack(NSPoint screen) {
     // this runs on every mouse move anywhere on the Mac: plain arithmetic first, and the window server is only asked
-    // "which window is on top here?" when the pointer is actually at an Iris window's bottom edge
+    // "which window is on top here?" when the pointer is actually near an Iris window's bottom edge
     BOOL near = NO;
     for (VWindow *w in gWindows) {
         NSWindow *win = w.window; if (!win.isVisible || win.isMiniaturized) continue;
         NSRect f = win.frame;
-        if (((VTabShelf *)w.shelf).shown || (screen.x > NSMinX(f) && screen.x < NSMaxX(f) && screen.y >= NSMinY(f) - 1 && screen.y <= NSMinY(f) + 7)) { near = YES; break; }
+        NSInteger side = ShelfSide();
+        BOOL inX = screen.x > NSMinX(f) && screen.x < NSMaxX(f), inY = screen.y > NSMinY(f) && screen.y < NSMaxY(f);
+        BOOL band = side == 0 ? (inX && screen.y >= NSMinY(f) - 1 && screen.y <= NSMinY(f) + 105)
+                  : side == 1 ? (inY && screen.x >= NSMinX(f) - 1 && screen.x <= NSMinX(f) + 105)
+                              : (inY && screen.x <= NSMaxX(f) + 1 && screen.x >= NSMaxX(f) - 105);
+        if (((VTabShelf *)w.shelf).shown || band) { near = YES; break; }
     }
-    if (!near) return;
-    NSInteger topNumber = [NSWindow windowNumberAtPoint:screen belowWindowWithWindowNumber:0];
+    static BOOL leaning;
+    if (!near) {
+        ShelfMuteFor(nil);
+        if (gShelfIn) { gShelfIn = NO; gShelfGen++; }
+        if (leaning) { leaning = NO; for (VWindow *w in gWindows) [(VShelfHandle *)w.shelfHandle setApproach:0]; }
+        return;
+    }
+    VWindow *hit = nil, *over = nil;
+    static NSInteger lastTop; static CFTimeInterval lastAsk; static NSPoint lastAt;
+    CFTimeInterval nowT = CACurrentMediaTime();
+    if (nowT - lastAsk > 0.12 || hypot(screen.x - lastAt.x, screen.y - lastAt.y) > 60) {   // the window server is only asked now and then
+        lastTop = [NSWindow windowNumberAtPoint:screen belowWindowWithWindowNumber:0]; lastAsk = nowT; lastAt = screen;
+    }
+    NSInteger topNumber = lastTop;
     for (VWindow *w in gWindows.copy) {
         NSWindow *win = w.window; VTabShelf *s = (VTabShelf *)w.shelf;
         if (!s || !win.isVisible || win.isMiniaturized) continue;
         NSView *root = win.contentView;
         NSPoint p = [root convertPoint:[win convertPointFromScreen:screen] fromView:nil];
-        CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds);
+        CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds); (void)H; (void)W;
         if (!s.shown) {
-            BOOL edge = p.y >= H - 6 && p.y <= H + 1 && p.x > 16 && p.x < W - 16;
-            if (edge && topNumber == win.windowNumber && ![Defaults() boolForKey:kShelfNoHover] && ![[w valueForKey:@"pageFull"] boolValue]) {
-                // a short beat, then only if the pointer is still resting at the edge (not just passing to the Dock)
-                __weak VWindow *ww = w;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-                    VWindow *x = ww; if (!x || ((VTabShelf *)x.shelf).shown) return;
-                    NSView *rt = x.window.contentView;
-                    NSPoint q = [rt convertPoint:[x.window convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
-                    if (q.y >= NSHeight(rt.bounds) - 7 && q.y <= NSHeight(rt.bounds) + 1 && q.x > 16 && q.x < NSWidth(rt.bounds) - 16) [x showShelf:YES];
-                });
-            }
+            BOOL ok = topNumber == win.windowNumber && ![Defaults() boolForKey:kShelfNoHover] && ![[w valueForKey:@"pageFull"] boolValue];
+            if (!hit && ok && ShelfZone(root, p)) hit = w;
+            // the closer the pointer comes (within 100 pt of the tab map), the further the map leans up to meet it
+            CGFloat a = ok ? MAX(0, 1 - ShelfDistance(root, p) / 100) : 0;
+            [(VShelfHandle *)w.shelfHandle setApproach:a]; if (a > 0) leaning = YES;
         } else if (!s.sticky && !NSPointInRect(p, NSInsetRect(s.frame, -30, -40))) [w showShelf:NO];
+        if (!over && topNumber == win.windowNumber) {   // the pointer is on Iris's own widget, not the page
+            NSView *hd = w.shelfHandle;
+            NSRect handleHit = [hd convertRect:[(VShelfHandle *)hd edgeRect] toView:root];
+            if ((s.shown && NSPointInRect(p, s.frame)) || (!hd.hidden && !s.shown && NSPointInRect(p, handleHit))) over = w;
+        }
     }
+    ShelfMuteFor(over);
+    if (!hit) { if (gShelfIn) { gShelfIn = NO; gShelfGen++; } return; }
+    CFTimeInterval now = CACurrentMediaTime();
+    double speed = gShelfIn ? hypot(screen.x - gShelfLastP.x, screen.y - gShelfLastP.y) / MAX(0.001, now - gShelfLastT) : 1e9;
+    if (!gShelfIn || speed > 450) gShelfSince = now;   // still travelling: the clock starts once it slows down
+    gShelfIn = YES; gShelfLastP = screen; gShelfLastT = now;
+    NSInteger gen = ++gShelfGen;
+    __weak VWindow *ww = hit;
+    double wait = MAX(0.02, gShelfSince + 0.03 - now);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        VWindow *x = ww; if (!x || gen != gShelfGen || ((VTabShelf *)x.shelf).shown) return;
+        NSView *rt = x.window.contentView;
+        NSPoint q = [rt convertPoint:[x.window convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
+        if (ShelfZone(rt, q) && CACurrentMediaTime() - gShelfSince >= 0.02) [x showShelf:YES];
+    });
 }
 static void InstallShelfMonitor(void) {
     static id mon, outside;
@@ -8896,8 +9082,24 @@ static void InstallShelfMonitor(void) {
 - (NSRect)shelfFrame {
     NSView *root = self.window.contentView;
     CGFloat W = NSWidth(root.bounds), H = NSHeight(root.bounds);
-    CGFloat h = ((VTabShelf *)self.shelf).wantHeight ?: 274;
-    return NSMakeRect(14, H - 14 - h, W - 28, h);
+    VTabShelf *s = (VTabShelf *)self.shelf;
+    NSInteger side = ShelfSide();
+    if (side) {   // a column out of the side edge, centred on the page area, as tall as its cards need (then it scrolls)
+        CGFloat w = s.wantWidth ?: kCardW + 48, avail = H - 64 - 16;
+        CGFloat h = MIN(avail, MAX(300, s.wantHeight ?: avail));
+        CGFloat y = MAX(64, MIN(H - 16 - h, round(ShelfMidY(H) - h / 2)));
+        return side == 1 ? NSMakeRect(0, y, w, h) : NSMakeRect(W - w, y, w, h);
+    }
+    CGFloat h = s.wantHeight ?: 274;
+    // centred over the tab map it rises from, as wide as its cards need (never narrower than its header, never wider
+    // than the window; past that the cards scroll)
+    CGFloat w = MIN(W - 28, MAX(560, s.wantWidth ?: W - 28));
+    return NSMakeRect(round((W - w) / 2), H - h - 6, w, h + 6);   // sits on the window's bottom edge: nothing of the page shows under it
+}
+// Where it waits while hidden: just past its place, toward the edge it comes out of.
+- (NSRect)shelfRestFrame {
+    NSRect f = [self shelfFrame]; NSInteger side = ShelfSide();
+    return side == 1 ? NSOffsetRect(f, -16, 0) : side == 2 ? NSOffsetRect(f, 16, 0) : NSOffsetRect(f, 0, 14);
 }
 - (void)showShelf:(BOOL)on {
     VTabShelf *s = (VTabShelf *)self.shelf;
@@ -8911,7 +9113,7 @@ static void InstallShelfMonitor(void) {
         CaptureThumb(self.current);
         [s reload]; f = [self shelfFrame];
         [CATransaction begin]; [CATransaction setDisableActions:YES];   // start from just below its place, not wherever it last was
-        s.frame = NSOffsetRect(f, 0, 14); s.alphaValue = 0; s.hidden = NO;
+        s.frame = [self shelfRestFrame]; s.alphaValue = 0; s.hidden = NO;
         ((VShelfStrip *)s.strip).kbd = -1;
         [s layoutShelf]; [s scrollToCurrent]; [s displayIfNeeded];
         [CATransaction commit];
@@ -8929,7 +9131,7 @@ static void InstallShelfMonitor(void) {
         __weak VWindow *ws = self;
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
             ctx.duration = 0.14;
-            s.animator.frame = NSOffsetRect(f, 0, 14); s.animator.alphaValue = 0;
+            s.animator.frame = [self shelfRestFrame]; s.animator.alphaValue = 0;
         } completionHandler:^{
             if (!s.shown) { s.hidden = YES; ws.shelfHandle.hidden = [[ws valueForKey:@"pageFull"] boolValue] || [Defaults() boolForKey:kShelfNoHint]; }
         }];
@@ -8948,59 +9150,101 @@ static void InstallShelfMonitor(void) {
 // where the page begins. It grows with the page's real progress (and creeps on its own while a page goes quiet,
 // so it never sits still), brightest at its tip, with a glint running along it; done, it reaches the far edge and fades.
 @interface VLoadLine : NSView
-@property (strong) CAGradientLayer *fill, *tip, *glint;
+@property (strong) CALayer *fill, *halfL, *halfR;
+@property (strong) CAGradientLayer *flowL, *flowR, *core, *aperture;
 @property double real, shown;
 @property CFTimeInterval started;
 @property BOOL active;
 @property (strong) NSTimer *tick;
 - (void)loading:(BOOL)on progress:(double)p;
 @end
+// Aperture: a load opens from the middle of the page's top edge outward, like an iris widening, while Iris's
+// teal, blue and violet flow out from the centre; a soft bright core breathes at the middle so a stalled load still
+// looks alive. When the page arrives it opens to both edges, blooms once and fades.
 @implementation VLoadLine
+static const CGFloat kFlowPeriod = 260;
 - (instancetype)initWithFrame:(NSRect)r {
     if (!(self = [super initWithFrame:r])) return nil;
     self.wantsLayer = YES; self.layer.masksToBounds = NO;
-    self.fill = [CAGradientLayer layer]; self.fill.startPoint = CGPointMake(0, 0.5); self.fill.endPoint = CGPointMake(1, 0.5); self.fill.masksToBounds = YES;
-    self.tip = [CAGradientLayer layer]; self.tip.startPoint = CGPointMake(0, 0.5); self.tip.endPoint = CGPointMake(1, 0.5);
-    self.glint = [CAGradientLayer layer]; self.glint.startPoint = CGPointMake(0, 0.5); self.glint.endPoint = CGPointMake(1, 0.5);
-    [self.fill addSublayer:self.tip]; [self.fill addSublayer:self.glint];
+    self.fill = [CALayer layer];
+    self.halfL = [CALayer layer]; self.halfL.masksToBounds = YES;
+    self.halfR = [CALayer layer]; self.halfR.masksToBounds = YES;
+    self.flowL = [CAGradientLayer layer]; self.flowL.startPoint = CGPointMake(0, 0.5); self.flowL.endPoint = CGPointMake(1, 0.5);
+    self.flowR = [CAGradientLayer layer]; self.flowR.startPoint = CGPointMake(0, 0.5); self.flowR.endPoint = CGPointMake(1, 0.5);
+    self.core = [CAGradientLayer layer]; self.core.startPoint = CGPointMake(0, 0.5); self.core.endPoint = CGPointMake(1, 0.5);
+    self.aperture = [CAGradientLayer layer]; self.aperture.startPoint = CGPointMake(0, 0.5); self.aperture.endPoint = CGPointMake(1, 0.5);
+    self.aperture.colors = @[(id)[NSColor colorWithWhite:0 alpha:0].CGColor, (id)NSColor.blackColor.CGColor, (id)NSColor.blackColor.CGColor, (id)[NSColor colorWithWhite:0 alpha:0].CGColor];
+    self.aperture.locations = @[@0, @0.14, @0.86, @1];
+    [self.halfL addSublayer:self.flowL]; [self.halfR addSublayer:self.flowR];
+    [self.fill addSublayer:self.halfL]; [self.fill addSublayer:self.halfR]; [self.fill addSublayer:self.core];
+    self.fill.mask = self.aperture;
     [self.layer addSublayer:self.fill];
     self.fill.hidden = YES;
     return self;
 }
 - (NSView *)hitTest:(NSPoint)p { return nil; }   // never in the way of a click
+// colours repeat every kFlowPeriod points, so sliding a flow by exactly one period loops without a seam
+- (NSArray *)cycle:(NSUInteger)n reversed:(BOOL)rev {
+    BOOL light = ThemeIsLight();
+    NSColor *teal = light ? Hex(0x22b3a0) : Hex(0x7fe3d1), *blue = light ? Hex(0x4a78ee) : Hex(0x86a3f7), *violet = light ? Hex(0x8c63e6) : Hex(0xb796f5);
+    NSArray *one = @[(id)blue.CGColor, (id)violet.CGColor, (id)blue.CGColor, (id)teal.CGColor];
+    NSMutableArray *c = [NSMutableArray array];
+    for (NSUInteger i = 0; i < n; i++) [c addObjectsFromArray:one];
+    [c addObject:(id)blue.CGColor];
+    return rev ? c.reverseObjectEnumerator.allObjects : c;
+}
 - (void)paint {
-    NSColor *ink = [Defaults() integerForKey:kAccent] == 0 ? vText : vAccent;   // quiet, in your accent if you chose one
-    self.fill.colors = @[(id)[ink colorWithAlphaComponent:0.45].CGColor, (id)[ink colorWithAlphaComponent:0.8].CGColor];
-    self.tip.colors = @[(id)[ink colorWithAlphaComponent:0].CGColor, (id)[ink colorWithAlphaComponent:1].CGColor];
-    self.glint.colors = @[(id)[NSColor colorWithWhite:1 alpha:0].CGColor, (id)[NSColor colorWithWhite:1 alpha:ThemeIsLight() ? 0.6 : 0.45].CGColor, (id)[NSColor colorWithWhite:1 alpha:0].CGColor];
+    CGFloat W = NSWidth(self.bounds), H = NSHeight(self.bounds), half = round(W / 2);
+    NSUInteger n = (NSUInteger)ceil((half + kFlowPeriod) / kFlowPeriod) + 1;
+    CGFloat span = n * kFlowPeriod;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    self.fill.frame = CGRectMake(0, 0, W, H);
+    self.halfL.frame = CGRectMake(0, 0, half, H); self.halfR.frame = CGRectMake(half, 0, W - half, H);
+    // the right half flows rightward from the centre, the left half (mirrored) leftward
+    self.flowR.frame = CGRectMake(-kFlowPeriod, 0, span, H); self.flowR.colors = [self cycle:n reversed:NO];
+    self.flowL.frame = CGRectMake(half + kFlowPeriod - span, 0, span, H); self.flowL.colors = [self cycle:n reversed:YES];
+    self.core.frame = CGRectMake(half - 60, 0, 120, H);
+    self.core.colors = @[(id)[NSColor colorWithWhite:1 alpha:0].CGColor, (id)[NSColor colorWithWhite:1 alpha:ThemeIsLight() ? 0.55 : 0.75].CGColor, (id)[NSColor colorWithWhite:1 alpha:0].CGColor];
+    [CATransaction commit];
+    NSColor *glow = ThemeIsLight() ? Hex(0x4a78ee) : Hex(0x86a3f7);
+    self.layer.shadowColor = glow.CGColor; self.layer.shadowOffset = CGSizeZero;
+    self.layer.shadowRadius = 4; self.layer.shadowOpacity = ThemeIsLight() ? 0.45 : 0.85;   // the glow follows the line's own shape
 }
 - (void)place:(double)f duration:(CFTimeInterval)d {
     CGFloat W = NSWidth(self.bounds), H = NSHeight(self.bounds), w = round(W * f);
     [CATransaction begin]; [CATransaction setAnimationDuration:d];
     [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithControlPoints:0.25 :0.8 :0.3 :1]];
     if (d == 0) [CATransaction setDisableActions:YES];
-    self.fill.frame = CGRectMake(0, 0, w, H);
-    self.tip.frame = CGRectMake(MAX(0, w - 120), 0, 120, H);
+    self.aperture.frame = CGRectMake(round((W - w) / 2), 0, w, H);   // opens from the middle out
     [CATransaction commit];
 }
+- (void)startMotion {
+    CABasicAnimation *r = [CABasicAnimation animationWithKeyPath:@"position.x"];
+    r.byValue = @(kFlowPeriod); r.duration = 2.6; r.repeatCount = HUGE_VALF; r.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+    [self.flowR addAnimation:r forKey:@"flow"];
+    CABasicAnimation *l = [r copy]; l.byValue = @(-kFlowPeriod);
+    [self.flowL addAnimation:l forKey:@"flow"];
+    CABasicAnimation *b = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    b.fromValue = @0.35; b.toValue = @1; b.duration = 0.9; b.autoreverses = YES; b.repeatCount = HUGE_VALF;
+    b.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [self.core addAnimation:b forKey:@"breathe"];
+}
+- (void)stopMotion { [self.flowR removeAllAnimations]; [self.flowL removeAllAnimations]; [self.core removeAllAnimations]; }
 - (void)advance {
     double t = CACurrentMediaTime() - self.started;
     double creep = 0.85 * (1 - exp(-t / 4.0));   // a page that's gone quiet still shows life, never past 85%
-    double target = MAX(MAX(0.03, self.real), creep);
-    if (target > self.shown + 0.002) { self.shown = target; [self place:self.shown duration:0.4]; }
+    double target = MAX(MAX(0.04, self.real), creep);
+    if (target > self.shown + 0.002) { self.shown = target; [self place:self.shown duration:0.45]; }
 }
 - (void)loading:(BOOL)on progress:(double)p {
-    [self paint];
     self.real = MAX(0, MIN(1, p));
-    if (on && !self.active) {   // a fresh load starts at the left edge
+    if (on && !self.active) {   // a fresh load opens from nothing at the centre
         self.active = YES; self.started = CACurrentMediaTime(); self.shown = 0;
+        [self paint];
         [self.fill removeAllAnimations];
-        [CATransaction begin]; [CATransaction setDisableActions:YES]; self.fill.opacity = 1; self.fill.hidden = NO; self.glint.frame = CGRectMake(-160, 0, 160, NSHeight(self.bounds)); [CATransaction commit];
+        [CATransaction begin]; [CATransaction setDisableActions:YES]; self.fill.opacity = 1; self.fill.hidden = NO; [CATransaction commit];
         [self place:0 duration:0];
-        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"position.x"];
-        a.fromValue = @(-80); a.toValue = @(NSWidth(self.bounds) + 80); a.duration = 1.5; a.repeatCount = HUGE_VALF;
-        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        [self.glint addAnimation:a forKey:@"run"];
+        [self startMotion];
         __weak VLoadLine *ws = self;
         self.tick = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm) { [ws advance]; }];
         [NSRunLoop.mainRunLoop addTimer:self.tick forMode:NSRunLoopCommonModes];
@@ -9008,19 +9252,22 @@ static void InstallShelfMonitor(void) {
     if (on) { [self advance]; return; }
     if (!self.active) return;
     self.active = NO; [self.tick invalidate]; self.tick = nil;
-    // done: on to the far edge, then fade
+    // arrived: open to both edges, a brief bloom, then fade
     [CATransaction begin];
     [CATransaction setCompletionBlock:^{
         if (self.active) return;
-        [CATransaction begin]; [CATransaction setAnimationDuration:0.35];
-        [CATransaction setCompletionBlock:^{ if (!self.active) { self.fill.hidden = YES; [self.glint removeAllAnimations]; } }];
+        CABasicAnimation *bloom = [CABasicAnimation animationWithKeyPath:@"shadowRadius"];
+        bloom.fromValue = @4; bloom.toValue = @9; bloom.duration = 0.18; bloom.autoreverses = YES;
+        [self.layer addAnimation:bloom forKey:@"bloom"];
+        [CATransaction begin]; [CATransaction setAnimationDuration:0.42];
+        [CATransaction setCompletionBlock:^{ if (!self.active) { self.fill.hidden = YES; [self stopMotion]; } }];
         self.fill.opacity = 0;
         [CATransaction commit];
     }];
-    [self place:1 duration:0.22];
+    [self place:1 duration:0.24];
     [CATransaction commit];
 }
-- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; if (self.active) [self place:self.shown duration:0]; }
+- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; if (self.active) { [self paint]; [self place:self.shown duration:0]; [self startMotion]; } }
 @end
 
 #pragma mark - Monolith panels: Lens, and the address popup
@@ -10256,8 +10503,10 @@ static NSString *CreateProfile(NSString *name) {
     self.lights.frame = NSMakeRect(12, 7, 62, 22);
     self.loadLine.hidden = NO; self.loadLine.frame = NSMakeRect(0, top - 2, W, 2);   // right where the page begins, edge to edge
     VTabShelf *sh = (VTabShelf *)self.shelf;
-    sh.frame = sh.shown ? [self shelfFrame] : NSOffsetRect([self shelfFrame], 0, 14);   // waiting just below its place, so it always rises from the bottom
-    self.shelfHandle.frame = NSMakeRect(round(W / 2 - 130), H - 18, 260, 18);   // room for one dot per tab
+    sh.frame = sh.shown ? [self shelfFrame] : [self shelfRestFrame];   // waiting just past its place, so it always comes out of its edge
+    NSInteger side = ShelfSide(); CGFloat midY = ShelfMidY(H);
+    self.shelfHandle.frame = side == 1 ? NSMakeRect(0, midY - 130, 32, 260) : side == 2 ? NSMakeRect(W - 32, midY - 130, 32, 260)
+                                       : NSMakeRect(round(W / 2 - 130), H - 32, 260, 32);   // room for one dot per tab, and to lean in 12 pt
     self.shelfHandle.hidden = sh.shown || ([Defaults() boolForKey:kShelfNoHint] && !((VShelfHandle *)self.shelfHandle).flashing);
     if (np) {
         [np setValue:@YES forKey:@"floating"];
@@ -12830,6 +13079,11 @@ static NSArray *SettingsSchema(VWindow *win) {
         SGroup(@"Tabs", @[
             SSelect(@"sleep", @"Put background tabs to sleep", @"Sleeping tabs free their memory and wake instantly when you return to them.", @[@"After 5 minutes", @"After 10 minutes", @"After 30 minutes", @"After 1 hour", @"Never"], (NSInteger)si,
                     ^(NSInteger i) { [Defaults() setInteger:[mins[(NSUInteger)i] integerValue] forKey:kSleepMins]; }),
+            SSelect(@"shelfSide", @"Where your tabs live", @"Hover that edge of the window to bring them out. Along a side, they run top to bottom.", @[@"Bottom", @"Left side", @"Right side"], ShelfSide(),
+                    ^(NSInteger i) {
+                        [Defaults() setInteger:i forKey:kShelfSide];
+                        for (VWindow *w in gWindows) { [w showShelf:NO]; [(VTabShelf *)w.shelf reload]; [w layout]; w.shelfHandle.needsDisplay = YES; [w.shelfHandle updateTrackingAreas]; }
+                    }),
             SKey(kAutoPiP, @"Float playing videos when you switch tabs", @"A video that’s playing moves to picture in picture while you’re on another tab, and back when you return.", NO, nil) ]),
         SGroup(@"Page zoom", @[
             SSelect(@"zoom", @"Default zoom", @"Sites you've zoomed individually keep their own level.", @[@"75%", @"90%", @"100%", @"110%", @"125%", @"150%"], zi, ^(NSInteger i) {
@@ -13122,7 +13376,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     // ── Advanced
     NSMutableDictionary *reset = SButton(@"resetSettings", @"Restore default settings", @"Your bookmarks, history, tabs and extensions are kept.", @"Reset…", ^(NSDictionary *a, void (^done)(NSString *)) {
         for (NSString *k in @[kTheme, kAccent, kDensity, kSidebarRight, kHideButtons, kShowExtra, kAddrWidth, kExtPinned, kHTTPSOnly, kGPC, kClearOnQuit, kSitePerms, kJSOff, kCustomEngine, kUserAgent,
-                              kConfirmQuit, kMinFont, kSearch, kStartup, kBlock, kStrip, kCookieReject, kAutoPiP, kCodec, kCodec30, kBgThrottle, kSingleProcess, kRestorePaused, kResumeMedia, kLazyRestore, kSleepMins,
+                              kConfirmQuit, kMinFont, kSearch, kStartup, kBlock, kStrip, kCookieReject, kAutoPiP, kShelfSide, kCodec, kCodec30, kBgThrottle, kSingleProcess, kRestorePaused, kResumeMedia, kLazyRestore, kSleepMins,
                               kShowBookmarks, kScripts, kAskDownload, kDefaultZoom, kZoom, kAllowlist, kHomeTopSites, kDLAccel, kDLConns, kDLActive, kDLLimit])
             [Defaults() removeObjectForKey:k];
         IrisApplyTheme(); IrisReloadBlocklists(); RelayoutAll();
