@@ -2003,6 +2003,7 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
 @interface VExtButton : NSButton
 @end
 @implementation VExtButton
+- (BOOL)wantsUpdateLayer { return NO; }   // drawn through drawRect:, so the badge is painted over the icon
 - (void)drawRect:(NSRect)r {
     [super drawRect:r];
     NSString *t = ExtBadgeText(self.identifier, WinFor(self).current);
@@ -6589,7 +6590,12 @@ static NSColor *ExtColorFrom(id v) {
 }
 static NSColor *ExtBadgeColor(NSString *ident, BOOL text) {
     NSColor *c = ExtColorFrom(gExtBadges[ident][text ? @"fg" : @"bg"]);
-    return c ?: (text ? NSColor.whiteColor : Hex(0x5f6368));
+    if (c) return c;
+    if (!text) return Hex(0x5f6368);
+    // no text colour set: like Chrome, whichever of black or white reads on the badge's background
+    NSColor *bg = [ExtBadgeColor(ident, NO) colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    CGFloat lum = 0.2126 * bg.redComponent + 0.7152 * bg.greenComponent + 0.0722 * bg.blueComponent;
+    return lum > 0.6 ? NSColor.blackColor : NSColor.whiteColor;
 }
 static void ExtBadgesChanged(void) {   // a busy page blocks dozens at once: one redraw for the lot
     static BOOL queued; if (queued) return; queued = YES;
@@ -6652,7 +6658,8 @@ static NSArray *TargetFrames(WKWebView *v, NSDictionary *target) {
 static BOOL gExtDebug = NO;
 __attribute__((constructor)) static void IrisExtDebugInit(void) {   // a file named "extdebug" in the app, or ".extdebug" beside it (survives rebuilds)
     gExtDebug = [NSBundle.mainBundle pathForResource:@"extdebug" ofType:nil] != nil
-             || ([NSBundle.mainBundle.bundleIdentifier hasSuffix:@".dev"] && [NSFileManager.defaultManager fileExistsAtPath:[NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".extdebug"]]);
+             || ([NSBundle.mainBundle.bundleIdentifier hasSuffix:@".dev"] && [NSFileManager.defaultManager fileExistsAtPath:[NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".extdebug"]])
+             || (![NSBundle.mainBundle.bundleIdentifier hasSuffix:@".dev"] && [NSFileManager.defaultManager fileExistsAtPath:[NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".extdebug-main"]]);
 }
 
 @interface FExtHost () <WKNavigationDelegate>
@@ -7149,6 +7156,7 @@ static double ProcessCPUSeconds(pid_t pid) {
 
 - (void)tab:(VTab *)t event:(NSString *)kind {
     if (!t || !_exts.count || t.owner.isPrivate) return;
+    if ([kind isEqualToString:@"activated"]) ExtBadgesChanged();   // badges are per tab: show this tab's
     NSDictionary *info = TabInfo(t);
     // Chrome announces a tab before anything happens in it; extensions build their per-tab state from that
     static NSMutableSet<NSString *> *announced; if (!announced) announced = [NSMutableSet set];
@@ -7303,6 +7311,7 @@ static double ProcessCPUSeconds(pid_t pid) {
         if ([op isEqualToString:@"action.setBadgeColor"]) { b[[d[@"which"] isEqual:@"fg"] ? @"fg" : @"bg"] = d[@"color"] ?: NSNull.null; }
         else {
             id text = d[@"text"];
+            if (gExtDebug) DLog(@"ext badge %@: tab %@ (showing %ld) text '%@' (%@)", e.name, tid, (long)TabID(NormalWin().current), text, [text class]);
             if ([tid isKindOfClass:NSNumber.class]) { if ([text isKindOfClass:NSString.class]) b[@"tabs"][tid] = text; else [b[@"tabs"] removeObjectForKey:tid]; }
             else b[@"text"] = [text isKindOfClass:NSString.class] ? text : @"";
         }

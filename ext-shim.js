@@ -43,7 +43,8 @@
       G.addEventListener('error', ev => dbg('uncaught:', ev.message, (ev.filename || '') + ':' + ev.lineno));
       G.addEventListener('unhandledrejection', ev => dbg('rejection:', ev.reason));
     }
-    dbg('loaded', CFG.mode, location.href.slice(0, 80));
+    dbg('loaded', CFG.mode, location.href.slice(0, 80), document.visibilityState);
+    if (G.document) G.document.addEventListener('visibilitychange', () => dbg('visibility', document.visibilityState, location.href.slice(0, 60)));
   }
 
   // Chrome APIs WebKit lacks that extensions take for granted
