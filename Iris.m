@@ -23,8 +23,12 @@
 #import <objc/message.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <CoreLocation/CoreLocation.h>
+#import <JavaScriptCore/JavaScriptCore.h>
+#import <Network/Network.h>
+#include <dns_sd.h>
 
 static void IrisReloadBlocklists(void);
+static void ShieldFetchSources(BOOL force, void (^done)(void));   // uBlock's scriptlets and stand-ins (v4l_shield)
 static void IrisSetBlocking(BOOL on);
 static void CtlOut(NSString *s);
 static void RelayoutAll(void);
@@ -1324,7 +1328,50 @@ static NSArray<NSArray<NSString *> *> *FilterLists(void) {
              @[@"easyprivacy", @"EasyPrivacy (trackers)", @"https://easylist.to/easylist/easyprivacy.txt"],
              @[@"pgl", @"Peter Lowe's ad and tracking servers", @"https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext"],
              @[@"cookies", @"Cookie notices (Fanboy)", @"https://secure.fanboy.co.nz/fanboy-cookiemonster.txt"],
-             @[@"annoyances", @"Annoyances (Fanboy)", @"https://secure.fanboy.co.nz/fanboy-annoyance.txt"]];
+             @[@"annoyances", @"Annoyances (Fanboy)", @"https://secure.fanboy.co.nz/fanboy-annoyance.txt"],
+             // uBlock Origin's own lists, the ones it turns on by default: its fixes, page scripts and unbreaks are most of its edge
+             @[@"ubo-filters", @"uBlock filters", @"https://ublockorigin.github.io/uAssets/filters/filters.txt"],
+             @[@"ubo-privacy", @"uBlock filters – Privacy", @"https://ublockorigin.github.io/uAssets/filters/privacy.txt"],
+             @[@"ubo-badware", @"uBlock filters – Badware risks", @"https://ublockorigin.github.io/uAssets/filters/badware.txt"],
+             @[@"ubo-quickfixes", @"uBlock filters – Quick fixes", @"https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt"],
+             @[@"ubo-unbreak", @"uBlock filters – Unbreak", @"https://ublockorigin.github.io/uAssets/filters/unbreak.txt"]];
+}
+// uBlock's !#if directives, for a WebKit browser: Safari's side of every fork, never Chromium's or uBO Lite's.
+static BOOL FLDirectiveTrue(NSString *expr) {
+    expr = Trim(expr);
+    if ([expr containsString:@"||"]) { for (NSString *p in [expr componentsSeparatedByString:@"||"]) if (FLDirectiveTrue(p)) return YES; return NO; }
+    if ([expr containsString:@"&&"]) { for (NSString *p in [expr componentsSeparatedByString:@"&&"]) if (!FLDirectiveTrue(p)) return NO; return YES; }
+    if ([expr hasPrefix:@"!"]) return !FLDirectiveTrue([expr substringFromIndex:1]);
+    if ([expr hasPrefix:@"("] && [expr hasSuffix:@")"]) return FLDirectiveTrue([expr substringWithRange:NSMakeRange(1, expr.length - 2)]);
+    return [@[@"env_safari", @"cap_user_stylesheet", @"true"] containsObject:expr];
+}
+// A list as uBlock reads it: the !#if blocks that don't apply taken out, and each !#include fetched and put in its place.
+static void FLFetchList(NSURL *u, NSInteger depth, void (^done)(NSString *text)) {
+    [[NSURLSession.sharedSession dataTaskWithURL:u completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        NSString *text = d.length && [(NSHTTPURLResponse *)r statusCode] == 200 ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
+        if (!text) { done(nil); return; }
+        NSMutableArray *out = [NSMutableArray array], *stack = [NSMutableArray array];   // stack of BOOL: are we in a live block?
+        NSMutableArray *includes = [NSMutableArray array];
+        for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+            if ([line hasPrefix:@"!#if "]) { BOOL parentLive = ![stack containsObject:@NO]; [stack addObject:@(parentLive && FLDirectiveTrue([line substringFromIndex:5]))]; continue; }
+            if ([line hasPrefix:@"!#else"]) { if (stack.count) { BOOL was = [stack.lastObject boolValue]; [stack removeLastObject]; BOOL parentLive = ![stack containsObject:@NO]; [stack addObject:@(parentLive && !was)]; } continue; }
+            if ([line hasPrefix:@"!#endif"]) { if (stack.count) [stack removeLastObject]; continue; }
+            if ([stack containsObject:@NO]) continue;
+            if ([line hasPrefix:@"!#include "]) { NSString *f = Trim([line substringFromIndex:10]); if (depth < 2 && f.length && ![f containsString:@".."]) { [includes addObject:@[@(out.count), f]]; [out addObject:@""]; } continue; }
+            [out addObject:line];
+        }
+        if (!includes.count) { done([out componentsJoinedByString:@"\n"]); return; }
+        dispatch_group_t g = dispatch_group_create();
+        NSMutableDictionary *got = [NSMutableDictionary dictionary];
+        for (NSArray *inc in includes) {
+            dispatch_group_enter(g);
+            FLFetchList([NSURL URLWithString:inc[1] relativeToURL:u].absoluteURL, depth + 1, ^(NSString *t) { @synchronized (got) { if (t) got[inc[0]] = t; } dispatch_group_leave(g); });
+        }
+        dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            for (NSArray *inc in includes) out[[inc[0] unsignedIntegerValue]] = got[inc[0]] ?: @"";
+            done([out componentsJoinedByString:@"\n"]);
+        });
+    }] resume];
 }
 static NSSet<NSString *> *ListsOn(void) {
     NSArray *a = [Defaults() arrayForKey:kListsOn];
@@ -1334,7 +1381,14 @@ static NSSet<NSString *> *ListsOn(void) {
         [Defaults() setBool:YES forKey:@"listsAnnoyancesOffered"];
         if (![a containsObject:@"annoyances"]) { a = [a arrayByAddingObject:@"annoyances"]; [Defaults() setObject:a forKey:kListsOn]; }
     }
-    return [NSSet setWithArray:a ?: @[@"easylist", @"easyprivacy", @"pgl", @"cookies", @"annoyances"]];
+    // uBlock Origin's own lists joined the defaults (Oct 2026): added once, then yours to turn off
+    NSArray *ubo = @[@"ubo-filters", @"ubo-privacy", @"ubo-badware", @"ubo-quickfixes", @"ubo-unbreak"];
+    if (a && ![Defaults() boolForKey:@"listsUBOOffered"]) {
+        [Defaults() setBool:YES forKey:@"listsUBOOffered"];
+        NSMutableArray *m = [a mutableCopy]; for (NSString *x in ubo) if (![m containsObject:x]) [m addObject:x];
+        a = m; [Defaults() setObject:a forKey:kListsOn];
+    }
+    return [NSSet setWithArray:a ?: [@[@"easylist", @"easyprivacy", @"pgl", @"cookies", @"annoyances"] arrayByAddingObjectsFromArray:ubo]];
 }
 
 @interface VBlocker ()
@@ -1391,11 +1445,13 @@ static NSString *ListDir(void) {
         NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:file error:nil];
         if (!force && attrs && -[attrs.fileModificationDate timeIntervalSinceNow] < 6 * 86400) continue;
         dispatch_group_enter(g);
-        [[NSURLSession.sharedSession dataTaskWithURL:[NSURL URLWithString:l[2]] completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-            if (d.length > 1000 && [(NSHTTPURLResponse *)r statusCode] == 200) [d writeToFile:file atomically:YES];
+        FLFetchList([NSURL URLWithString:l[2]], 0, ^(NSString *text) {
+            if (text.length > 1000) [text writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:nil];
             dispatch_group_leave(g);
-        }] resume];
+        });
     }
+    dispatch_group_enter(g);
+    ShieldFetchSources(force, ^{ dispatch_group_leave(g); });   // uBlock's scriptlets and stand-in scripts, from its own source
     dispatch_group_notify(g, dispatch_get_main_queue(), ^{
         IrisReloadBlocklists();
         [Defaults() setDouble:NSDate.date.timeIntervalSince1970 forKey:kListsUpdated];
@@ -1454,6 +1510,13 @@ static NSString *FLPattern(NSString *p, BOOL *hostOnly) {
     return r;
 }
 
+// A /regex/ rule, when it only uses what WebKit's url-filter understands (no alternation, counted repeats, \\d, lookarounds…).
+static NSString *FLRegex(NSString *r) {
+    if (!r.length || r.length > 300) return nil;
+    for (NSString *bad in @[@"|", @"{", @"(?", @"\\d", @"\\D", @"\\w", @"\\W", @"\\s", @"\\S", @"\\b", @"\\B"]) if ([r containsString:bad]) return nil;
+    for (NSUInteger i = 0; i < r.length; i++) { unichar c = [r characterAtIndex:i]; if (c > 126 || c < 32) return nil; }
+    return [r stringByReplacingOccurrencesOfString:@"\\/" withString:@"/"];
+}
 static NSString *FLDomain(NSString *d) {
     d = d.lowercaseString;
     if (!d.length || [d hasSuffix:@".*"] || [d hasPrefix:@"/"]) return nil;   // entities (example.*) and regex domains: WebKit has no equivalent
@@ -1477,8 +1540,9 @@ static NSArray *FLBaseTypes(void) { return @[@"image", @"style-sheet", @"script"
 
 // One network line (without "@@") and its options → a WebKit trigger, or nil to leave it out.
 // *flags: 1 important, 2 exception for the whole page ($document), 4 $elemhide, 8 $generichide
+static NSString *gFLRedirect; static BOOL gFLRedirectOnly;   // the last rule's $redirect= / $redirect-rule= resource
 static NSMutableDictionary *FLNetTrigger(NSString *pattern, NSString *opts, BOOL exception, int *flags) {
-    *flags = 0;
+    *flags = 0; gFLRedirect = nil; gFLRedirectOnly = NO;
     NSMutableSet *types = [NSMutableSet set], *notTypes = [NSMutableSet set];
     NSMutableArray *inc = [NSMutableArray array], *exc = [NSMutableArray array];
     NSString *load = nil; BOOL caseSens = NO, onlyUnsupportedTypes = NO, sawType = NO;
@@ -1500,13 +1564,22 @@ static NSMutableDictionary *FLNetTrigger(NSString *pattern, NSString *opts, BOOL
         else if ([name isEqualToString:@"all"]) { [types addObjectsFromArray:FLBaseTypes()]; [types addObjectsFromArray:@[@"document", @"popup"]]; sawType = YES; }
         else if (map[name]) { if (neg) [notTypes addObject:map[name]]; else { [types addObject:map[name]]; sawType = YES; } }
         else if ([ignoredTypes containsObject:name]) { if (!neg) { sawType = YES; onlyUnsupportedTypes = YES; } }
-        else return nil;   // redirect, removeparam, csp, header… WebKit can't do these faithfully
+        else if (!exception && ([name hasPrefix:@"redirect="] || [name hasPrefix:@"redirect-rule="] || [name hasPrefix:@"rewrite=abp-resource:"])) {
+            // uBlock swaps the request for a harmless stand-in: here it's blocked, and the stand-in is planted in the page (layer 5)
+            NSString *res = [o substringFromIndex:[o rangeOfString:@"=" ].location + 1];
+            if ([res hasPrefix:@"abp-resource:"]) res = [res substringFromIndex:13];
+            NSRange colon = [res rangeOfString:@":"]; if (colon.location != NSNotFound) res = [res substringToIndex:colon.location];   // :priority
+            gFLRedirect = res.lowercaseString; gFLRedirectOnly = [name hasPrefix:@"redirect-rule="];
+        }
+        else return nil;   // removeparam, csp, header… WebKit can't do these faithfully
     }
     if (exception && (*flags & (4 | 8))) return [NSMutableDictionary dictionary];   // handled with element hiding
     if (sawType && !types.count) return nil;   // only types WebKit can't single out (pings, websockets…)
     (void)onlyUnsupportedTypes;
     BOOL hostOnly = NO;
-    NSString *rx = FLPattern(pattern, &hostOnly);
+    NSString *rx = nil;
+    if ([pattern hasPrefix:@"/"] && [pattern hasSuffix:@"/"] && pattern.length > 2) rx = FLRegex([pattern substringWithRange:NSMakeRange(1, pattern.length - 2)]);
+    else rx = FLPattern(pattern, &hostOnly);
     if (!rx) return nil;
     BOOL anywhere = !rx.length || [rx isEqualToString:@".*"];
     if (anywhere) {
@@ -1569,6 +1642,11 @@ static BOOL FLKeyedSelector(NSString *sel) {
 @property (strong) NSMutableDictionary<NSString *, NSMutableSet *> *genericExcept;   // sel → sites where it must not apply
 @property (strong) NSMutableDictionary<NSString *, NSMutableOrderedSet *> *specific;   // "*a.com,*b.com" → selectors
 @property (strong) NSMutableSet *hideOff, *genericOff;   // sites with $elemhide / $generichide exceptions
+@property (strong) NSMutableDictionary<NSString *, NSMutableArray *> *blockBy;   // list → its block rules (each list compiles on its own)
+@property (strong) NSMutableArray *scriptlets;    // @[domains, args, @(exception)]  ##+js(…)          → layer 3
+@property (strong) NSMutableArray *procedural;    // @[domains, selector, @(exception)] :has-text(…), example.*##… → layer 4
+@property (strong) NSMutableArray *redirects;     // @{trigger, res, only}                 $redirect=…          → layer 5
+@property (strong) NSMutableSet<NSString *> *hosts;   // whole hosts that are blocked everywhere → layer 1 (cloaked trackers)
 @end
 @implementation FLRules
 @end
@@ -1578,14 +1656,18 @@ static FLRules *FLParse(NSString *dir) {
     R.block = [NSMutableArray array]; R.allow = [NSMutableArray array]; R.important = [NSMutableArray array];
     R.generic = [NSMutableOrderedSet orderedSet]; R.genericExcept = [NSMutableDictionary dictionary]; R.specific = [NSMutableDictionary dictionary];
     R.hideOff = [NSMutableSet set]; R.genericOff = [NSMutableSet set];
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    R.blockBy = [NSMutableDictionary dictionary]; R.scriptlets = [NSMutableArray array]; R.procedural = [NSMutableArray array];
+    R.redirects = [NSMutableArray array]; R.hosts = [NSMutableSet set];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array], *origin = [NSMutableArray array];
+    NSMutableSet *hostAllowed = [NSMutableSet set];
     for (NSString *f in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
         if (![f.pathExtension isEqualToString:@"txt"]) continue;
+        NSString *list = f.stringByDeletingPathExtension;
         NSString *text = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:f] encoding:NSUTF8StringEncoding error:nil];
         for (NSString *raw in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
             NSString *l = Trim(raw);
             if (l.length < 3 || [l hasPrefix:@"!"] || [l hasPrefix:@"["]) continue;
-            [lines addObject:l];
+            [lines addObject:l]; [origin addObject:list];
         }
     }
     // $badfilter cancels the rule it repeats
@@ -1597,15 +1679,36 @@ static FLRules *FLParse(NSString *dir) {
     NSMutableSet *seen = [NSMutableSet set];
     NSMutableArray *exceptSel = [NSMutableArray array];   // @[sel, NSArray domains]
     NSCharacterSet *optChars = [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789~,=|._*-"] invertedSet];
-    for (NSString *l in lines) {
+    for (NSUInteger li = 0; li < lines.count; li++) {
+        NSString *l = lines[li];
         if ([cancelled containsObject:l] || [l rangeOfString:@"badfilter"].location != NSNotFound || [seen containsObject:l]) continue;
         [seen addObject:l];
+        // uBlock's page scripts: ##+js(…) and its exceptions #@#+js(…)
+        NSRange js = [l rangeOfString:@"#@#+js("]; BOOL jsExc = js.location != NSNotFound;
+        if (!jsExc) js = [l rangeOfString:@"##+js("];
+        if (js.location != NSNotFound && [l hasSuffix:@")"]) {
+            NSString *doms = [l substringToIndex:js.location];
+            NSUInteger a0 = js.location + js.length;
+            [R.scriptlets addObject:@[doms, [l substringWithRange:NSMakeRange(a0, l.length - 1 - a0)], @(jsExc)]];
+            continue;
+        }
+        // procedural element hiding (#?#, or ## with :has-text and the rest) runs in Iris's own engine, as do plain
+        // selectors for "example.*" sites, which WebKit's lists can't name
+        NSRange pr = [l rangeOfString:@"#@?#"]; BOOL prExc = pr.location != NSNotFound;
+        if (!prExc) pr = [l rangeOfString:@"#?#"];
+        if (pr.location != NSNotFound) {
+            [R.procedural addObject:@[[l substringToIndex:pr.location], Trim([l substringFromIndex:pr.location + pr.length]), @(prExc)]];
+            continue;
+        }
         // element hiding
         NSRange hr = [l rangeOfString:@"#@#"]; BOOL hideExc = hr.location != NSNotFound;
         if (!hideExc) hr = [l rangeOfString:@"##"];
         if (hr.location != NSNotFound) {
             NSString *doms = [l substringToIndex:hr.location], *sel = Trim([l substringFromIndex:hr.location + hr.length]);
-            if ([doms rangeOfString:@"#"].location != NSNotFound || [sel hasPrefix:@"+js("] || [sel hasPrefix:@"^"] || !FLSelectorOK(sel)) continue;
+            if ([doms rangeOfString:@"#"].location != NSNotFound || [sel hasPrefix:@"+js("] || [sel hasPrefix:@"^"]) continue;
+            BOOL entity = [doms containsString:@".*"];
+            if ((!FLSelectorOK(sel) || entity) && doms.length && sel.length < 2000) { [R.procedural addObject:@[doms, sel, @(hideExc)]]; continue; }
+            if (!FLSelectorOK(sel)) continue;
             NSMutableArray *inc = [NSMutableArray array], *exc = [NSMutableArray array];
             if (!FLDomains(doms, @",", inc, exc)) continue;
             if (hideExc) { [exceptSel addObject:@[sel, inc]]; continue; }
@@ -1626,16 +1729,18 @@ static FLRules *FLParse(NSString *dir) {
         // network
         BOOL exception = [l hasPrefix:@"@@"];
         NSString *body = exception ? [l substringFromIndex:2] : l, *opts = nil;
-        if ([body hasPrefix:@"/"] && [body hasSuffix:@"/"] && body.length > 2) continue;   // regex rules
         NSRange dollar = [body rangeOfString:@"$" options:NSBackwardsSearch];
         if (dollar.location != NSNotFound) {
             NSString *o = [body substringFromIndex:dollar.location + 1];
             if ([o rangeOfCharacterFromSet:optChars].location == NSNotFound) { opts = o; body = [body substringToIndex:dollar.location]; }
         }
-        if ([body hasPrefix:@"/"] && [body hasSuffix:@"/"] && body.length > 2) continue;
         int flags = 0;
         NSMutableDictionary *trig = FLNetTrigger(body, opts, exception, &flags);
         if (!trig) continue;
+        if (gFLRedirect) {
+            [R.redirects addObject:@{@"trigger": trig, @"res": gFLRedirect, @"only": @(gFLRedirectOnly)}];
+            if (gFLRedirectOnly) continue;   // $redirect-rule: only when something else blocks it
+        }
         if (exception && (flags & (4 | 8))) {   // $elemhide / $generichide: switch hiding off on those sites
             BOOL ho = NO; NSString *rx = FLPattern(body, &ho); (void)rx;
             if (!ho) continue;
@@ -1644,8 +1749,17 @@ static FLRules *FLParse(NSString *dir) {
             continue;
         }
         NSDictionary *rule = @{@"trigger": trig, @"action": @{@"type": exception ? @"ignore-previous-rules" : @"block"}};
-        [(exception ? R.allow : (flags & 1) ? R.important : R.block) addObject:rule];
+        if (exception) [R.allow addObject:rule];
+        else if (flags & 1) [R.important addObject:rule];
+        else { NSString *list = origin[li]; NSMutableArray *a = R.blockBy[list]; if (!a) R.blockBy[list] = a = [NSMutableArray array]; [a addObject:rule]; [R.block addObject:rule]; }
+        // whole hosts, blocked on every site: what the live gate checks hidden (CNAME) trackers against
+        if ([body hasPrefix:@"||"] && !trig[@"if-domain"] && !trig[@"unless-domain"] && !trig[@"load-type"]) {
+            NSString *h = [[body substringFromIndex:2] stringByReplacingOccurrencesOfString:@"^" withString:@""].lowercaseString;
+            if (h.length > 3 && [h rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/*?=&:|$"]].location == NSNotFound)
+                [(exception ? hostAllowed : R.hosts) addObject:h];
+        }
     }
+    [R.hosts minusSet:hostAllowed];
     for (NSArray *e in exceptSel) {
         NSString *sel = e[0]; NSArray *doms = e[1];
         if (!doms.count) { [R.generic removeObject:sel]; for (NSString *k in R.specific) [R.specific[k] removeObject:sel]; continue; }
@@ -4851,7 +4965,8 @@ static void MarkQuarantined(NSString *path, NSString *from) {
 
 static WKUserContentController *gUCC;
 static WKUserContentController *gPrivUCC;   // private windows: Iris's helpers only, no extensions
-static void IrisYouTubeInstall(WKUserContentController *ucc); static void IrisYouTubeChanged(void); static BOOL SiteAllowlisted(NSString *host, BOOL priv);
+static BOOL SiteAllowlisted(NSString *host, BOOL priv);
+@class FLRules; static void ShieldRulesParsed(FLRules *R, NSString *fp); static void ShieldEnsure(NSString *fp, NSString *dir); static void ShieldInstall(WKUserContentController *ucc, BOOL priv); static void ShieldChanged(void); static void ShieldBlocked(VPage *p, NSURL *u); static void ShieldAdoptStore(WKWebsiteDataStore *ds);
 static void IrisApplyRules(void);
 static NSString *const kHideElements = @"hideElements";   // element hiding on (default) or network blocking only
 static WKProcessPool *gPool;
@@ -5038,7 +5153,7 @@ static WKWebViewConfiguration *IrisConfig(void) {
         [gUCC addScriptMessageHandler:[VInstallRelay new] contentWorld:mine name:@"irisInstall"];
         IrisCosmeticInstall(gUCC);
         IrisCodecInstall(gUCC);
-        IrisYouTubeInstall(gUCC);
+        ShieldInstall(gUCC, NO);
         // Global Privacy Control: tells sites you don't consent to your data being sold or shared
         if ([Defaults() boolForKey:kGPC])
             [gUCC addUserScript:[[WKUserScript alloc] initWithSource:@"try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true})}catch(e){}"
@@ -5048,6 +5163,7 @@ static WKWebViewConfiguration *IrisConfig(void) {
     c.processPool = gPool;
     c.userContentController = gUCC;
     c.websiteDataStore = WKWebsiteDataStore.defaultDataStore;
+    ShieldAdoptStore(c.websiteDataStore);
     c.applicationNameForUserAgent = kAppUA;
     c.allowsAirPlayForMediaPlayback = YES;
     c.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
@@ -5063,6 +5179,10 @@ static WKWebViewConfiguration *IrisConfig(void) {
     if ([Defaults() integerForKey:kMinFont] > 0) c.preferences.minimumFontSize = [Defaults() integerForKey:kMinFont];
     if ([Defaults() integerForKey:kUserAgent] == 1) c.applicationNameForUserAgent = @"Chrome/140.0.0.0 Safari/537.36";
     if (@available(macOS 12.0, *)) c.upgradeKnownHostsToHTTPS = YES;
+    // WebKit samples the colour along the page's top edge (Safari's coloured tab bar); off unless asked for
+    SEL sd = NSSelectorFromString(@"_setSampledPageTopColorMaxDifference:"), sh = NSSelectorFromString(@"_setSampledPageTopColorMinHeight:");
+    if ([c.preferences respondsToSelector:sd]) ((void (*)(id, SEL, double))objc_msgSend)(c.preferences, sd, 5);
+    if ([c.preferences respondsToSelector:sh]) ((void (*)(id, SEL, double))objc_msgSend)(c.preferences, sh, 8);
     [FExtHost.shared install:gUCC config:c];
     IrisInternalInstall(c, gUCC);
     return c;
@@ -5083,19 +5203,20 @@ static WKWebViewConfiguration *PrivateConfig(WKWebsiteDataStore *store) {
                                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
         IrisCosmeticInstall(gPrivUCC);
         IrisCodecInstall(gPrivUCC);
-        IrisYouTubeInstall(gPrivUCC);
+        ShieldInstall(gPrivUCC, YES);
         IrisApplyRules();
     }
     c.userContentController = gPrivUCC;
     IrisInternalInstall(c, gPrivUCC);
     c.websiteDataStore = store ?: WKWebsiteDataStore.nonPersistentDataStore;
+    ShieldAdoptStore(c.websiteDataStore);
     return c;
 }
 
 // A profile's pages: everything as usual (extensions, blocking, Iris's helpers), with that profile's own website data.
 static WKWebViewConfiguration *ProfileConfig(NSString *pid) {
     WKWebViewConfiguration *c = IrisConfig();
-    if (pid.length) c.websiteDataStore = ProfileStore(pid);
+    if (pid.length) { c.websiteDataStore = ProfileStore(pid); ShieldAdoptStore(c.websiteDataStore); }
     return c;
 }
 
@@ -5118,9 +5239,9 @@ static void IrisApplyRules(void) {
         [u removeAllContentRuleLists];
         // element hiding (the lists after the network ones) can be switched off on its own
         BOOL hide = ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements];
-        NSInteger cosFrom = [Defaults() objectForKey:@"ruleCosmeticFrom"] ? [Defaults() integerForKey:@"ruleCosmeticFrom"] : NSIntegerMax;
+        NSInteger cosFrom = [Defaults() objectForKey:@"ruleCosmeticFrom"] ? [Defaults() integerForKey:@"ruleCosmeticFrom"] : NSIntegerMax;   // lists built before they were named
         if (gBlockOn) for (WKContentRuleList *l in gRules) {
-            if (!hide && [l.identifier hasPrefix:@"iris-block-"] && [[l.identifier substringFromIndex:11] integerValue] >= cosFrom) continue;
+            if (!hide && ([l.identifier hasPrefix:@"iris-cos-"] || ([l.identifier hasPrefix:@"iris-block-"] && [[l.identifier substringFromIndex:11] integerValue] >= cosFrom))) continue;
             [u addContentRuleList:l];
         }
         // extensions' own blocking rules (declarativeNetRequest): normal windows only, like the extensions themselves
@@ -5128,23 +5249,7 @@ static void IrisApplyRules(void) {
     }
 }
 
-// YouTube's ads come from youtube.com itself, so no list can stop them by address. Like uBlock Origin, Iris edits the
-// player's instructions on the way in (the ad schedule is removed before the player reads it), hides the ad slots in
-// the feeds, and if one still starts: mutes it, jumps to its end and presses Skip. Runs only on YouTube.
-static NSString *YouTubeAdScript(void) { return @"(() => {\n  if (!/(^|\\.)youtube(-nocookie)?\\.com$/.test(location.hostname) || window.__irisYTDefuse) return;\n  window.__irisYTDefuse = true;\n  const on = () => window.__irisYT !== false;\n  const KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams'];\n  const prune = o => {\n    try {\n      if (!o || typeof o !== 'object') return o;\n      for (const k of KEYS) if (k in o) delete o[k];\n      if (o.playerResponse && typeof o.playerResponse === 'object') prune(o.playerResponse);\n    } catch (e) {}\n    return o;\n  };\n  const hasAds = o => !!o && typeof o === 'object' && (KEYS.some(k => k in o) || (o.playerResponse && typeof o.playerResponse === 'object' && KEYS.some(k => k in o.playerResponse)));\n  // the player's instructions arrive three ways: parsed from text, as the page's first state, and fetched later\n  const parse = JSON.parse;\n  JSON.parse = new Proxy(parse, { apply(t, self, args) { const r = Reflect.apply(t, self, args); return on() && hasAds(r) ? prune(r) : r; } });\n  for (const name of ['ytInitialPlayerResponse', 'playerResponse']) {\n    let held;\n    try { Object.defineProperty(window, name, { configurable: true, get() { return held; }, set(v) { held = on() ? prune(v) : v; } }); } catch (e) {}\n  }\n  const fetch0 = window.fetch;\n  window.fetch = new Proxy(fetch0, { apply(t, self, args) {\n    const p = Reflect.apply(t, self, args);\n    let url = ''; try { url = String(args[0] && args[0].url || args[0]); } catch (e) {}\n    if (!on() || !/\\/youtubei\\/v1\\/(player|get_watch)/.test(url)) return p;\n    return p.then(res => res.clone().text().then(text => {\n      let j; try { j = parse(text); } catch (e) { return res; }\n      if (!hasAds(j)) return res;\n      prune(j);\n      return new Response(JSON.stringify(j), { status: res.status, statusText: res.statusText, headers: res.headers });\n    }).catch(() => res));\n  } });\n  // what still gets through: muted, skipped to its end, and the skip button pressed\n  const css = 'ytd-ad-slot-renderer,ytd-in-feed-ad-layout-renderer,ytd-promoted-sparkles-web-renderer,ytd-promoted-video-renderer,ytd-compact-promoted-video-renderer,' +\n    'ytd-display-ad-renderer,ytd-action-companion-ad-renderer,ytd-companion-slot-renderer,ytd-banner-promo-renderer,ytd-statement-banner-renderer,ytd-search-pyv-renderer,' +\n    'ytd-player-legacy-desktop-watch-ads-renderer,ytd-merch-shelf-renderer,#player-ads,#masthead-ad,.ytp-ad-overlay-container,.ytp-ad-message-container,' +\n    'ytd-rich-item-renderer:has(ytd-ad-slot-renderer),ytd-rich-section-renderer:has(ytd-statement-banner-renderer),ytd-reel-video-renderer:has(.ytd-ad-slot-renderer),' +\n    'ytm-promoted-sparkles-web-renderer,ytm-companion-ad-renderer,ad-slot-renderer{display:none!important}';\n  const addStyle = () => { if (!on()) return; const s = document.createElement('style'); s.textContent = css; (document.head || document.documentElement).appendChild(s); };\n  document.documentElement ? addStyle() : document.addEventListener('DOMContentLoaded', addStyle, { once: true });\n  let mutedByUs = false;\n  setInterval(() => {\n    if (!on()) return;\n    const player = document.querySelector('.html5-video-player');\n    const v = player && player.querySelector('video');\n    if (player && player.classList.contains('ad-showing') && v) {\n      if (!v.muted) { v.muted = true; mutedByUs = true; }\n      if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration - 0.05;\n      const skip = player.querySelector('.ytp-skip-ad-button,.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-ad-skip-button-container button');\n      if (skip) skip.click();\n    } else if (v && mutedByUs) { v.muted = false; mutedByUs = false; }\n    // \"ad blockers aren't allowed\": the wall goes and the video carries on\n    const wall = document.querySelector('ytd-enforcement-message-view-model');\n    if (wall) {\n      const d = wall.closest('tp-yt-paper-dialog'); if (d) d.remove();\n      document.querySelectorAll('tp-yt-iron-overlay-backdrop').forEach(b => b.remove());\n      if (v && v.paused) v.play().catch(() => {});\n    }\n  }, 250);\n})();\n"; }
-static NSString *YouTubeAdConfigJS(void) { return [NSString stringWithFormat:@"window.__irisYT=%@;", [Defaults() boolForKey:kBlock] && !SiteAllowlisted(@"www.youtube.com", NO) ? @"true" : @"false"]; }
-static void IrisYouTubeInstall(WKUserContentController *ucc) {
-    [ucc addUserScript:[[WKUserScript alloc] initWithSource:YouTubeAdScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
-    [ucc addUserScript:[[WKUserScript alloc] initWithSource:YouTubeAdConfigJS() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
-}
-// Blocking switched on or off (everywhere, or for YouTube): pages pick it up when they next load.
-static void IrisYouTubeChanged(void) {
-    for (WKUserContentController *u in @[gUCC ?: (id)NSNull.null, gPrivUCC ?: (id)NSNull.null]) {
-        if (![u isKindOfClass:WKUserContentController.class]) continue;
-        [u addUserScript:[[WKUserScript alloc] initWithSource:YouTubeAdConfigJS() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
-    }
-}
-static void IrisSetBlocking(BOOL on) { gBlockOn = on; IrisApplyRules(); IrisYouTubeChanged(); }
+static void IrisSetBlocking(BOOL on) { gBlockOn = on; IrisApplyRules(); ShieldChanged(); }
 
 static BOOL BlockerSiteSwitch(void) {   // WebKit can switch content blockers off for one page
     static int has = -1;
@@ -5184,7 +5289,19 @@ static NSString *RulesFingerprintV7(NSString *dir, NSArray *allow) {   // the ol
 }
 
 static NSString *IrisJSON(id obj) { NSData *d = [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil]; return d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"[]"; }
-static NSArray *IrisRuleChunk(NSArray *body, NSString *tailJSON) { return @[IrisJSON(body), tailJSON ?: @"[]", @(body.count)]; }
+// One WebKit list to build: a stable name (the list it comes from and its place in it), its own rules, and the
+// exceptions every list has to carry (an exception only reaches rules in its own WebKit list).
+static NSDictionary *IrisChunk(NSString *ident, NSArray *body, NSString *tailJSON) { return @{@"id": ident, @"body": IrisJSON(body), @"tail": tailJSON ?: @"[]", @"n": @(body.count)}; }
+static NSString *IrisChunkJSON(NSDictionary *c) {
+    NSString *bodyJSON = c[@"body"], *tailJSON = c[@"tail"];
+    NSString *bi = bodyJSON.length > 2 ? [bodyJSON substringWithRange:NSMakeRange(1, bodyJSON.length - 2)] : @"";
+    NSString *ti = tailJSON.length > 2 ? [tailJSON substringWithRange:NSMakeRange(1, tailJSON.length - 2)] : @"";
+    return [NSString stringWithFormat:@"[%@%@%@]", bi, bi.length && ti.length ? @"," : @"", ti];
+}
+static NSString *IrisSha(NSString *s) {
+    NSData *d = [s dataUsingEncoding:NSUTF8StringEncoding]; unsigned char h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(d.bytes, (CC_LONG)d.length, h);
+    NSMutableString *o = [NSMutableString string]; for (int i = 0; i < 16; i++) [o appendFormat:@"%02x", h[i]]; return o;
+}
 // Iris's own compiled lists, read from where WebKit keeps them (only from Iris Dev, a profile's app or an installed site).
 static WKContentRuleListStore *IrisMainRuleStore(void) {
     if (!(IrisIsDev() || gProfileApp || gWebApp)) return nil;
@@ -5197,101 +5314,130 @@ static WKContentRuleListStore *IrisMainRuleStore(void) {
     DLog(@"blocker: Iris's compiled lists not found under %@", base);
     return nil;
 }
-// Compiles the lists into WebKit's store. A list WebKit refuses is split in half and tried again, so one rule it
-// can't take costs only its neighbours, never the whole blocker.
-static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInteger count, NSDate *t0, void (^finish)(NSArray *, NSUInteger)) {
-    NSMutableArray<NSArray *> *queue = [lists mutableCopy];
-    NSMutableArray *done = [NSMutableArray array];
-    __block NSUInteger dropped = 0;
-    __block void (^next)(void);
-    __block void (^weakNext)(void);
-    next = ^{
-        if (!queue.count) {
-            // drop compiled lists from a previous run that are no longer used
-            [WKContentRuleListStore.defaultStore getAvailableContentRuleListIdentifiers:^(NSArray<NSString *> *ids) {
-                for (NSString *i in ids) if ([i hasPrefix:@"iris-block-"] && [[i substringFromIndex:11] integerValue] >= (NSInteger)done.count)
-                    [WKContentRuleListStore.defaultStore removeContentRuleListForIdentifier:i completionHandler:^(NSError *e) {}];
-            }];
-            [Defaults() setObject:fp forKey:@"ruleFingerprint"];
-            [Defaults() setInteger:(NSInteger)done.count forKey:@"ruleListCount"];
-            [Defaults() setInteger:(NSInteger)count forKey:@"ruleHostCount"];
-            finish(done, count);
-            DLog(@"blocker: %lu rules in %lu lists, ready in %.1fs%@", (unsigned long)count, (unsigned long)done.count, -t0.timeIntervalSinceNow,
-                 dropped ? [NSString stringWithFormat:@" (%lu rules WebKit refused)", (unsigned long)dropped] : @"");
-            weakNext = nil; next = nil;
-            return;
-        }
-        // each list waits as compact JSON text, not thousands of dictionaries: that's most of the memory a build used to hold
-        NSString *bodyJSON = queue.firstObject[0], *tailJSON = queue.firstObject[1]; NSUInteger bodyCount = [queue.firstObject[2] unsignedIntegerValue];
-        [queue removeObjectAtIndex:0];
-        NSString *bi = bodyJSON.length > 2 ? [bodyJSON substringWithRange:NSMakeRange(1, bodyJSON.length - 2)] : @"";
-        NSString *ti = tailJSON.length > 2 ? [tailJSON substringWithRange:NSMakeRange(1, tailJSON.length - 2)] : @"";
-        NSString *json = [NSString stringWithFormat:@"[%@%@%@]", bi, bi.length && ti.length ? @"," : @"", ti];
-        NSString *ident = [NSString stringWithFormat:@"iris-block-%lu", (unsigned long)done.count];
-        void (^landed)(WKContentRuleList *, NSString *) = ^(WKContentRuleList *list, NSString *why) {
-            if (list) [done addObject:list];
-            else if (bodyCount > 200) {   // split the list's own rules; each half keeps the exceptions
-                DLog(@"rule list of %lu refused (%@): splitting", (unsigned long)bodyCount, why);
-                NSArray *body = [NSJSONSerialization JSONObjectWithData:[bodyJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-                NSUInteger h = body.count / 2;
-                [queue insertObject:IrisRuleChunk([body subarrayWithRange:NSMakeRange(h, body.count - h)], tailJSON) atIndex:0];
-                [queue insertObject:IrisRuleChunk([body subarrayWithRange:NSMakeRange(0, h)], tailJSON) atIndex:0];
-            } else { dropped += bodyCount; DLog(@"rule list of %lu dropped: %@", (unsigned long)bodyCount, why); }
-            dispatch_async(dispatch_get_main_queue(), weakNext);
-        };
-        // A list already built from exactly these rules (a restart part-way through a build, or the same list in Iris
-        // itself) is used as it is: a build that's interrupted carries on where it stopped instead of starting over.
-        unsigned char h[CC_SHA256_DIGEST_LENGTH]; NSData *jd = [json dataUsingEncoding:NSUTF8StringEncoding]; CC_SHA256(jd.bytes, (CC_LONG)jd.length, h);
-        NSMutableString *sha = [NSMutableString string]; for (int i = 0; i < 16; i++) [sha appendFormat:@"%02x", h[i]];
-        NSString *chunkKey = [@"ruleChunk-" stringByAppendingString:ident];
-        void (^built)(WKContentRuleList *, NSString *) = ^(WKContentRuleList *list, NSString *why) {
-            if (list) [Defaults() setObject:sha forKey:chunkKey]; else [Defaults() removeObjectForKey:chunkKey];
-            landed(list, why);
-        };
-        void (^inProcess)(void) = ^{
-            [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) {
-                built(list, err.localizedDescription);
-            }];
-        };
-        void (^compile)(void);
-        // WebKit builds a list's matcher in the calling process, and a big list briefly needs a lot of memory. A helper
-        // (Iris itself, started with --compile-rules) does the building, so the browser never carries that peak and
-        // the rules can sit in a few large lists, which pages check faster than many small ones.
-        compile = ^{
-        NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"iris-rules-%@.json", NSUUID.UUID.UUIDString]];
-        if (![json writeToFile:tmp atomically:NO encoding:NSUTF8StringEncoding error:nil]) { inProcess(); return; }
-        NSTask *task = [NSTask new];
-        task.executableURL = [NSURL fileURLWithPath:NSBundle.mainBundle.executablePath];
-        task.arguments = @[@"--compile-rules", ident, tmp];
-        task.qualityOfService = NSQualityOfServiceUtility;
-        task.standardOutput = NSFileHandle.fileHandleWithNullDevice; task.standardError = NSFileHandle.fileHandleWithNullDevice;
-        task.terminationHandler = ^(NSTask *t) {
-            int status = t.terminationStatus; BOOL clean = t.terminationReason == NSTaskTerminationReasonExit;
-            [NSFileManager.defaultManager removeItemAtPath:tmp error:nil];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (clean && status == 0)
-                    [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *list, NSError *err) {
-                        if (list) built(list, nil); else inProcess();
-                    }];
-                else built(nil, clean ? [NSString stringWithFormat:@"WebKit refused it (%d)", status] : @"the helper stopped");
-            });
-        };
-        NSError *launchErr = nil;
-        if (![task launchAndReturnError:&launchErr]) { [NSFileManager.defaultManager removeItemAtPath:tmp error:nil]; DLog(@"blocker: helper didn't start (%@), compiling here", launchErr.localizedDescription); inProcess(); }
-        };
-        // mine first, then Iris's (from Iris Dev, a profile's app or an installed site), then build it
+// A list already built from exactly these rules: this app's own, else the one Iris itself built (Iris Dev, a profile's app
+// and installed sites read Iris's lists). sha nil: whatever this app recorded for that name.
+static void IrisFindChunk(NSString *ident, NSString *sha, void (^done)(WKContentRuleList *)) {
+    NSString *key = [@"ruleChunk-" stringByAppendingString:ident], *mine = [Defaults() stringForKey:key];
+    NSString *want = sha ?: mine;
+    void (^tryIris)(void) = ^{
         WKContentRuleListStore *iris = IrisMainRuleStore();
-        NSString *irisSha = iris ? [[Defaults() persistentDomainForName:@"com.y.iris"][chunkKey] description] : nil;
-        void (^tryIris)(void) = ^{
-            if (![irisSha isEqualToString:sha]) { compile(); return; }
-            [iris lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *l, NSError *e) { if (l) { [Defaults() setObject:sha forKey:chunkKey]; landed(l, nil); } else compile(); }];
-        };
-        if ([[Defaults() stringForKey:chunkKey] isEqualToString:sha])
-            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *l, NSError *e) { if (l) landed(l, nil); else tryIris(); }];
-        else tryIris();
+        NSString *theirs = iris ? [[Defaults() persistentDomainForName:@"com.y.iris"][key] description] : nil;
+        if (!iris || !want || ![theirs isEqualToString:want]) { done(nil); return; }
+        [iris lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *l, NSError *e) { if (l && sha) [Defaults() setObject:sha forKey:key]; done(l); }];
     };
-    weakNext = next;
-    dispatch_async(dispatch_get_main_queue(), next);
+    if (sha && ![mine isEqualToString:sha]) { tryIris(); return; }
+    [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *l, NSError *e) { if (l) done(l); else tryIris(); }];
+}
+// WebKit builds a list's matcher in the calling process, and a big list briefly needs a lot of memory. A helper
+// (Iris itself, started with --compile-rules) does the building, so the browser never carries that peak.
+static void IrisBuildChunk(NSString *ident, NSString *json, void (^done)(WKContentRuleList *, NSString *why)) {
+    void (^inProcess)(void) = ^{
+        [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) { done(list, err.localizedDescription); }];
+    };
+    NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"iris-rules-%@.json", NSUUID.UUID.UUIDString]];
+    if (![json writeToFile:tmp atomically:NO encoding:NSUTF8StringEncoding error:nil]) { inProcess(); return; }
+    NSTask *task = [NSTask new];
+    task.executableURL = [NSURL fileURLWithPath:NSBundle.mainBundle.executablePath];
+    task.arguments = @[@"--compile-rules", ident, tmp];
+    task.qualityOfService = NSQualityOfServiceUtility;
+    task.standardOutput = NSFileHandle.fileHandleWithNullDevice; task.standardError = NSFileHandle.fileHandleWithNullDevice;
+    task.terminationHandler = ^(NSTask *t) {
+        int status = t.terminationStatus; BOOL clean = t.terminationReason == NSTaskTerminationReasonExit;
+        [NSFileManager.defaultManager removeItemAtPath:tmp error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (clean && status == 0) [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *l, NSError *e) { if (l) done(l, nil); else inProcess(); }];
+            else done(nil, clean ? [NSString stringWithFormat:@"WebKit refused it (%d)", status] : @"the helper stopped");
+        });
+    };
+    NSError *launchErr = nil;
+    if (![task launchAndReturnError:&launchErr]) { [NSFileManager.defaultManager removeItemAtPath:tmp error:nil]; DLog(@"blocker: helper didn't start (%@), compiling here", launchErr.localizedDescription); inProcess(); }
+}
+
+// Builds the lists: each filter list on its own (a list that didn't change is used as it is), two at a time on a Mac
+// with four threads or more. A list WebKit refuses is split in half and tried again, so one rule it can't take costs only
+// its neighbours. The rules already in use keep blocking until the new set is complete.
+static void IrisCompileRuleLists(NSArray<NSDictionary *> *chunks, NSString *fp, NSUInteger count, NSDate *t0, void (^finish)(NSArray *, NSUInteger)) {
+    NSMutableArray<NSString *> *slots = [[chunks valueForKey:@"id"] mutableCopy];
+    NSMutableArray<NSDictionary *> *queue = [chunks mutableCopy];
+    NSMutableDictionary<NSString *, WKContentRuleList *> *got = [NSMutableDictionary dictionary];
+    NSInteger parallel = NSProcessInfo.processInfo.activeProcessorCount >= 4 ? 2 : 1;
+    __block NSInteger inFlight = 0, reused = 0, built = 0; __block NSUInteger dropped = 0; __block BOOL ended = NO;
+    static NSMutableArray *alive; if (!alive) alive = [NSMutableArray array];
+    __block void (^pump)(void) = nil;
+    void (^end)(void) = ^{
+        if (ended) return; ended = YES;
+        NSMutableArray *lists = [NSMutableArray array];
+        for (NSString *i in slots) if (got[i]) [lists addObject:got[i]];
+        NSSet *keep = [NSSet setWithArray:slots];
+        [WKContentRuleListStore.defaultStore getAvailableContentRuleListIdentifiers:^(NSArray<NSString *> *ids) {
+            for (NSString *i in ids) if (([i hasPrefix:@"iris-block-"] || [i hasPrefix:@"iris-net-"] || [i hasPrefix:@"iris-imp-"] || [i hasPrefix:@"iris-cos-"]) && ![keep containsObject:i]) {
+                [WKContentRuleListStore.defaultStore removeContentRuleListForIdentifier:i completionHandler:^(NSError *e) {}];
+                [Defaults() removeObjectForKey:[@"ruleChunk-" stringByAppendingString:i]];
+            }
+        }];
+        NSMutableArray *have = [NSMutableArray array]; for (NSString *i in slots) if (got[i]) [have addObject:i];
+        [Defaults() setObject:have forKey:@"ruleIdents"];
+        [Defaults() removeObjectForKey:@"ruleListCount"];
+        [Defaults() setObject:fp forKey:@"ruleFingerprint"];
+        [Defaults() setInteger:(NSInteger)count forKey:@"ruleHostCount"];
+        finish(lists, count);
+        DLog(@"blocker: %lu rules in %lu lists (%ld unchanged, %ld built), ready in %.1fs%@", (unsigned long)count, (unsigned long)lists.count, (long)reused, (long)built, -t0.timeIntervalSinceNow,
+             dropped ? [NSString stringWithFormat:@" (%lu rules WebKit refused)", (unsigned long)dropped] : @"");
+        pump = nil; [alive removeObject:queue];
+    };
+    [alive addObject:queue];   // the queue lives until the build is done
+    pump = ^{
+        while (inFlight < parallel && queue.count) {
+            NSDictionary *c = queue.firstObject; [queue removeObjectAtIndex:0];
+            inFlight++;
+            NSString *ident = c[@"id"], *json = IrisChunkJSON(c), *sha = IrisSha(json);
+            NSString *key = [@"ruleChunk-" stringByAppendingString:ident];
+            IrisFindChunk(ident, sha, ^(WKContentRuleList *have) {
+                if (have) { got[ident] = have; reused++; inFlight--; dispatch_async(dispatch_get_main_queue(), ^{ if (pump) pump(); }); return; }
+                IrisBuildChunk(ident, json, ^(WKContentRuleList *list, NSString *why) {
+                    if (list) { got[ident] = list; built++; [Defaults() setObject:sha forKey:key]; }
+                    else if ([c[@"n"] unsignedIntegerValue] > 200) {   // split the list's own rules; each half keeps the exceptions
+                        DLog(@"rule list %@ of %@ refused (%@): splitting", ident, c[@"n"], why);
+                        NSArray *body = [NSJSONSerialization JSONObjectWithData:[c[@"body"] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+                        NSUInteger h = body.count / 2;
+                        NSDictionary *a = IrisChunk([ident stringByAppendingString:@"a"], [body subarrayWithRange:NSMakeRange(0, h)], c[@"tail"]);
+                        NSDictionary *b = IrisChunk([ident stringByAppendingString:@"b"], [body subarrayWithRange:NSMakeRange(h, body.count - h)], c[@"tail"]);
+                        NSUInteger at = [slots indexOfObject:ident];
+                        if (at != NSNotFound) { [slots replaceObjectAtIndex:at withObject:b[@"id"]]; [slots insertObject:a[@"id"] atIndex:at]; }
+                        [queue insertObject:b atIndex:0]; [queue insertObject:a atIndex:0];
+                    } else { dropped += [c[@"n"] unsignedIntegerValue]; DLog(@"rule list %@ dropped: %@", ident, why); }
+                    inFlight--; dispatch_async(dispatch_get_main_queue(), ^{ if (pump) pump(); });
+                });
+            });
+        }
+        if (!queue.count && inFlight == 0) end();
+    };
+    dispatch_async(dispatch_get_main_queue(), pump);
+}
+
+// The names of the lists this app last built, in order (older builds counted them instead).
+static NSArray<NSString *> *IrisRuleIdents(NSDictionary *prefs) {
+    id a = prefs ? prefs[@"ruleIdents"] : [Defaults() arrayForKey:@"ruleIdents"];
+    if ([a isKindOfClass:NSArray.class] && [a count]) return a;
+    NSUInteger n = [(prefs ? prefs[@"ruleListCount"] : [Defaults() objectForKey:@"ruleListCount"]) unsignedIntegerValue];
+    NSMutableArray *o = [NSMutableArray array]; for (NSUInteger k = 0; k < n; k++) [o addObject:[NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k]];
+    return o;
+}
+// Every list of a set, or nil if one is missing.
+static void IrisLookUpAll(NSArray<NSString *> *idents, WKContentRuleListStore *store, void (^done)(NSArray *)) {
+    if (!idents.count) { done(nil); return; }
+    NSMutableDictionary *found = [NSMutableDictionary dictionary];
+    __block NSUInteger pending = idents.count; __block BOOL missing = NO;
+    for (NSString *i in idents) {
+        void (^got)(WKContentRuleList *) = ^(WKContentRuleList *l) {
+            if (l) found[i] = l; else missing = YES;
+            if (--pending) return;
+            if (missing) { done(nil); return; }
+            NSMutableArray *o = [NSMutableArray array]; for (NSString *x in idents) [o addObject:found[x]]; done(o);
+        };
+        if (store) [store lookUpContentRuleListForIdentifier:i completionHandler:^(WKContentRuleList *l, NSError *e) { got(l); }];
+        else IrisFindChunk(i, nil, got);
+    }
 }
 
 static void (^gRulesWaiter)(void);
@@ -5304,70 +5450,43 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
     void (^finish)(NSArray *, NSUInteger) = ^(NSArray *lists, NSUInteger count) {
         gRules = lists; gRuleCount = count;
         IrisApplyRules();
+        ShieldEnsure(fp, dir);   // the layers beyond WebKit's lists: page scripts, procedural hiding, stand-ins, the live gate
         void (^w)(void) = gRulesWaiter; gRulesWaiter = nil; if (w) w();
     };
     // Same lists as last time: WebKit already has them compiled on disk.
-    NSUInteger cached = (NSUInteger)[Defaults() integerForKey:@"ruleListCount"];
-    if (cached && [[Defaults() stringForKey:@"ruleFingerprint"] isEqualToString:fp]) {
-        NSMutableArray *found = [NSMutableArray array];
-        __block NSUInteger pending = cached; __block BOOL missing = NO;
-        for (NSUInteger k = 0; k < cached; k++) {
-            NSString *lid = [NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k];
-            void (^got)(WKContentRuleList *) = ^(WKContentRuleList *l) {
-                if (l) [found addObject:l]; else missing = YES;
-                if (--pending) return;
-                if (!missing) { finish(found, (NSUInteger)[Defaults() integerForKey:@"ruleHostCount"]); DLog(@"blocker: %lu cached lists", (unsigned long)found.count); }
-                else { [Defaults() removeObjectForKey:@"ruleFingerprint"]; IrisReloadBlocklistsThen(gRulesWaiter); }
-            };
-            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:lid completionHandler:^(WKContentRuleList *l, NSError *e) {
-                if (l) { got(l); return; }
-                // a list this app took from Iris's own when it built: still there?
-                WKContentRuleListStore *iris = IrisMainRuleStore(); NSString *mine = [Defaults() stringForKey:[@"ruleChunk-" stringByAppendingString:lid]];
-                if (iris && mine && [[[Defaults() persistentDomainForName:@"com.y.iris"][[@"ruleChunk-" stringByAppendingString:lid]] description] isEqualToString:mine])
-                    [iris lookUpContentRuleListForIdentifier:lid completionHandler:^(WKContentRuleList *l2, NSError *e2) { got(l2); }];
-                else got(nil);
-            }];
-        }
+    NSArray *idents = IrisRuleIdents(nil);
+    if (idents.count && [[Defaults() stringForKey:@"ruleFingerprint"] isEqualToString:fp]) {
+        IrisLookUpAll(idents, nil, ^(NSArray *found) {
+            if (found) { finish(found, (NSUInteger)[Defaults() integerForKey:@"ruleHostCount"]); DLog(@"blocker: %lu cached lists", (unsigned long)found.count); }
+            else { [Defaults() removeObjectForKey:@"ruleFingerprint"]; IrisReloadBlocklistsThen(gRulesWaiter); }
+        });
         return;
     }
     // Iris Dev, a profile's app or an installed site with the same lists as Iris: Iris's compiled lists, used where they are
     static BOOL triedIris;
     WKContentRuleListStore *irisStore = triedIris ? nil : IrisMainRuleStore();
     NSDictionary *irisPrefs = irisStore ? [Defaults() persistentDomainForName:@"com.y.iris"] : nil;
-    NSUInteger irisCount = [irisPrefs[@"ruleListCount"] unsignedIntegerValue];
-    if (irisStore && irisCount && ([irisPrefs[@"ruleFingerprint"] isEqual:fp] || [irisPrefs[@"ruleFingerprint"] isEqual:RulesFingerprintV7(dir, allow)])) {
+    NSArray *irisIdents = irisPrefs ? IrisRuleIdents(irisPrefs) : nil;
+    if (irisStore && irisIdents.count && ([irisPrefs[@"ruleFingerprint"] isEqual:fp] || [irisPrefs[@"ruleFingerprint"] isEqual:RulesFingerprintV7(dir, allow)])) {
         triedIris = YES;
-        NSMutableArray *found = [NSMutableArray array];
-        __block NSUInteger pending = irisCount; __block BOOL missing = NO;
-        for (NSUInteger k = 0; k < irisCount; k++)
-            [irisStore lookUpContentRuleListForIdentifier:[NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k] completionHandler:^(WKContentRuleList *l, NSError *e) {
-                if (l) [found addObject:l]; else missing = YES;
-                if (--pending) return;
-                if (missing) { DLog(@"blocker: Iris's lists aren't all there, compiling"); IrisReloadBlocklistsThen(gRulesWaiter); return; }
-                [Defaults() setObject:irisPrefs[@"ruleCosmeticFrom"] ?: @0 forKey:@"ruleCosmeticFrom"];
-                finish(found, [irisPrefs[@"ruleHostCount"] unsignedIntegerValue]);
-                DLog(@"blocker: using Iris's %lu compiled lists", (unsigned long)found.count);
-            }];
+        IrisLookUpAll(irisIdents, irisStore, ^(NSArray *found) {
+            if (!found) { DLog(@"blocker: Iris's lists aren't all there, compiling"); IrisReloadBlocklistsThen(gRulesWaiter); return; }
+            finish(found, [irisPrefs[@"ruleHostCount"] unsignedIntegerValue]);
+            DLog(@"blocker: using Iris's %lu compiled lists", (unsigned long)found.count);
+        });
         return;
-    }
-    if (irisStore && !triedIris) {
-        NSString *theirs = [irisPrefs[@"ruleFingerprint"] description] ?: @"(none)", *v7 = RulesFingerprintV7(dir, allow);
-        DLog(@"blocker: Iris's lists differ (%lu compiled; theirs %@… mine %@… / %@…)", (unsigned long)irisCount, [theirs substringToIndex:MIN(80, theirs.length)], [fp substringToIndex:MIN(80, fp.length)], [v7 substringToIndex:MIN(80, v7.length)]);
     }
     triedIris = YES;
     // A build takes minutes on an Intel Mac: one at a time, and the previous lists keep blocking until the new ones are ready.
     static BOOL compiling, again;
     if (compiling) { again = YES; return; }
     compiling = YES;
-    if (!gRules.count && cached) {
-        NSMutableArray *old = [NSMutableArray array]; __block NSUInteger pending = cached;
-        for (NSUInteger k = 0; k < cached; k++)
-            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:[NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k] completionHandler:^(WKContentRuleList *l, NSError *e) {
-                if (l) [old addObject:l];
-                if (--pending || !old.count || gRules.count) return;
-                gRules = old; gRuleCount = (NSUInteger)[Defaults() integerForKey:@"ruleHostCount"]; IrisApplyRules();
-                DLog(@"blocker: last lists in use while the new ones build");
-            }];
+    if (!gRules.count && idents.count) {
+        IrisLookUpAll(idents, nil, ^(NSArray *old) {
+            if (!old.count || gRules.count) return;
+            gRules = old; gRuleCount = (NSUInteger)[Defaults() integerForKey:@"ruleHostCount"]; IrisApplyRules();
+            DLog(@"blocker: last lists in use while the new ones build");
+        });
     }
     void (^outer)(NSArray *, NSUInteger) = finish;
     finish = ^(NSArray *lists, NSUInteger count) {
@@ -5380,8 +5499,10 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
         FLRules *R = FLParse(dir);
         NSMutableOrderedSet *sels = [NSMutableOrderedSet orderedSetWithOrderedSet:R.generic];
         for (NSString *k in R.specific) [sels unionOrderedSet:R.specific[k]];
-        DLog(@"blocker: parsed %lu block, %lu important, %lu exception rules, %lu selectors in %.1fs", (unsigned long)R.block.count, (unsigned long)R.important.count,
-             (unsigned long)R.allow.count, (unsigned long)sels.count, -t0.timeIntervalSinceNow);
+        DLog(@"blocker: parsed %lu block, %lu important, %lu exception rules, %lu selectors, %lu page scripts, %lu procedural, %lu stand-ins in %.1fs",
+             (unsigned long)R.block.count, (unsigned long)R.important.count, (unsigned long)R.allow.count, (unsigned long)sels.count,
+             (unsigned long)R.scriptlets.count, (unsigned long)R.procedural.count, (unsigned long)R.redirects.count, -t0.timeIntervalSinceNow);
+        ShieldRulesParsed(R, fp);   // layers 1, 3, 4 and 5 are built from the same parse
         dispatch_async(dispatch_get_main_queue(), ^{
             [FLSelectorCheck check:sels.array done:^(NSSet *valid) {
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
@@ -5390,23 +5511,24 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
                     // (if-domain, not if-top-url: WebKit won't mix the two kinds in one list, and the filters use if-domain)
                     for (NSString *site in allow) { NSString *w = [site isKindOfClass:NSString.class] ? FLDomain(site) : nil; if (!w) continue;
                         [off addObject:@{@"trigger": @{@"url-filter": @".*", @"if-domain": @[w]}, @"action": @{@"type": @"ignore-previous-rules"}}]; }
-                    NSMutableArray<NSArray *> *lists = [NSMutableArray array];
-                    // network: 15k rules per list keeps each compile's working memory small (WebKit builds its matcher in
-                    // Iris's own process: big lists meant hundreds of MB at once, enough to starve the Mac while a video played);
-                    // every list carries all the exceptions
+                    NSMutableArray *chunks = [NSMutableArray array];
+                    // network, list by list: 30k rules per WebKit list keeps each build's working memory small; every one carries the exceptions
                     NSString *netTail = IrisJSON([R.allow arrayByAddingObjectsFromArray:off]), *offJSON = IrisJSON(off);
-                    for (NSUInteger i = 0; i < R.block.count; i += 40000) @autoreleasepool {
-                        [lists addObject:IrisRuleChunk([R.block subarrayWithRange:NSMakeRange(i, MIN(40000, R.block.count - i))], netTail)];
+                    for (NSString *list in [R.blockBy.allKeys sortedArrayUsingSelector:@selector(compare:)]) @autoreleasepool {
+                        NSArray *rules = R.blockBy[list];
+                        NSString *safe = [[list componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@""];
+                        for (NSUInteger i = 0; i < rules.count; i += 30000)
+                            [chunks addObject:IrisChunk([NSString stringWithFormat:@"iris-net-%@-%lu", safe, (unsigned long)(i / 30000)], [rules subarrayWithRange:NSMakeRange(i, MIN(30000, rules.count - i))], netTail)];
                     }
-                    if (R.important.count) [lists addObject:IrisRuleChunk(R.important, offJSON)];   // $important: no exception reaches it
-                    [Defaults() setInteger:(NSInteger)lists.count forKey:@"ruleCosmeticFrom"];      // the element-hiding lists start here
+                    if (R.important.count) [chunks addObject:IrisChunk(@"iris-imp-0", R.important, offJSON)];   // $important: no exception reaches it
                     @autoreleasepool {
                         NSArray *cos = FLCosmeticRules(R, valid);
-                        for (NSUInteger i = 0; i < cos.count; i += 20000) [lists addObject:IrisRuleChunk([cos subarrayWithRange:NSMakeRange(i, MIN(20000, cos.count - i))], offJSON)];
+                        for (NSUInteger i = 0; i < cos.count; i += 20000)
+                            [chunks addObject:IrisChunk([NSString stringWithFormat:@"iris-cos-%lu", (unsigned long)(i / 20000)], [cos subarrayWithRange:NSMakeRange(i, MIN(20000, cos.count - i))], offJSON)];
                     }
-                    if (!lists.count) [lists addObject:IrisRuleChunk(@[@{@"trigger": @{@"url-filter": @"^iris-never:"}, @"action": @{@"type": @"block"}}], @"[]")];
+                    if (!chunks.count) [chunks addObject:IrisChunk(@"iris-net-none-0", @[@{@"trigger": @{@"url-filter": @"^iris-never:"}, @"action": @{@"type": @"block"}}], @"[]")];
                     NSUInteger count = R.block.count + R.important.count + valid.count;
-                    dispatch_async(dispatch_get_main_queue(), ^{ IrisCompileRuleLists(lists, fp, count, t0, finish); });
+                    dispatch_async(dispatch_get_main_queue(), ^{ IrisCompileRuleLists(chunks, fp, count, t0, finish); });
                 } });
             }];
         });
@@ -5601,9 +5723,11 @@ static NSString *MenuURLLabel(NSString *u) {
     if (![c[@"editable"] boolValue] && !(event.modifierFlags & NSEventModifierFlagOption) && self.window) {
         NSMenu *mine = [self irisMenu:c];
         [menu removeAllItems];   // WebKit's own stays closed
+        menu.allowsContextMenuPlugIns = NO;   // or macOS adds a lone "Services" item to the emptied menu and shows it
         NSPoint at = _menuAt;
         __weak FWebView *ws = self;
-        dispatch_async(dispatch_get_main_queue(), ^{ FWebView *me = ws; if (me.window) PopMenu(mine, at, me); });
+        __weak NSMenu *wm = menu;
+        dispatch_async(dispatch_get_main_queue(), ^{ [wm cancelTrackingWithoutAnimation]; FWebView *me = ws; if (me.window) PopMenu(mine, at, me); });
         return;
     }
     NSString *(^str)(NSString *) = ^NSString *(NSString *k) { id v = c[k]; return [v isKindOfClass:NSString.class] && [v length] ? v : nil; };
@@ -5708,7 +5832,8 @@ static void PrivateProtect(WKWebpagePreferences *prefs) {
 
 @implementation VPage {
     FWebView *_web;
-    BOOL _observing, _audioKVO, _watchingLoad;
+    BOOL _observing, _audioKVO, _watchingLoad, _tintKVO, _tintQueued;
+    NSColor *_jsTint;   // the colour the page script found at the top of the page (when WebKit has none of its own)
     NSString *_lastMethod;   // the request method of the latest navigation (only GET downloads can be accelerated)
     NSURL *_httpsUpgradeOf;
     NSString *_certErrorFor;   // host whose certificate warning is showing in this tab
@@ -5749,6 +5874,7 @@ static void *kKVO = &kKVO;
     for (NSString *k in @[@"title", @"URL", @"loading", @"estimatedProgress", @"canGoBack", @"canGoForward"])
         [w addObserver:self forKeyPath:k options:0 context:kKVO];
     @try { [w addObserver:self forKeyPath:@"_isPlayingAudio" options:0 context:kKVO]; _audioKVO = YES; } @catch (NSException *x) {}   // sound indicator in the sidebar
+    @try { for (NSString *k in @[@"themeColor", @"_sampledPageTopColor"]) if ([w respondsToSelector:NSSelectorFromString(k)]) [w addObserver:self forKeyPath:k options:0 context:kKVO]; _tintKVO = YES; } @catch (NSException *x) {}
     _observing = YES;
     [self addSubview:w];
 }
@@ -5757,6 +5883,7 @@ static void *kKVO = &kKVO;
     if (!_web) return;
     if (_observing) for (NSString *k in @[@"title", @"URL", @"loading", @"estimatedProgress", @"canGoBack", @"canGoForward"]) [_web removeObserver:self forKeyPath:k context:kKVO];
     if (_audioKVO) { @try { [_web removeObserver:self forKeyPath:@"_isPlayingAudio" context:kKVO]; } @catch (NSException *x) {} _audioKVO = NO; }
+    if (_tintKVO) { for (NSString *k in @[@"themeColor", @"_sampledPageTopColor"]) @try { [_web removeObserver:self forKeyPath:k context:kKVO]; } @catch (NSException *x) {} _tintKVO = NO; }
     _observing = NO;
     [_web stopLoading];
     _web.navigationDelegate = nil; _web.UIDelegate = nil; _web.page = nil;
@@ -5775,7 +5902,8 @@ static void *kKVO = &kKVO;
 - (void)observeValueForKeyPath:(NSString *)k ofObject:(id)o change:(NSDictionary *)c context:(void *)ctx {
     if (ctx != kKVO) { [super observeValueForKeyPath:k ofObject:o change:c context:ctx]; return; }
     if ([k isEqualToString:@"title"]) { if (_web.title.length) self.title = _web.title; }
-    else if ([k isEqualToString:@"URL"]) { if (_web.URL) self.url = _web.URL.absoluteString; }
+    else if ([k isEqualToString:@"URL"]) { if (_web.URL) self.url = _web.URL.absoluteString; [self sampleHeaderColorSoon]; }   // back and forward inside single-page sites change only the address
+    else if ([k isEqualToString:@"themeColor"] || [k isEqualToString:@"_sampledPageTopColor"]) { [self updateTint]; return; }
     else if ([k isEqualToString:@"loading"]) {
         BOOL finished = self.loading && !_web.loading;
         self.loading = _web.loading;
@@ -5956,7 +6084,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     dispatch_async(dispatch_get_main_queue(), ^{ if (t && [PW.tabs containsObject:t]) [PW closeTab:t]; });
 }
 
-- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { self.blocked = 0; self.tab.blocked = 0; self.tab.installable = NO; _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; }
+- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { self.blocked = 0; self.tab.blocked = 0; self.tab.installable = NO; _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; _jsTint = nil; [self sampleHeaderColorSoon]; }
 // The tab you had open at launch comes back paused, and stays paused until you click or press a key on it.
 // Playback is refused the way a browser's autoplay block refuses it (the page's play() is turned down with
 // "not allowed"), so YouTube shows its play button instead of starting and being stopped a moment later.
@@ -6314,24 +6442,44 @@ static NSString *MediaKey(NSURL *u) {
     [self askPermission:@"location" host:f.securityOrigin.host noun:@"location" done:done];
 }
 
-// The colour at the top of the page (its theme colour, or whatever is painted behind its header),
-// so the band above the page can take a little of it.
+// The colour at the top of the page, for the band above it. WebKit's own reading comes first: it samples the pixels
+// along the page's top edge (as Safari's coloured tab bar does) and follows every change, scrolling and going back
+// included. Then the page's theme colour; then a look at whatever is painted behind the page's header.
+- (void)updateTint {
+    NSColor *c = nil;
+    @try { c = [_web valueForKey:@"_sampledPageTopColor"]; } @catch (NSException *x) {}
+    if (![c isKindOfClass:NSColor.class] || c.alphaComponent < 0.5) c = nil;
+    if (!c) { @try { NSColor *t = [_web valueForKey:@"themeColor"]; if ([t isKindOfClass:NSColor.class] && t.alphaComponent >= 0.5) c = t; } @catch (NSException *x) {} }
+    if (!c) c = _jsTint;
+    VTab *t = self.tab; if (!t) return;
+    NSColor *old = t.headerColor;
+    if (old == c || [old isEqual:c]) return;
+    t.headerColor = c;
+    VWindow *w = t.owner; if (w.current == t) w.window.contentView.needsDisplay = YES;
+}
+- (void)sampleHeaderColorSoon {
+    if (_tintQueued) return;
+    _tintQueued = YES;
+    __weak VPage *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ VPage *p = ws; if (!p) return; p->_tintQueued = NO; [p sampleHeaderColor]; });
+}
 - (void)sampleHeaderColor {
     __weak VPage *ws = self;
     NSString *js = @"(()=>{const P=s=>{const x=s&&s.match(/rgba?\\(([^)]+)\\)/);if(!x)return null;const p=x[1].split(',').map(parseFloat);if(p.length>3&&p[3]<0.5)return null;return p.slice(0,3)};"
-                    "const m=document.querySelector('meta[name=theme-color]');if(m&&m.content&&document.body){const d=document.createElement('div');d.style.color=m.content;document.body.appendChild(d);const v=P(getComputedStyle(d).color);d.remove();if(v)return v.join(',')}"
-                    "let el=document.elementFromPoint(innerWidth/2,3);while(el){const v=P(getComputedStyle(el).backgroundColor);if(v)return v.join(',');el=el.parentElement}return ''})()";
+                    "let el=document.elementFromPoint(innerWidth/2,2);while(el){const v=P(getComputedStyle(el).backgroundColor);if(v)return v.join(',');el=el.parentElement}"
+                    "for(const e of[document.body,document.documentElement]){const v=e&&P(getComputedStyle(e).backgroundColor);if(v)return v.join(',')}return '255,255,255'})()";
     void (^sample)(void) = ^{
-        VPage *p = ws; if (!p) return;
+        VPage *p = ws; if (!p || !p.web) return;
         [p.web evaluateJavaScript:js completionHandler:^(id r, NSError *e) {
-            VPage *pp = ws; VTab *t = pp.tab; if (!t) return;
+            VPage *pp = ws; if (!pp) return;
             NSArray *c = [r isKindOfClass:NSString.class] && [r length] ? [r componentsSeparatedByString:@","] : nil;
-            t.headerColor = c.count == 3 ? [NSColor colorWithSRGBRed:[c[0] doubleValue] / 255 green:[c[1] doubleValue] / 255 blue:[c[2] doubleValue] / 255 alpha:1] : nil;
-            VWindow *w = t.owner; if (w.current == t) w.window.contentView.needsDisplay = YES;
+            pp->_jsTint = c.count == 3 ? [NSColor colorWithSRGBRed:[c[0] doubleValue] / 255 green:[c[1] doubleValue] / 255 blue:[c[2] doubleValue] / 255 alpha:1] : nil;
+            [pp updateTint];
         }];
     };
+    [self updateTint];
     sample();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_main_queue(), sample);   // late headers
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1200 * NSEC_PER_MSEC), dispatch_get_main_queue(), sample);   // late headers
 }
 
 // WebKit tells us each time a content rule acts (the built-in lists and extensions' rules alike):
@@ -6340,6 +6488,7 @@ static NSString *MediaKey(NSURL *u) {
     SEL bl = NSSelectorFromString(@"blockedLoad");
     if (![action respondsToSelector:bl] || !((BOOL (*)(id, SEL))objc_msgSend)(action, bl)) return;
     self.blocked++; self.tab.blocked = self.blocked;
+    ShieldBlocked(self, u);
     static BOOL queued;   // a busy page blocks dozens at once: one redraw for the lot
     if (queued) return;
     queued = YES;
@@ -8249,6 +8398,536 @@ static NSString *const kPopupMeasureJS = @"(()=>{const d=document.documentElemen
 }
 
 @end
+#pragma mark - Shield: the layers beyond WebKit's lists
+
+// WebKit's content rules (built from the lists above) do the bulk of the blocking. Four more layers bring Iris level
+// with uBlock Origin:
+//   3  page scripts   uBlock's own scriptlets (+js rules): its source is downloaded from uBlock's repository (GPL-3,
+//                     never bundled into Iris), and uBlock's own code builds the injection scripts, in JavaScriptCore,
+//                     exactly as uBlock does for itself. They run at document start in every frame.
+//   4  procedural     :has-text, :upward, :remove, :style, :matches-css, :xpath… and "example.*" sites, in Iris's
+//                     own engine (pages/shield-procedural.js), re-applied as the page changes
+//   5  stand-ins      $redirect rules: the request is blocked and uBlock's harmless stand-in script is planted in the
+//                     page in its place, so sites that expect it (googletag, analytics…) keep working
+//   1  live gate      every connection WebKit makes goes through Iris (a local proxy, macOS 14+), which follows the
+//                     site's DNS aliases and stops first-party trackers in disguise (CNAME cloaking)
+
+static NSString *const kShieldGate = @"shieldGate";
+
+static NSString *ShieldSrcRoot(void) { return [ListDir() stringByAppendingPathComponent:@"ubo-src"]; }
+static NSString *ShieldSrcRef(void) {
+    return Trim([NSString stringWithContentsOfFile:[ShieldSrcRoot() stringByAppendingPathComponent:@"current"] encoding:NSUTF8StringEncoding error:nil] ?: @"");
+}
+static NSString *ShieldSrcDir(void) {
+    NSString *ref = ShieldSrcRef();
+    NSString *d = ref.length ? [ShieldSrcRoot() stringByAppendingPathComponent:ref] : nil;
+    return d && [NSFileManager.defaultManager fileExistsAtPath:[d stringByAppendingPathComponent:@"js/resources/scriptlets.js"]] ? d : nil;
+}
+static NSString *ShieldCacheFile(void) {
+    NSString *d = SupportFile(@"shield");
+    [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    return [d stringByAppendingPathComponent:@"shield.json"];
+}
+static NSData *ShieldGet(NSString *url) {   // on a background queue only
+    __block NSData *out = nil;
+    dispatch_semaphore_t s = dispatch_semaphore_create(0);
+    NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url] cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:30];
+    [r setValue:@"Iris" forHTTPHeaderField:@"User-Agent"];
+    [[NSURLSession.sharedSession dataTaskWithRequest:r completionHandler:^(NSData *d, NSURLResponse *resp, NSError *e) {
+        if (d && [(NSHTTPURLResponse *)resp statusCode] == 200) out = d;
+        dispatch_semaphore_signal(s);
+    }] resume];
+    dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_SEC));
+    return out;
+}
+static NSString *ShieldNormPath(NSString *from, NSString *rel) {
+    NSMutableArray *parts = [[from componentsSeparatedByString:@"/"] mutableCopy]; [parts removeLastObject];
+    for (NSString *p in [rel componentsSeparatedByString:@"/"]) { if (!p.length || [p isEqualToString:@"."]) continue; if ([p isEqualToString:@".."]) { if (parts.count) [parts removeLastObject]; } else [parts addObject:p]; }
+    return [parts componentsJoinedByString:@"/"];
+}
+
+// uBlock's scriptlet sources and stand-in scripts, from its latest release, once a week (Iris itself only: the others read Iris's copy)
+static void ShieldFetchSources(BOOL force, void (^done)(void)) {
+    if (ListsAreIris() && ShieldSrcDir()) { if (done) done(); return; }   // Iris keeps them fresh; the others only fetch if Iris hasn't yet
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *root = ShieldSrcRoot(), *cur = ShieldSrcRef(), *curFile = [root stringByAppendingPathComponent:@"current"];
+        NSDate *at = [[fm attributesOfItemAtPath:curFile error:nil] fileModificationDate];
+        if (!force && ShieldSrcDir() && at && -at.timeIntervalSinceNow < 6 * 86400) { if (done) done(); return; }
+        NSString *ref = @"master";
+        NSData *rel = ShieldGet(@"https://api.github.com/repos/gorhill/uBlock/releases/latest");
+        id j = rel ? [NSJSONSerialization JSONObjectWithData:rel options:0 error:nil] : nil;
+        if ([j isKindOfClass:NSDictionary.class] && [j[@"tag_name"] isKindOfClass:NSString.class] && [j[@"tag_name"] length]) ref = j[@"tag_name"];
+        if ([ref isEqualToString:cur] && ShieldSrcDir()) { [fm setAttributes:@{NSFileModificationDate: NSDate.date} ofItemAtPath:curFile error:nil]; if (done) done(); return; }
+        NSString *dir = [root stringByAppendingPathComponent:[ref stringByAppendingString:@".building"]];
+        [fm removeItemAtPath:dir error:nil];
+        NSString *base = [NSString stringWithFormat:@"https://raw.githubusercontent.com/gorhill/uBlock/%@/src/", ref];
+        BOOL ok = YES;
+        NSMutableArray *queue = [@[@"js/resources/scriptlets.js", @"js/make-scriptlets.js", @"js/arglist-parser.js", @"js/redirect-resources.js",
+                                   @"js/scriptlet.template.js", @"js/scriptlet-begin.template.js", @"js/scriptlet-end.template.js"] mutableCopy];
+        NSMutableSet *seen = [NSMutableSet set];
+        NSRegularExpression *imp = [NSRegularExpression regularExpressionWithPattern:@"import\\s+(?:[^'\";]*?\\s+from\\s+)?['\"](\\.{1,2}/[^'\"]+)['\"]" options:0 error:nil];
+        while (queue.count) {
+            NSString *p = queue.lastObject; [queue removeLastObject];
+            if ([seen containsObject:p]) continue;
+            [seen addObject:p];
+            NSData *d = ShieldGet([base stringByAppendingString:p]);
+            if (!d) { ok = NO; DLog(@"shield: couldn't fetch %@ (%@)", p, ref); break; }
+            NSString *dest = [dir stringByAppendingPathComponent:p];
+            [fm createDirectoryAtPath:dest.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+            [d writeToFile:dest atomically:YES];
+            if ([p hasSuffix:@".template.js"]) continue;
+            NSString *src = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
+            for (NSTextCheckingResult *m in [imp matchesInString:src options:0 range:NSMakeRange(0, src.length)]) {
+                NSString *q = ShieldNormPath(p, [src substringWithRange:[m rangeAtIndex:1]]);
+                if ([q hasPrefix:@"js/"] && ![seen containsObject:q]) [queue addObject:q];
+            }
+        }
+        if (ok) {   // the stand-in scripts uBlock serves in place of blocked ones
+            NSString *rr = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"js/redirect-resources.js"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
+            NSRegularExpression *names = [NSRegularExpression regularExpressionWithPattern:@"\\[\\s*'([A-Za-z0-9_.-]+\\.js)'\\s*," options:0 error:nil];
+            [fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"war"] withIntermediateDirectories:YES attributes:nil error:nil];
+            for (NSTextCheckingResult *m in [names matchesInString:rr options:0 range:NSMakeRange(0, rr.length)]) {
+                NSString *n = [rr substringWithRange:[m rangeAtIndex:1]];
+                NSData *d = ShieldGet([NSString stringWithFormat:@"%@web_accessible_resources/%@", base, n]);
+                if (d) [d writeToFile:[[dir stringByAppendingPathComponent:@"war"] stringByAppendingPathComponent:n] atomically:YES];
+            }
+            NSString *final = [root stringByAppendingPathComponent:ref];
+            [fm removeItemAtPath:final error:nil];
+            [fm moveItemAtPath:dir toPath:final error:nil];
+            [ref writeToFile:curFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            for (NSString *x in [fm contentsOfDirectoryAtPath:root error:nil]) if (![x isEqualToString:ref] && ![x isEqualToString:@"current"]) [fm removeItemAtPath:[root stringByAppendingPathComponent:x] error:nil];
+            DLog(@"shield: uBlock Origin %@ sources ready (%lu files)", ref, (unsigned long)seen.count);
+        } else [fm removeItemAtPath:dir error:nil];
+        if (done) done();
+    });
+}
+
+#pragma mark Building the layers from one parse
+
+static NSString *ShieldPage(NSString *name) {
+    return [NSString stringWithContentsOfFile:[[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"pages"] stringByAppendingPathComponent:name] encoding:NSUTF8StringEncoding error:nil];
+}
+static NSString *ShieldHostOfFilter(NSString *rx) {   // "^[a-z][a-z0-9.+-]*://([^/?#]*\.)?ads\.example\.com…" → ads.example.com
+    NSString *pre = @"^[a-z][a-z0-9.+-]*://([^/?#]*\\.)?";
+    if (![rx hasPrefix:pre]) return nil;
+    NSMutableString *h = [NSMutableString string];
+    for (NSUInteger i = pre.length; i < rx.length; i++) {
+        unichar c = [rx characterAtIndex:i];
+        if (c == '\\' && i + 1 < rx.length && [rx characterAtIndex:i + 1] == '.') { [h appendString:@"."]; i++; continue; }
+        if (isalnum(c) || c == '-' || c == '_') { [h appendFormat:@"%C", c]; continue; }
+        break;
+    }
+    return h.length > 3 && [h containsString:@"."] ? h.lowercaseString : nil;
+}
+static BOOL gShieldBuilding;
+static void ShieldLoad(NSDictionary *cache);
+static void ShieldRulesParsed(FLRules *R, NSString *fp) {
+    NSString *src = ShieldSrcDir(), *ref = ShieldSrcRef();
+    NSMutableDictionary *cache = [@{@"fp": fp ?: @"", @"ref": ref ?: @""} mutableCopy];
+    NSDate *t0 = NSDate.date;
+    NSDictionary *aliases = nil;
+    // 3: uBlock's scriptlets, built by uBlock's own code
+    if (src) @autoreleasepool {
+        NSString *driver = ShieldPage(@"shield-driver.js");
+        NSMutableDictionary *files = [NSMutableDictionary dictionary];
+        NSString *js = [src stringByAppendingPathComponent:@"js"];
+        NSDirectoryEnumerator *en = [NSFileManager.defaultManager enumeratorAtPath:js];
+        for (NSString *rel in en) {
+            if (![rel hasSuffix:@".js"] || [rel hasSuffix:@".template.js"]) continue;
+            NSString *t = [NSString stringWithContentsOfFile:[js stringByAppendingPathComponent:rel] encoding:NSUTF8StringEncoding error:nil];
+            if (t) files[rel] = t;
+        }
+        JSContext *ctx = [JSContext new];
+        __block NSString *jsErr = nil;
+        ctx.exceptionHandler = ^(JSContext *c, JSValue *e) { jsErr = e.toString; };
+        ctx[@"__files"] = files;
+        ctx[@"__filters"] = R.scriptlets;
+        ctx[@"__templates"] = @{@"begin": [NSString stringWithContentsOfFile:[js stringByAppendingPathComponent:@"scriptlet-begin.template.js"] encoding:NSUTF8StringEncoding error:nil] ?: @"",
+                                @"core": [NSString stringWithContentsOfFile:[js stringByAppendingPathComponent:@"scriptlet.template.js"] encoding:NSUTF8StringEncoding error:nil] ?: @"",
+                                @"end": [NSString stringWithContentsOfFile:[js stringByAppendingPathComponent:@"scriptlet-end.template.js"] encoding:NSUTF8StringEncoding error:nil] ?: @""};
+        ctx[@"__secret"] = [[NSUUID.UUID.UUIDString stringByReplacingOccurrencesOfString:@"-" withString:@""] lowercaseString];
+        if (driver) [ctx evaluateScript:driver];
+        NSString *json = driver && !jsErr ? [ctx[@"__irisBuild"] callWithArguments:@[]].toString : nil;
+        NSDictionary *out = json ? [NSJSONSerialization JSONObjectWithData:[json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil] : nil;
+        if ([out isKindOfClass:NSDictionary.class]) {
+            cache[@"main"] = out[@"worlds"][@"MAIN"][@"code"] ?: @"";
+            cache[@"isolated"] = out[@"worlds"][@"ISOLATED"][@"code"] ?: @"";
+            cache[@"scriptletCount"] = out[@"compiled"] ?: @0;
+        } else DLog(@"shield: page scripts not built (%@)", jsErr ?: @"no result");
+        NSString *rj = [ctx[@"__irisRedirects"] callWithArguments:@[]].toString;
+        aliases = rj ? [NSJSONSerialization JSONObjectWithData:[rj dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil] : nil;
+    } else DLog(@"shield: uBlock's sources aren't here yet; page scripts come with the next list update");
+    // 5: stand-ins for $redirect rules, where uBlock has a script for them
+    NSMutableDictionary *canon = [NSMutableDictionary dictionary], *stubs = [NSMutableDictionary dictionary];
+    if ([aliases isKindOfClass:NSDictionary.class]) for (NSString *name in aliases) {
+        canon[name.lowercaseString] = name;
+        for (NSString *a in aliases[name]) if ([a isKindOfClass:NSString.class]) canon[a.lowercaseString] = name;
+        NSString *noExt = [name.lowercaseString stringByDeletingPathExtension]; if (!canon[noExt]) canon[noExt] = name;
+    }
+    canon[@"noopjs"] = canon[@"noopjs"] ?: @"noop.js";
+    NSMutableArray *redirects = [NSMutableArray array];
+    for (NSDictionary *r in R.redirects) {
+        NSString *name = canon[r[@"res"]];
+        if (!name) continue;
+        if (!stubs[name]) {
+            NSString *code = src ? [NSString stringWithContentsOfFile:[[src stringByAppendingPathComponent:@"war"] stringByAppendingPathComponent:name] encoding:NSUTF8StringEncoding error:nil] : nil;
+            if (!code) continue;
+            stubs[name] = code;
+        }
+        NSDictionary *t = r[@"trigger"];
+        NSMutableDictionary *e = [@{@"rx": t[@"url-filter"] ?: @".*", @"res": name} mutableCopy];
+        if (t[@"if-domain"]) e[@"inc"] = t[@"if-domain"];
+        if (t[@"unless-domain"]) e[@"exc"] = t[@"unless-domain"];
+        NSString *h = ShieldHostOfFilter(e[@"rx"]); if (h) e[@"host"] = h;
+        [redirects addObject:e];
+    }
+    cache[@"redirects"] = redirects; cache[@"stubs"] = stubs;
+    // 4: procedural hiding, site → selectors
+    NSMutableDictionary *T = [NSMutableDictionary dictionary];
+    void (^put)(NSString *, NSString *, BOOL) = ^(NSString *k, NSString *sel, BOOL exc) { NSMutableArray *a = T[k]; if (!a) T[k] = a = [NSMutableArray array]; [a addObject:@[sel, @(exc)]]; };
+    for (NSArray *p in R.procedural) {
+        NSString *doms = p[0], *sel = p[1]; BOOL exc = [p[2] boolValue];
+        BOOL any = NO;
+        for (NSString *raw in [doms componentsSeparatedByString:@","]) {
+            NSString *d = Trim(raw).lowercaseString; if (!d.length) continue;
+            if ([d hasPrefix:@"~"]) put([d substringFromIndex:1], sel, YES); else { put(d, sel, exc); any = YES; }
+        }
+        if (!any && exc) put(@"*", sel, YES);
+    }
+    cache[@"procedural"] = T;
+    cache[@"proceduralCount"] = @(R.procedural.count);
+    // 1: whole tracker hosts, for the live gate's disguise check
+    cache[@"hosts"] = R.hosts.allObjects ?: @[];
+    NSData *d = [NSJSONSerialization dataWithJSONObject:cache options:0 error:nil];
+    [d writeToFile:ShieldCacheFile() atomically:YES];
+    DLog(@"shield: %@ page scripts, %lu procedural, %lu stand-ins, %lu gate hosts built in %.1fs", cache[@"scriptletCount"] ?: @0, (unsigned long)R.procedural.count,
+         (unsigned long)redirects.count, (unsigned long)R.hosts.count, -t0.timeIntervalSinceNow);
+    dispatch_async(dispatch_get_main_queue(), ^{ ShieldLoad(cache); });
+}
+
+#pragma mark Loading and installing
+
+static NSString *gShieldFP, *gShieldRef, *gShieldMain, *gShieldIsolated, *gShieldProcedural;
+static NSUInteger gShieldScriptletCount, gShieldProceduralCount;
+static NSArray *gShieldRedirectsAny; static NSDictionary<NSString *, NSArray *> *gShieldRedirectsByHost; static NSDictionary *gShieldStubs;
+static NSSet<NSString *> *gGateHosts;
+static NSMapTable<WKUserContentController *, NSMutableArray *> *gShieldScripts;
+static NSMapTable<WKUserContentController *, NSNumber *> *gShieldUCCs;
+static void GateStart(void);
+static void ShieldChanged(void);
+
+static void ShieldLoad(NSDictionary *cache) {
+    gShieldFP = cache[@"fp"]; gShieldRef = cache[@"ref"];
+    gShieldMain = [cache[@"main"] length] ? cache[@"main"] : nil;
+    gShieldIsolated = [cache[@"isolated"] length] ? cache[@"isolated"] : nil;
+    gShieldScriptletCount = [cache[@"scriptletCount"] unsignedIntegerValue];
+    gShieldProceduralCount = [cache[@"proceduralCount"] unsignedIntegerValue];
+    NSString *engine = ShieldPage(@"shield-procedural.js");
+    NSData *pj = [cache[@"procedural"] count] ? [NSJSONSerialization dataWithJSONObject:cache[@"procedural"] options:0 error:nil] : nil;
+    gShieldProcedural = engine && pj ? [NSString stringWithFormat:@"%@(%@);", engine, [[NSString alloc] initWithData:pj encoding:NSUTF8StringEncoding]] : nil;
+    NSMutableArray *any = [NSMutableArray array]; NSMutableDictionary *byHost = [NSMutableDictionary dictionary];
+    for (NSDictionary *r in cache[@"redirects"] ?: @[]) {
+        NSString *h = r[@"host"];
+        if (h) { NSMutableArray *a = byHost[h]; if (!a) byHost[h] = a = [NSMutableArray array]; [a addObject:r]; } else [any addObject:r];
+    }
+    gShieldRedirectsAny = any; gShieldRedirectsByHost = byHost; gShieldStubs = cache[@"stubs"];
+    gGateHosts = [NSSet setWithArray:cache[@"hosts"] ?: @[]];
+    ShieldChanged();
+    GateStart();
+}
+static void ShieldEnsure(NSString *fp, NSString *dir) {
+    if (([gShieldFP isEqualToString:fp] && [gShieldRef isEqualToString:ShieldSrcRef()]) || gShieldBuilding) return;
+    static BOOL fetching;
+    if (!ShieldSrcDir() && !fetching) {   // no uBlock sources yet: build what we can now, again once they arrive
+        fetching = YES;
+        ShieldFetchSources(NO, ^{ dispatch_async(dispatch_get_main_queue(), ^{ fetching = NO; if (ShieldSrcDir()) ShieldEnsure(fp, dir); }); });
+    }
+    NSData *d = [NSData dataWithContentsOfFile:ShieldCacheFile()];
+    NSDictionary *cache = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+    if ([cache isKindOfClass:NSDictionary.class] && [cache[@"fp"] isEqual:fp] && [cache[@"ref"] isEqual:ShieldSrcRef()]) { ShieldLoad(cache); return; }
+    gShieldBuilding = YES;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        FLRules *R = FLParse(dir);
+        ShieldRulesParsed(R, fp);
+        dispatch_async(dispatch_get_main_queue(), ^{ gShieldBuilding = NO; });
+    });
+}
+
+// The scripts go into every page's controller at document start, in every frame; sites you've switched blocking off for are left out.
+static void ShieldApply(WKUserContentController *u, BOOL priv) {
+    if (!gShieldScripts) gShieldScripts = [NSMapTable weakToStrongObjectsMapTable];
+    NSMutableArray *mine = [gShieldScripts objectForKey:u];
+    if (!mine) { mine = [NSMutableArray array]; [gShieldScripts setObject:mine forKey:u]; }
+    if (mine.count) {
+        NSMutableArray *keep = [NSMutableArray array];
+        for (WKUserScript *us in u.userScripts) if (![mine containsObject:us]) [keep addObject:us];
+        [u removeAllUserScripts];
+        for (WKUserScript *us in keep) [u addUserScript:us];
+        [mine removeAllObjects];
+    }
+    if (!gBlockOn) return;
+    NSMutableArray *exc = [NSMutableArray array];
+    for (NSString *site in SiteArray(priv, kAllowlist) ?: @[]) if ([site isKindOfClass:NSString.class] && site.length) {
+        NSString *h = [site.lowercaseString hasPrefix:@"www."] ? [site.lowercaseString substringFromIndex:4] : site.lowercaseString;
+        [exc addObject:[NSString stringWithFormat:@"*://*.%@/*", h]];
+    }
+    WKContentWorld *iso = [WKContentWorld worldWithName:@"iris-shield"];
+    BOOL hide = ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements];
+    NSArray *parts = @[@[gShieldMain ?: @"", WKContentWorld.pageWorld], @[gShieldIsolated ?: @"", iso], @[hide ? gShieldProcedural ?: @"" : @"", iso]];
+    for (NSArray *p in parts) {
+        NSString *code = p[0]; if (!code.length) continue;
+        WKUserScript *us = MatchedScript(code, WKUserScriptInjectionTimeAtDocumentStart, NO, @[@"*://*/*"], exc, p[1])
+                        ?: [[WKUserScript alloc] initWithSource:code injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:p[1]];
+        [u addUserScript:us]; [mine addObject:us];
+    }
+}
+static void ShieldInstall(WKUserContentController *ucc, BOOL priv) {
+    if (!gShieldUCCs) gShieldUCCs = [NSMapTable weakToStrongObjectsMapTable];
+    [gShieldUCCs setObject:@(priv) forKey:ucc];
+    if (gShieldFP) ShieldApply(ucc, priv);
+}
+static void ShieldChanged(void) {
+    for (WKUserContentController *u in gShieldUCCs.keyEnumerator.allObjects) ShieldApply(u, [[gShieldUCCs objectForKey:u] boolValue]);
+}
+
+#pragma mark 5: stand-ins
+
+static BOOL ShieldDomainHit(NSString *host, NSArray *list) {
+    for (NSString *w in list) {
+        NSString *d = [w hasPrefix:@"*"] ? [w substringFromIndex:1] : w;
+        if ([host isEqualToString:d] || [host hasSuffix:[@"." stringByAppendingString:d]]) return YES;
+    }
+    return NO;
+}
+static char kStandInKey;
+static void ShieldBlocked(VPage *p, NSURL *u) {
+    if (!u.host || (!gShieldRedirectsAny.count && !gShieldRedirectsByHost.count)) return;
+    NSString *uh = u.host.lowercaseString, *url = u.absoluteString;
+    NSMutableArray *cands = [NSMutableArray arrayWithArray:gShieldRedirectsAny ?: @[]];
+    NSString *h = uh;
+    while (h.length) {
+        NSArray *a = gShieldRedirectsByHost[h]; if (a) [cands addObjectsFromArray:a];
+        NSRange dot = [h rangeOfString:@"."]; if (dot.location == NSNotFound) break;
+        h = [h substringFromIndex:dot.location + 1];
+    }
+    if (!cands.count) return;
+    WKWebView *web = p.web;
+    NSString *page = web.URL.host.lowercaseString ?: @"";
+    static NSMutableDictionary<NSString *, NSRegularExpression *> *rxCache; if (!rxCache) rxCache = [NSMutableDictionary dictionary];
+    for (NSDictionary *r in cands) {
+        if (r[@"inc"] && !ShieldDomainHit(page, r[@"inc"])) continue;
+        if (r[@"exc"] && ShieldDomainHit(page, r[@"exc"])) continue;
+        NSRegularExpression *re = rxCache[r[@"rx"]];
+        if (!re) { re = [NSRegularExpression regularExpressionWithPattern:r[@"rx"] options:NSRegularExpressionCaseInsensitive error:nil]; if (!re) continue; rxCache[r[@"rx"]] = re; }
+        if (![re firstMatchInString:url options:0 range:NSMakeRange(0, url.length)]) continue;
+        // once per page and stand-in
+        NSMutableDictionary *done = objc_getAssociatedObject(p, &kStandInKey);
+        NSString *pageURL = web.URL.absoluteString ?: @"";
+        if (!done || ![done[@"page"] isEqual:pageURL]) { done = [@{@"page": pageURL, @"set": [NSMutableSet set]} mutableCopy]; objc_setAssociatedObject(p, &kStandInKey, done, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+        if ([done[@"set"] containsObject:r[@"res"]]) return;
+        [done[@"set"] addObject:r[@"res"]];
+        NSString *code = gShieldStubs[r[@"res"]]; if (!code.length) return;
+        [web evaluateJavaScript:code inFrame:nil inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
+        return;
+    }
+}
+
+#pragma mark 1: the live gate
+
+static NSString *ShieldStats(void) {
+    return [NSString stringWithFormat:@"%lu page scripts · %lu procedural rules · %lu stand-ins", (unsigned long)gShieldScriptletCount, (unsigned long)gShieldProceduralCount,
+            (unsigned long)(gShieldRedirectsAny.count + [[gShieldRedirectsByHost.allValues valueForKeyPath:@"@sum.@count"] unsignedIntegerValue])];
+}
+static id gGate;                     // nw_listener_t
+static uint16_t gGatePort;
+static NSHashTable<WKWebsiteDataStore *> *gGateStores;
+static NSCache *gCnameCache;
+static volatile long gGateUncloaked, gGateConnections;
+static volatile BOOL gGateBlocking = YES;
+
+static void GateApplyStore(WKWebsiteDataStore *ds) {
+    SEL set = NSSelectorFromString(@"setProxyConfigurations:");
+    if (![ds respondsToSelector:set]) return;
+    id (*mk)(id, id) = (id (*)(id, id))dlsym(RTLD_DEFAULT, "nw_proxy_config_create_http_connect");
+    NSArray *cfg = @[];
+    if (gGatePort && mk) {
+        nw_endpoint_t ep = nw_endpoint_create_host("127.0.0.1", [NSString stringWithFormat:@"%u", gGatePort].UTF8String);
+        id pc = mk(ep, nil);
+        if (pc) cfg = @[pc];
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(ds, set, cfg);
+}
+static void ShieldAdoptStore(WKWebsiteDataStore *ds) {
+    if (!ds) return;
+    if (!gGateStores) gGateStores = [NSHashTable weakObjectsHashTable];
+    if ([gGateStores containsObject:ds]) return;
+    [gGateStores addObject:ds];
+    if (gGatePort) GateApplyStore(ds);
+}
+static void GateApplyAll(void) { for (WKWebsiteDataStore *ds in gGateStores.allObjects) GateApplyStore(ds); }
+
+static BOOL GateHostListed(NSString *h) {
+    NSSet *set = gGateHosts;
+    while (h.length) {
+        if ([set containsObject:h]) return YES;
+        NSRange d = [h rangeOfString:@"."]; if (d.location == NSNotFound) break;
+        h = [h substringFromIndex:d.location + 1];
+    }
+    return NO;
+}
+typedef struct { char target[1025]; BOOL got; } IrisCname;
+static void IrisCnameReply(DNSServiceRef sd, DNSServiceFlags flags, uint32_t ifi, DNSServiceErrorType err, const char *name, uint16_t type, uint16_t cls, uint16_t len, const void *rdata, uint32_t ttl, void *ctx) {
+    IrisCname *c = ctx;
+    if (err != kDNSServiceErr_NoError || type != kDNSServiceType_CNAME || !rdata) return;
+    const unsigned char *p = rdata, *end = p + len; char out[1025]; size_t o = 0;
+    while (p < end && *p) {
+        unsigned n = *p++; if (n > 63 || p + n > end || o + n + 2 >= sizeof out) break;
+        if (o) out[o++] = '.';
+        memcpy(out + o, p, n); o += n; p += n;
+    }
+    out[o] = 0;
+    if (o) { strlcpy(c->target, out, sizeof c->target); c->got = YES; }
+}
+static NSString *IrisCnameOf(NSString *host) {
+    DNSServiceRef sd = NULL; IrisCname c = {{0}, NO};
+    if (DNSServiceQueryRecord(&sd, kDNSServiceFlagsReturnIntermediates, 0, host.UTF8String, kDNSServiceType_CNAME, kDNSServiceClass_IN, IrisCnameReply, &c) != kDNSServiceErr_NoError) return nil;
+    int fd = DNSServiceRefSockFD(sd);
+    fd_set set; FD_ZERO(&set); FD_SET(fd, &set);
+    struct timeval tv = {0, 250000};
+    if (fd >= 0 && select(fd + 1, &set, NULL, NULL, &tv) > 0) DNSServiceProcessResult(sd);
+    DNSServiceRefDeallocate(sd);
+    return c.got ? [@(c.target) lowercaseString] : nil;
+}
+// A first-party name that is really an alias of a tracker (metrics.site.com → site.tracker.net): blocked like the tracker
+static NSString *GateCloakedVia(NSString *host) {
+    if (!gCnameCache) gCnameCache = [NSCache new];
+    NSString *h = host;
+    for (int i = 0; i < 5; i++) {
+        id cached = [gCnameCache objectForKey:h];
+        NSString *t = [cached isKindOfClass:NSString.class] ? cached : nil;
+        if (!cached) { t = IrisCnameOf(h); [gCnameCache setObject:t ?: NSNull.null forKey:h]; }
+        if (!t.length || [t isEqualToString:h]) return nil;
+        if (GateHostListed(t)) return t;
+        h = t;
+    }
+    return nil;
+}
+
+@interface IrisGateLink : NSObject
+@property (strong) nw_connection_t a, b;
+@property int closed;
+@end
+@implementation IrisGateLink
+- (void)halfDone { if (++self.closed >= 2) [self cancel]; }
+- (void)cancel { if (self.a) nw_connection_cancel(self.a); if (self.b) nw_connection_cancel(self.b); self.a = nil; self.b = nil; }
+@end
+
+static void GateSendAndClose(nw_connection_t c, NSString *s) {
+    NSData *d = [s dataUsingEncoding:NSASCIIStringEncoding];
+    dispatch_data_t dd = dispatch_data_create(d.bytes, d.length, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    nw_connection_send(c, dd, NW_CONNECTION_FINAL_MESSAGE_CONTEXT, true, ^(nw_error_t e) { nw_connection_cancel(c); });
+}
+static void GatePump(nw_connection_t from, nw_connection_t to, IrisGateLink *link) {
+    nw_connection_receive(from, 1, 256 * 1024, ^(dispatch_data_t content, nw_content_context_t ctx, bool complete, nw_error_t err) {
+        if (err && !content) { [link cancel]; return; }
+        void (^after)(void) = ^{
+            if (complete) { nw_connection_send(to, NULL, NW_CONNECTION_FINAL_MESSAGE_CONTEXT, true, ^(nw_error_t e) {}); [link halfDone]; return; }
+            if (err) { [link cancel]; return; }
+            GatePump(from, to, link);
+        };
+        if (content) nw_connection_send(to, content, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, false, ^(nw_error_t e) { if (e) { [link cancel]; return; } after(); });
+        else after();
+    });
+}
+static BOOL GateIsIP(NSString *h) { return [h rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789."] invertedSet]].location == NSNotFound || [h containsString:@":"]; }
+static void GateOpen(nw_connection_t client, NSString *host, NSString *port, NSData *rest, dispatch_queue_t q) {
+    nw_endpoint_t ep = nw_endpoint_create_host(host.UTF8String, port.UTF8String);
+    nw_parameters_t params = nw_parameters_create_secure_tcp(NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    nw_connection_t out = nw_connection_create(ep, params);
+    __block BOOL ready = NO, failed = NO, decided = NO, block = NO, went = NO;
+    __block NSString *via = nil;
+    void (^go)(void) = ^{
+        if (went || !decided || !(ready || failed)) return;
+        went = YES;
+        if (block) { nw_connection_cancel(out); GateSendAndClose(client, @"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return; }
+        if (failed) { nw_connection_cancel(out); GateSendAndClose(client, @"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return; }
+        IrisGateLink *link = [IrisGateLink new]; link.a = client; link.b = out;
+        NSData *ok = [@"HTTP/1.1 200 Connection established\r\n\r\n" dataUsingEncoding:NSASCIIStringEncoding];
+        nw_connection_send(client, dispatch_data_create(ok.bytes, ok.length, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT), NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, false, ^(nw_error_t e) {
+            if (e) { [link cancel]; return; }
+            void (^pump)(void) = ^{ GatePump(client, out, link); GatePump(out, client, link); };
+            if (rest.length) nw_connection_send(out, dispatch_data_create(rest.bytes, rest.length, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT), NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, false, ^(nw_error_t e2) { if (e2) [link cancel]; else pump(); });
+            else pump();
+        });
+    };
+    nw_connection_set_queue(out, q);
+    nw_connection_set_state_changed_handler(out, ^(nw_connection_state_t st, nw_error_t e) {
+        if (st == nw_connection_state_ready && !ready) { ready = YES; go(); }
+        else if ((st == nw_connection_state_failed || st == nw_connection_state_waiting) && !ready && !failed) { failed = YES; go(); }
+    });
+    nw_connection_start(out);
+    if (!gGateBlocking || GateIsIP(host) || [host isEqualToString:@"localhost"] || !gGateHosts.count) { decided = YES; return; }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *v = GateCloakedVia(host.lowercaseString);
+        dispatch_async(q, ^{
+            decided = YES; block = v != nil; via = v;
+            if (block) { __sync_fetch_and_add(&gGateUncloaked, 1); DLog(@"gate: %@ is %@ in disguise, blocked", host, v); }
+            go();
+        });
+    });
+}
+static void GateReadHead(nw_connection_t c, NSMutableData *buf, dispatch_queue_t q) {
+    nw_connection_receive(c, 1, 16384, ^(dispatch_data_t content, nw_content_context_t ctx, bool complete, nw_error_t err) {
+        if (content) dispatch_data_apply(content, ^bool(dispatch_data_t r, size_t off, const void *bytes, size_t size) { [buf appendBytes:bytes length:size]; return true; });
+        NSRange end = [buf rangeOfData:[NSData dataWithBytes:"\r\n\r\n" length:4] options:0 range:NSMakeRange(0, buf.length)];
+        if (end.location == NSNotFound) {
+            if (err || complete || buf.length > 65536) { nw_connection_cancel(c); return; }
+            GateReadHead(c, buf, q); return;
+        }
+        NSString *head = [[NSString alloc] initWithData:[buf subdataWithRange:NSMakeRange(0, end.location)] encoding:NSISOLatin1StringEncoding] ?: @"";
+        NSData *rest = [buf subdataWithRange:NSMakeRange(NSMaxRange(end), buf.length - NSMaxRange(end))];
+        NSArray *first = [[head componentsSeparatedByString:@"\r\n"].firstObject componentsSeparatedByString:@" "];
+        if (first.count < 2 || ![first[0] isEqualToString:@"CONNECT"]) { GateSendAndClose(c, @"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return; }
+        NSString *hp = first[1], *host = hp, *port = @"443";
+        if ([hp hasPrefix:@"["]) { NSRange rb = [hp rangeOfString:@"]"]; if (rb.location != NSNotFound) { host = [hp substringWithRange:NSMakeRange(1, rb.location - 1)]; if (rb.location + 2 < hp.length) port = [hp substringFromIndex:rb.location + 2]; } }
+        else { NSRange colon = [hp rangeOfString:@":" options:NSBackwardsSearch]; if (colon.location != NSNotFound) { host = [hp substringToIndex:colon.location]; port = [hp substringFromIndex:colon.location + 1]; } }
+        GateOpen(c, host, port, rest, q);
+    });
+}
+static void GateAccept(nw_connection_t c) {
+    dispatch_queue_t q = dispatch_queue_create_with_target("iris.gate.conn", DISPATCH_QUEUE_SERIAL, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+    nw_connection_set_queue(c, q);
+    nw_connection_start(c);
+    __sync_fetch_and_add(&gGateConnections, 1);
+    GateReadHead(c, [NSMutableData data], q);
+}
+static void GateStart(void) {
+    if (@available(macOS 14.0, *)) {} else return;
+    if (gGate || ![Defaults() boolForKey:kShieldGate]) return;
+    if (!dlsym(RTLD_DEFAULT, "nw_proxy_config_create_http_connect") || ![WKWebsiteDataStore instancesRespondToSelector:NSSelectorFromString(@"setProxyConfigurations:")]) { DLog(@"gate: this macOS can't route WebKit through Iris"); return; }
+    nw_parameters_t p = nw_parameters_create_secure_tcp(NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+    nw_parameters_set_local_endpoint(p, nw_endpoint_create_host("127.0.0.1", "0"));
+    nw_listener_t l = nw_listener_create(p);
+    if (!l) { DLog(@"gate: couldn't open"); return; }
+    gGate = l;
+    nw_listener_set_queue(l, dispatch_queue_create("iris.gate", DISPATCH_QUEUE_SERIAL));
+    nw_listener_set_new_connection_handler(l, ^(nw_connection_t c) { GateAccept(c); });
+    nw_listener_set_state_changed_handler(l, ^(nw_listener_state_t st, nw_error_t e) {
+        if (st == nw_listener_state_ready) {
+            uint16_t port = nw_listener_get_port(l);
+            dispatch_async(dispatch_get_main_queue(), ^{ gGatePort = port; ShieldAdoptStore(WKWebsiteDataStore.defaultDataStore); GateApplyAll(); DLog(@"gate: live on port %u", port); });
+        } else if (st == nw_listener_state_failed || st == nw_listener_state_cancelled) {
+            dispatch_async(dispatch_get_main_queue(), ^{ if (gGate == (id)l) { gGate = nil; gGatePort = 0; GateApplyAll(); DLog(@"gate: closed"); } });
+        }
+    });
+    nw_listener_start(l);
+}
+static void GateStop(void) {
+    nw_listener_t l = gGate; gGate = nil; gGatePort = 0;
+    GateApplyAll();
+    if (l) nw_listener_cancel(l);
+}
 
 #pragma mark - Iris's own pages (iris://history, iris://bookmarks)
 
@@ -10797,14 +11476,17 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
 - (BOOL)isFlipped { return YES; }
 - (void)drawRect:(NSRect)r {
     [vBg setFill]; NSRectFill(NSIntersectionRect(r, self.bounds));
-    // the page's header colour bleeds a little into the band above it; the band stays dark
-    NSColor *c = [WinFor(self).current.headerColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-    if (!c || ThemeIsLight()) return;
+    // The band above the page takes the page's own top colour, so page and band read as one surface (Safari's
+    // coloured tab bar). The capsules are near-opaque glass, so they stay legible on any colour. The colour runs
+    // under the page's rounded top corners too, so they melt into it; a faint shade at the very top keeps the window's edge.
+    VWindow *w = WinFor(self);
+    NSColor *c = [w.current.headerColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    if (!c || gWebApp) return;
+    CGFloat band = NSMinY(w.content.frame) + 12;
+    [c setFill]; NSRectFill(NSMakeRect(0, 0, NSWidth(self.bounds), band));
     CGFloat lum = 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent;
-    CGFloat a = lum > 0.6 ? 0.07 : lum > 0.35 ? 0.22 : 0.4;   // light headers only tint it; dark and coloured ones show through more
-    NSColor *bottom = [vBg blendedColorWithFraction:a ofColor:c], *top = [vBg blendedColorWithFraction:a * 0.45 ofColor:c];
-    NSGradient *g = [[NSGradient alloc] initWithStartingColor:top endingColor:bottom];
-    [g drawInRect:NSMakeRect(0, 0, NSWidth(self.bounds), 48) angle:90];   // flipped view: 90° runs top to bottom
+    NSGradient *g = [[NSGradient alloc] initWithStartingColor:[NSColor colorWithWhite:lum > 0.5 ? 0 : 1 alpha:lum > 0.5 ? 0.05 : 0.035] endingColor:[NSColor colorWithWhite:0 alpha:0]];
+    [g drawInRect:NSMakeRect(0, 0, NSWidth(self.bounds), 14) angle:90];
 }
 - (void)resizeSubviewsWithOldSize:(NSSize)s { [WinFor(self) layout]; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
@@ -12147,7 +12829,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     SiteSet(self.isPrivate, kAllowlist, a);
     [self showToast:wasAllowed ? [NSString stringWithFormat:@"Blocking back on for %@…", site] : [NSString stringWithFormat:@"Blocking off for %@…", site]];
     VPage *w = self.current.web;
-    IrisYouTubeChanged();
+    ShieldChanged();
     if (self.isPrivate) { [w reload]; return; }   // switched per page by WebKit: nothing to rebuild, and nothing of it kept
     IrisReloadBlocklistsThen(^{ [w reload]; });
 }
@@ -14837,7 +15519,7 @@ static void RunBuildScriptWith(NSString *stamp, NSArray *args) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
-    [Defaults() registerDefaults:@{kDLAccel: @YES, kCodec: @(MacIsAppleSilicon() ? 0 : 2), kCodec30: @NO, kBgThrottle: @1, kSingleProcess: @NO, kRestorePaused: @YES, kResumeMedia: @YES, kLazyRestore: @NO, kBlock: @YES, kStrip: @YES, kCookieReject: @YES, kAutoPiP: @YES, kSleepMins: @10, kShowBookmarks: @YES, kSearch: @0, kStartup: @0, kPrivLock: @3, kPrivHide: @NO, kScripts: @YES, kAskDownload: @NO,
+    [Defaults() registerDefaults:@{kDLAccel: @YES, kCodec: @(MacIsAppleSilicon() ? 0 : 2), kCodec30: @NO, kBgThrottle: @1, kSingleProcess: @NO, kRestorePaused: @YES, kResumeMedia: @YES, kLazyRestore: @NO, kBlock: @YES, kStrip: @YES, kCookieReject: @YES, kAutoPiP: @YES, kSleepMins: @10, kShowBookmarks: @YES, kSearch: @0, kStartup: @0, kPrivLock: @3, kPrivHide: @NO, kShieldGate: @YES, kScripts: @YES, kAskDownload: @NO,
                                    kThrottleOn: @YES, kTheme: @1, kAccent: @0, kDensity: @1, kHTTPSOnly: @NO, kGPC: @YES, kHomeTopSites: @YES, kConfirmQuit: @NO, kSuggestNet: @YES}];
     if (gWebApp) WebAppAdoptSettings();   // an installed app starts from your Iris settings
     if (!gWebApp && ![Defaults() boolForKey:@"toolbarInstallV1"]) {   // the install button joins the address bar (Oct 2026)
@@ -15515,7 +16197,13 @@ static NSArray *SettingsSchema(VWindow *win) {
     [S addObject:SSection(@"blocking", @"Ad Blocking", @"Filter lists Iris uses to recognise ad and tracker servers. They update themselves weekly.", @"shield", @[
         SGroup(@"Lists", lists),
         SGroup(@"Element hiding", @[ SSwitch(kHideElements, @"Hide ad spaces and page clutter", @"Hides the boxes ads leave behind, cookie notices and other annoyances with style rules. Ads and trackers are blocked either way; off makes busy pages a little lighter.",
-                                             ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kHideElements]; IrisApplyRules(); }) ]),
+                                             ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kHideElements]; IrisApplyRules(); ShieldChanged(); }) ]),
+        SGroup(@"Beyond the lists", @[
+            SValue(@"uBlock Origin's page scripts", @"uBlock's own scriptlets, procedural hiding and stand-in scripts, built from uBlock's source (fetched from its repository with the lists).",
+                   gShieldFP ? ShieldStats() : (ShieldSrcRef().length ? @"Building…" : @"Arrives with the next list update")),
+            SSwitch(kShieldGate, @"Live gate", [NSString stringWithFormat:@"Every connection pages make passes through Iris, which follows a site's DNS aliases and stops trackers disguised as the site itself (CNAME cloaking). macOS 14 or later. %@",
+                                                 gGatePort ? [NSString stringWithFormat:@"Live: %ld connections, %ld disguised trackers stopped.", gGateConnections, gGateUncloaked] : @"Not running."],
+                    [Defaults() boolForKey:kShieldGate], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kShieldGate]; if ([v boolValue]) GateStart(); else GateStop(); }) ]),
         SGroup(@"Updates", @[ SValue(@"Status", nil, VBlocker.shared.status ?: @""),
             SButton(@"updateLists", @"Update the lists now", nil, @"Update Now", ^(NSDictionary *a, void (^done)(NSString *)) { [win updateListsNow:nil]; done(@"Updating filter lists…"); }) ]) ])];
 

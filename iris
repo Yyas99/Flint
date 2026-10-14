@@ -138,7 +138,7 @@ done_line "Bundle" "Iris Dev.app · extension layer"
 if [ "$1" = "build" ] || [ ! -x "$OUT/Iris" ] || [ "$SRC" -nt "$OUT/Iris" ]; then
   T=$(date +%s)
   clang -fobjc-arc -O2 -Wall -Wno-deprecated-declarations -Wno-nonnull -Wno-unused-function -mmacosx-version-min=12.3 "$SRC" -o "$OUT/Iris.new" \
-    -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework QuartzCore -framework Security -framework CoreServices -framework CoreLocation -lsqlite3 >>"$LOG" 2>&1 & WP=$!
+    -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework QuartzCore -framework Security -framework CoreServices -framework CoreLocation -framework JavaScriptCore -framework Network -lsqlite3 >>"$LOG" 2>&1 & WP=$!
   while kill -0 $WP 2>/dev/null; do P=$(( 10 + ($(date +%s) - T) * 6 )); [ $P -gt 95 ] && P=95; live "Window" "$P" "compiling Iris.m · $(since $T)"; K=$((K+1)); sleep 0.25; done
   if ! wait $WP; then fail_line "Window" "build failed"; grep -m10 "error" "$LOG" | sed "s/^/   ${D}│${R} /"; exit 1; fi
   mv -f "$OUT/Iris.new" "$OUT/Iris"

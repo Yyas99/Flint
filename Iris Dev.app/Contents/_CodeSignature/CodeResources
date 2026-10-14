@@ -40,6 +40,14 @@
 		<data>
 		enyUS/MaQFTkeDxojR+LjxdmERg=
 		</data>
+		<key>Resources/pages/shield-driver.js</key>
+		<data>
+		iIt/2U0kRjbZ75nM+lGQcZDQ8Ms=
+		</data>
+		<key>Resources/pages/shield-procedural.js</key>
+		<data>
+		WMslH7fXEP+vppjZXYnSDgktlG0=
+		</data>
 		<key>Resources/pages/source.html</key>
 		<data>
 		sfU1c4DX967WYh28gkRr9F907RQ=
@@ -112,6 +120,20 @@
 			<key>hash2</key>
 			<data>
 			FWBS/pIgNFQ8VF9WLfDkkITffHWUfJGoCvSyzYhBgT0=
+			</data>
+		</dict>
+		<key>Resources/pages/shield-driver.js</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			ySPJtyFxlCxQkxHuChrzwFyKsqZ7vEfG/DlpGUxXiN0=
+			</data>
+		</dict>
+		<key>Resources/pages/shield-procedural.js</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			1IyAwQAW69zdKWvid6XVxPKOSbIBKhwo1Q1kotsanTM=
 			</data>
 		</dict>
 		<key>Resources/pages/source.html</key>
