@@ -14,22 +14,13 @@ APP="$STAGE/Iris.app"; BIN="$APP/Contents/MacOS/Iris"
 if [ "$1" = "stop" ]; then pkill -a -x Iris 2>/dev/null || true; echo "Iris stopped"; exit 0; fi
 
 install_staged() {   # quit Iris, put the staged build in place, open it (tabs are restored)
-  for p in Iris Flint; do pkill -a -x $p 2>/dev/null || true; done
-  for i in $(seq 1 50); do pgrep -a -x Iris >/dev/null || pgrep -a -x Flint >/dev/null || break; sleep 0.1; done
-  for p in Iris Flint; do pkill -9 -a -x $p 2>/dev/null || true; done
+  pkill -a -x Iris 2>/dev/null || true
+  for i in $(seq 1 50); do pgrep -a -x Iris >/dev/null || break; sleep 0.1; done
+  pkill -9 -a -x Iris 2>/dev/null || true
   rm -rf "$LIVE.old"; [ -d "$LIVE" ] && mv "$LIVE" "$LIVE.old"
   if ditto "$APP" "$LIVE"; then rm -rf "$LIVE.old"; else rm -rf "$LIVE"; mv "$LIVE.old" "$LIVE"; fi
   rm -f "$STAGE/ready" "$STAGE/install" "$STAGE/notes"; : > "$DIR/update-notes.txt"
-  # one-time move from the old name: Iris copies Flint's settings, tabs and website data on its first launch
   LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-  if [ -d "$DIR/Flint.app" ]; then "$LSR" -u "$DIR/Flint.app" >/dev/null 2>&1 || true; rm -rf "$DIR/Flint.app"; fi
-  mkdir -p "$DIR/jobs/old"
-  for f in Flint.m Flint.icns; do [ -f "$DIR/$f" ] && mv -f "$DIR/$f" "$DIR/jobs/old/$f"; done
-  rm -f "$DIR/flint" "$DIR/.flint-run" "$DIR/flint.log"
-  if [ "$(basename "$DIR")" = "Flint" ] && [ ! -e "$(dirname "$DIR")/Iris" ]; then
-    NEW="$(dirname "$DIR")/Iris"
-    if mv "$DIR" "$NEW"; then DIR="$NEW"; LIVE="$DIR/Iris.app"; LOG="$DIR/build.log"; STAGE="$DIR/.staged"; LOCK="$DIR/.buildlock"; cd "$DIR"; fi
-  fi
   touch "$LIVE"
   "$LSR" -f "$LIVE" >/dev/null 2>&1 || true
   open "$LIVE" || { sleep 1; open "$LIVE"; }
@@ -146,6 +137,12 @@ if [ "$1" = "build" ] || [ ! -x "$OUT/Iris" ] || [ "$SRC" -nt "$OUT/Iris" ]; the
 else done_line "Window" "unchanged"; fi
 cp -f "$OUT/Iris" "$DEVAPP/Contents/MacOS/IrisDev"
 sign_app "$DEVAPP" "com.y.iris.dev"
+# Working on Iris itself (.mainonly present): Iris Dev isn't started; the build only waits to be shipped
+if [ -f "$DIR/.mainonly" ]; then
+  pkill -a -x IrisDev 2>/dev/null || true
+  done_line "Dev" "built · Iris Dev not started (.mainonly) · $(since $T0)"
+  exit 0
+fi
 # Iris Dev restarts into the build (its tabs come back); Iris itself is left alone
 # -a: Iris Dev itself often runs this script, and pkill leaves its own ancestors alone unless told to
 pkill -a -x IrisDev 2>/dev/null || true

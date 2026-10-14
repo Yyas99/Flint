@@ -14,15 +14,15 @@
 		</data>
 		<key>Resources/ext-shim.js</key>
 		<data>
-		rYvFVltfWWnTcRptLElnulQuVRU=
+		lb2m4WFfGliTHhv7wUKWmowFFIw=
 		</data>
 		<key>Resources/pages/bookmarks.html</key>
 		<data>
-		tU5JtGTSJRI/URXKKh0cJHe5h/E=
+		IO7VHViIvS7hjCznHoD6TBOSKN0=
 		</data>
 		<key>Resources/pages/downloads.html</key>
 		<data>
-		oqP2EsjXse1WSr1xsq4y5O8sprI=
+		iPQE9kUsqv5b8o0e4DbpK70gpJc=
 		</data>
 		<key>Resources/pages/history.html</key>
 		<data>
@@ -34,19 +34,11 @@
 		</data>
 		<key>Resources/pages/reader.html</key>
 		<data>
-		YYzGpQRPmH4cHmfAEsBmiKaEeaw=
+		Q3l7mvN739NaFmRsHihf4uky3yc=
 		</data>
 		<key>Resources/pages/settings.html</key>
 		<data>
-		Wio+IAl59/GAMcJf+5uQUJ0JxkY=
-		</data>
-		<key>Resources/pages/shield-driver.js</key>
-		<data>
-		iIt/2U0kRjbZ75nM+lGQcZDQ8Ms=
-		</data>
-		<key>Resources/pages/shield-procedural.js</key>
-		<data>
-		WMslH7fXEP+vppjZXYnSDgktlG0=
+		wWe+SCi47iDd/fPatGEB0/009MU=
 		</data>
 		<key>Resources/pages/source.html</key>
 		<data>
@@ -77,21 +69,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			eq/i01ZpZ+djNonYCVfVRKX8Y5mxowCCsyiZ1BXXSYk=
+			OXMs5ZCxs/lnNwfyBaKdWgDeBtQfFC71w9XtFudY46E=
 			</data>
 		</dict>
 		<key>Resources/pages/bookmarks.html</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			a9VrvNZjvKojEvBk5SathmL/t6g2FU4FpWQIKaoKKIE=
+			48fPBDoCrcf00RlDMik7+AgezQh1kl+KQtBcxPeg854=
 			</data>
 		</dict>
 		<key>Resources/pages/downloads.html</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			3OFPXmd/ItTGicQTU6sYBFE95+jYL4k9YBVMfpk9bQE=
+			WVomgh7lFyk27k4DUpdIDcm3o20P+dTj0sDnnk8J78o=
 			</data>
 		</dict>
 		<key>Resources/pages/history.html</key>
@@ -112,28 +104,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			HiG8M1obnHfBtz0Ypjsa9//kmXdWKc33DJ+oYyqC3Ik=
+			qGFG5LPDKPDMbrj1J26GlGdvYBxMQo63w3pt+eDK09M=
 			</data>
 		</dict>
 		<key>Resources/pages/settings.html</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			EBauGsTEfHM07/ZPjA0UwjjSINGu5KUrjpyGSwZ5VuM=
-			</data>
-		</dict>
-		<key>Resources/pages/shield-driver.js</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			ySPJtyFxlCxQkxHuChrzwFyKsqZ7vEfG/DlpGUxXiN0=
-			</data>
-		</dict>
-		<key>Resources/pages/shield-procedural.js</key>
-		<dict>
-			<key>hash2</key>
-			<data>
-			1IyAwQAW69zdKWvid6XVxPKOSbIBKhwo1Q1kotsanTM=
+			6KAGI44qPXyGtQCLhlNNmQlCYwTsklBY4O1k9HHmv8s=
 			</data>
 		</dict>
 		<key>Resources/pages/source.html</key>

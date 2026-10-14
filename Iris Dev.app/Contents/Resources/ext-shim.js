@@ -47,6 +47,28 @@
   }
 
   // Chrome APIs WebKit lacks that extensions take for granted
+  // ES2025 iterator helpers (map.values().some(…) etc.), which Chrome has and older WebKit lacks
+  (() => {
+    const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+    if (!IP || IP.some) return;
+    const def = (name, fn) => Object.defineProperty(IP, name, { value: fn, writable: true, configurable: true });
+    function* gen(it, step) { let i = 0; for (const v of { [Symbol.iterator]: () => it }) { const r = step(v, i++); if (r === STOP) return; if (r !== SKIP) yield* r; } }
+    const STOP = {}, SKIP = {};
+    def('map', function (f) { return gen(this, (v, i) => [f(v, i)]); });
+    def('filter', function (f) { return gen(this, (v, i) => (f(v, i) ? [v] : SKIP)); });
+    def('take', function (n) { let k = 0; return gen(this, v => (k++ < n ? [v] : STOP)); });
+    def('drop', function (n) { let k = 0; return gen(this, v => (k++ < n ? SKIP : [v])); });
+    def('flatMap', function (f) { return gen(this, (v, i) => f(v, i)); });
+    const each = (it, f) => { let i = 0; for (const v of { [Symbol.iterator]: () => it }) if (f(v, i++) === STOP) { if (it.return) it.return(); return true; } return false; };
+    def('forEach', function (f) { each(this, (v, i) => { f(v, i); }); });
+    def('some', function (f) { return each(this, (v, i) => (f(v, i) ? STOP : 0)); });
+    def('every', function (f) { return !each(this, (v, i) => (f(v, i) ? 0 : STOP)); });
+    def('find', function (f) { let r; each(this, (v, i) => (f(v, i) ? ((r = v), STOP) : 0)); return r; });
+    def('toArray', function () { const a = []; each(this, v => { a.push(v); }); return a; });
+    def('reduce', function (f, ...init) { let acc = init[0], first = !init.length; each(this, (v, i) => { if (first) { acc = v; first = false; } else acc = f(acc, v, i); }); if (first) throw new TypeError('Reduce of empty iterator with no initial value'); return acc; });
+    if (!G.Iterator) { const I = function Iterator() {}; I.prototype = IP; I.from = o => (o[Symbol.iterator] ? o[Symbol.iterator]() : o); G.Iterator = I; }
+  })();
+
   if (!G.requestIdleCallback) {
     G.requestIdleCallback = (cb, opts) => { const start = Date.now(); return setTimeout(() => cb({ didTimeout: false, timeRemaining: () => Math.max(0, 50 - (Date.now() - start)) }), 1); };
     G.cancelIdleCallback = id => clearTimeout(id);
@@ -106,15 +128,21 @@
   // Native → JS entry points (called with callAsyncJavaScript)
   G.__irisOnMessage = (msg, sender, external) => new Promise(resolve => {
     const target = external ? onMessageExternal : onMessage;
-    let done = false, pending = false;
+    let done = false, waiting = false, promises = 0;
     const sendResponse = r => { if (!done) { done = true; resolve(r === undefined ? null : clone(r)); } };
+    // several listeners may return promises: the answer is the first one that has something to say (a listener
+    // that resolves with nothing hasn't answered, as when it doesn't handle this kind of message)
+    const settled = () => { if (--promises === 0 && !waiting && !done) resolve(null); };
     for (const f of [...target._ls]) {
       let r;
       try { r = f(msg, sender, sendResponse); } catch (e) { console.error(e); }
-      if (r === true) pending = true;
-      else if (r && typeof r.then === 'function') { pending = true; r.then(sendResponse, e => sendResponse({ __error: String(e && e.message || e) })); }
+      if (r === true) waiting = true;
+      else if (r && typeof r.then === 'function') {
+        promises++;
+        r.then(v => { if (v !== undefined) sendResponse(v); settled(); }, e => { sendResponse({ __error: String(e && e.message || e) }); settled(); });
+      }
     }
-    if (!pending && !done) resolve(null);
+    if (!waiting && !promises && !done) resolve(null);
   });
   G.__irisOnConnect = (id, name, sender, external) => {
     const port = portObject(id, name, sender, ID, false);
@@ -127,7 +155,29 @@
     return true;
   };
   G.__irisStorageChanged = (changes, area) => { storageOnChanged._fire(changes, area); (storage[area] && storage[area].onChanged._fire(changes)); return true; };
-  G.__irisTabEvent = (kind, a, b, c) => { const e = G.__irisTabEventsRef && G.__irisTabEventsRef[kind]; if (e) e._fire(a, b, c); return true; };
+  let navSeq = 0;
+  G.__irisTabEvent = (kind, a, b, c) => {
+    const e = G.__irisTabEventsRef && G.__irisTabEventsRef[kind];
+    if (e) e._fire(a, b, c);
+    // the page's own navigation, as webNavigation reports it for the top frame
+    const nav = G.__irisNavRef;
+    if (nav && kind === 'updated' && b && b.status) {
+      const d = { tabId: a, frameId: 0, parentFrameId: -1, url: (c && c.url) || b.url || '', timeStamp: Date.now(), processId: -1, documentId: 'main-' + a, frameType: 'outermost_frame', documentLifecycle: 'active' };
+      // the top document's own request, as webRequest reports it (type main_frame)
+      const wr = G.chrome && G.chrome.webRequest;
+      const req = Object.assign({ requestId: 'main-' + a + '-' + (b.status === 'loading' ? ++navSeq : navSeq), method: 'GET', type: 'main_frame', frameId: 0, parentFrameId: -1, tabId: a, timeStamp: Date.now(), url: d.url, documentId: d.documentId, frameType: 'outermost_frame', documentLifecycle: 'active' });
+      if (b.status === 'loading') {
+        if (wr) { wr.onBeforeRequest._fire(req); wr.onBeforeSendHeaders._fire(Object.assign({ requestHeaders: [] }, req)); wr.onSendHeaders._fire(Object.assign({ requestHeaders: [] }, req));
+                  const resp = Object.assign({ statusCode: 200, statusLine: 'HTTP/1.1 200', responseHeaders: [], fromCache: false, ip: '' }, req);
+                  wr.onHeadersReceived._fire(resp); wr.onResponseStarted._fire(resp); }
+        nav.onBeforeNavigate._fire(d); nav.onCommitted._fire(Object.assign({ transitionType: 'link', transitionQualifiers: [] }, d));
+      } else if (b.status === 'complete') {
+        if (wr) wr.onCompleted._fire(Object.assign({ statusCode: 200, statusLine: 'HTTP/1.1 200', responseHeaders: [], fromCache: false, ip: '' }, req));
+        nav.onDOMContentLoaded._fire(d); nav.onCompleted._fire(d);
+      }
+    }
+    return true;
+  };
   G.__irisInstalled = (details) => { onInstalled._fire(details); onStartup._fire(); return true; };
 
   const getURL = p => `chrome-extension://${ID}/${String(p || '').replace(/^\//, '')}`;
@@ -250,12 +300,20 @@
         update: api(null, s => call('userScripts.update', [s || []])),
         unregister: api(null, f => call('userScripts.unregister', [f || null])),
         getScripts: api(null, f => call('userScripts.getScripts', [f || null])),
+        // one-off injection (Chrome 135): the sources run in the tab like executeScript's files
+        execute: api(null, d => {
+          const js = (d && d.js) || [];
+          return call('scripting.executeScript', [{ target: d.target, files: js.filter(j => j.file).map(j => j.file), code: js.filter(j => j.code).map(j => j.code).join('\n;\n') || null, world: d.world === 'MAIN' ? 'MAIN' : 'ISOLATED', args: [] }]);
+        }),
         configureWorld: nop(undefined), resetWorldConfiguration: nop(undefined), getWorldConfigurations: nop([]),
         ExecutionWorld: { MAIN: 'MAIN', USER_SCRIPT: 'USER_SCRIPT' }
       };
     }
     const action = {
-      setBadgeText: nop(undefined), getBadgeText: nop(''), setBadgeBackgroundColor: nop(undefined), setBadgeTextColor: nop(undefined),
+      setBadgeText: api(null, d => call('action.setBadgeText', [d || {}])), getBadgeText: api(null, d => call('action.getBadgeText', [d || {}])),
+      setBadgeBackgroundColor: api(null, d => call('action.setBadgeColor', [Object.assign({ which: 'bg' }, d || {})])),
+      setBadgeTextColor: api(null, d => call('action.setBadgeColor', [Object.assign({ which: 'fg' }, d || {})])),
+      getBadgeBackgroundColor: nop([0x46, 0x48, 0x4c, 255]), getBadgeTextColor: nop([255, 255, 255, 255]),
       setIcon: nop(undefined), setTitle: nop(undefined), getTitle: nop(E.manifest.name || ''), setPopup: nop(undefined),
       getPopup: nop(getURL((E.manifest.action || E.manifest.browser_action || {}).default_popup || '')),
       enable: nop(undefined), disable: nop(undefined), isEnabled: nop(true),
@@ -288,8 +346,27 @@
     chrome.menus = chrome.contextMenus;
     G.__irisMenuClicked = (info, tab) => { menusOnClicked._fire(info, tab); const f = menuClicks.get(info.menuItemId); if (f) { try { f(info, tab); } catch (e) { console.error(e); } } return true; };
     chrome.notifications = { create: nop('n'), clear: nop(true), getAll: nop({}), onClicked: ev(), onClosed: ev(), onButtonClicked: ev() };
-    chrome.webNavigation = { onCommitted: ev(), onCompleted: ev(), onBeforeNavigate: ev(), onDOMContentLoaded: ev(), onHistoryStateUpdated: ev(), getFrame: nop(null), getAllFrames: nop([]) };
-    chrome.webRequest = { onBeforeRequest: ev(), onBeforeSendHeaders: ev(), onHeadersReceived: ev(), onCompleted: ev(), onErrorOccurred: ev(), onAuthRequired: ev(), onBeforeRedirect: ev(), onResponseStarted: ev(), onSendHeaders: ev() };
+    chrome.webNavigation = { onCommitted: ev(), onCompleted: ev(), onBeforeNavigate: ev(), onDOMContentLoaded: ev(), onHistoryStateUpdated: ev(), onErrorOccurred: ev(), onReferenceFragmentUpdated: ev(), onTabReplaced: ev(), onCreatedNavigationTarget: ev(),
+      getFrame: api(null, d => call('tabs.get', [d.tabId]).then(t => (!t || (d.frameId || 0) !== 0) ? null : { frameId: 0, parentFrameId: -1, url: t.url, errorOccurred: false, documentId: 'main-' + t.id, frameType: 'outermost_frame', documentLifecycle: 'active' })),
+      getAllFrames: api(null, d => call('tabs.get', [d.tabId]).then(t => t ? [{ frameId: 0, parentFrameId: -1, url: t.url, errorOccurred: false, processId: -1, documentId: 'main-' + t.id, frameType: 'outermost_frame', documentLifecycle: 'active' }] : []).catch(() => null)) };
+    G.__irisNavRef = chrome.webNavigation;
+    // a load an extension's rule stopped: Chrome reports the request first, then its failure
+    G.__irisBlocked = d => {
+      const wr = chrome.webRequest, req = Object.assign({}, d); delete req.error; delete req.fromCache;
+      wr.onBeforeRequest._fire(req);
+      wr.onErrorOccurred._fire(d);
+      return true;
+    };
+    chrome.webRequest = { onBeforeRequest: ev(), onBeforeSendHeaders: ev(), onHeadersReceived: ev(), onCompleted: ev(), onErrorOccurred: ev(), onAuthRequired: ev(), onBeforeRedirect: ev(), onResponseStarted: ev(), onSendHeaders: ev(),
+      handlerBehaviorChanged: nop(undefined), MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20,
+      OnBeforeRequestOptions: { BLOCKING: 'blocking', REQUEST_BODY: 'requestBody', EXTRA_HEADERS: 'extraHeaders' },
+      OnBeforeSendHeadersOptions: { BLOCKING: 'blocking', REQUEST_HEADERS: 'requestHeaders', EXTRA_HEADERS: 'extraHeaders' },
+      OnSendHeadersOptions: { REQUEST_HEADERS: 'requestHeaders', EXTRA_HEADERS: 'extraHeaders' },
+      OnHeadersReceivedOptions: { BLOCKING: 'blocking', RESPONSE_HEADERS: 'responseHeaders', EXTRA_HEADERS: 'extraHeaders' },
+      OnResponseStartedOptions: { RESPONSE_HEADERS: 'responseHeaders', EXTRA_HEADERS: 'extraHeaders' },
+      OnCompletedOptions: { RESPONSE_HEADERS: 'responseHeaders', EXTRA_HEADERS: 'extraHeaders' },
+      OnErrorOccurredOptions: { EXTRA_HEADERS: 'extraHeaders' },
+      ResourceType: { MAIN_FRAME: 'main_frame', SUB_FRAME: 'sub_frame', STYLESHEET: 'stylesheet', SCRIPT: 'script', IMAGE: 'image', FONT: 'font', OBJECT: 'object', XMLHTTPREQUEST: 'xmlhttprequest', PING: 'ping', CSP_REPORT: 'csp_report', MEDIA: 'media', WEBSOCKET: 'websocket', OTHER: 'other' } };
     // ── declarativeNetRequest: rules run by WebKit's content blocker (see Iris's FDNR) ────────────────
     const dnr = op => api(null, (o) => call('dnr.' + op, [o === undefined ? null : o]));
     chrome.declarativeNetRequest = {
@@ -311,7 +388,14 @@
       RequestMethod: { CONNECT: 'connect', DELETE: 'delete', GET: 'get', HEAD: 'head', OPTIONS: 'options', PATCH: 'patch', POST: 'post', PUT: 'put', OTHER: 'other' },
       HeaderOperation: { APPEND: 'append', SET: 'set', REMOVE: 'remove' }
     };
-    chrome.privacy = { services: { passwordSavingEnabled: { set: nop(undefined), get: nop({ value: false, levelOfControl: 'controllable_by_this_extension' }), clear: nop(undefined) }, autofillAddressEnabled: { set: nop(undefined), get: nop({ value: false }) }, autofillCreditCardEnabled: { set: nop(undefined), get: nop({ value: false }) } } };
+    // browser settings Iris doesn't let extensions change: readable, writes accepted and ignored
+    const setting = value => ({ get: nop({ value, levelOfControl: 'controllable_by_this_extension' }), set: nop(undefined), clear: nop(undefined), onChange: ev() });
+    chrome.privacy = {
+      services: { passwordSavingEnabled: setting(false), autofillAddressEnabled: setting(false), autofillCreditCardEnabled: setting(false), alternateErrorPagesEnabled: setting(false), safeBrowsingEnabled: setting(true), searchSuggestEnabled: setting(true), spellingServiceEnabled: setting(false), translationServiceEnabled: setting(false) },
+      network: { webRTCIPHandlingPolicy: setting('default'), networkPredictionEnabled: setting(false) },
+      websites: { thirdPartyCookiesAllowed: setting(true), hyperlinkAuditingEnabled: setting(false), referrersEnabled: setting(true), doNotTrackEnabled: setting(false), protectedContentEnabled: setting(true), topicsEnabled: setting(false), fledgeEnabled: setting(false), adMeasurementEnabled: setting(false) },
+      IPHandlingPolicy: { DEFAULT: 'default', DEFAULT_PUBLIC_AND_PRIVATE_INTERFACES: 'default_public_and_private_interfaces', DEFAULT_PUBLIC_INTERFACE_ONLY: 'default_public_interface_only', DISABLE_NON_PROXIED_UDP: 'disable_non_proxied_udp' }
+    };
     chrome.idle = { queryState: nop('active'), setDetectionInterval: () => {}, onStateChanged: ev() };
     chrome.commands = { getAll: nop([]), onCommand: ev() };
     chrome.offscreen = { createDocument: nop(undefined), closeDocument: nop(undefined), hasDocument: nop(false), Reason: { CLIPBOARD: 'CLIPBOARD', DOM_PARSER: 'DOM_PARSER' } };

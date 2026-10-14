@@ -114,7 +114,7 @@ section{min-width:0}
 <input type="file" id="file" accept=".html,.htm,text/html" hidden>
 <script nonce="{{NONCE}}">
 'use strict';
-const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
+const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
 const $ = s => document.querySelector(s);
 const ICON = {
   folder: '<svg class="ic" viewBox="0 0 16 16"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.2l1.5 1.5H13A1.5 1.5 0 0 1 14.5 5v7A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12z"/></svg>',
@@ -258,7 +258,7 @@ function row(n, i, search, terms) {
   if (!folder) {
     const img = r.querySelector('img'), h = hostOf(n.url);
     img.onerror = () => { const s = document.createElement('span'); s.className = 'ic letter'; s.textContent = (h || '?')[0]; s.style.background = 'hsl(' + hue(h) + ' 45% 42%)'; img.replaceWith(s); };
-    img.src = 'flint://favicon/?u=' + encodeURIComponent(n.url);
+    img.src = 'iris://favicon/?u=' + encodeURIComponent(n.url);
   }
   r.onclick = ev => {
     if (ev.ctrlKey) return;
