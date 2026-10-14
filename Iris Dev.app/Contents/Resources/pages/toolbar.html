@@ -110,7 +110,7 @@ body.dragging,body.dragging *{cursor:grabbing!important}
 <body>
 <div class="aura" aria-hidden="true"><i></i><i></i><i></i></div>
 <header>
-  <div class="ttl"><h1>Customise Toolbar</h1><p class="sub">Drag items into the bar, between groups, or out to remove them. The real bar above changes as you go.</p></div>
+  <div class="ttl"><h1>Customise Toolbar</h1><p class="sub">Drag items into the bar or out to remove them.</p></div>
   <button class="done" id="done">Done</button>
 </header>
 <section class="stage" id="stage">
@@ -120,7 +120,7 @@ body.dragging,body.dragging *{cursor:grabbing!important}
     <div class="zone right" data-z="right"></div>
   </div>
   <div class="caret" id="caret"></div>
-  <div class="tip"><span><b>Left</b> one capsule, for moving</span><span><b>Address</b> about this page</span><span><b>Right</b> the browser, Lens always last</span></div>
+  <div class="tip"><span><b>Left</b> navigation</span><span><b>Address</b> page tools</span><span><b>Right</b> browser tools</span></div>
 </section>
 <main>
   <h2>Items</h2>
@@ -129,7 +129,7 @@ body.dragging,body.dragging *{cursor:grabbing!important}
   <div class="presets" id="presets"></div>
   <h2>Options</h2>
   <div class="opts">
-    <div class="opt"><span><b>Address bar width</b><small>How wide the middle grows</small></span>
+    <div class="opt"><span><b>Address bar width</b></span>
       <div class="seg" id="width"><button data-v="0">Full</button><button data-v="1">Medium</button><button data-v="2">Compact</button></div></div>
     <div class="opt"><span><b>Downloads button</b><small>When it's in the bar</small></span>
       <div class="seg" id="dl"><button data-v="0">While downloading</button><button data-v="1">Always</button></div></div>
@@ -143,9 +143,9 @@ const ZK = {left: 'L', address: 'A', right: 'R'}, HOME = {L: 'left', A: 'address
 let S = null, cat = {}, layout = {left: [], address: [], right: []};
 
 const PRESETS = [
-  {n: 'Iris', d: 'Moving left, the browser right', l: {left: ['back', 'forward', 'reload'], address: ['pip', 'star'], right: ['shield', 'downloads', 'extensions']}},
-  {n: 'Quiet', d: 'Just the address and Lens', l: {left: [], address: ['pip'], right: ['downloads']}},
-  {n: 'Navigator', d: 'Everything for moving around', l: {left: ['back', 'forward', 'reload', 'home', 'newtab'], address: ['pip', 'reader', 'star'], right: ['shield', 'downloads', 'tabs', 'extensions']}},
+  {n: 'Iris', d: 'Default', l: {left: ['back', 'forward', 'reload'], address: ['pip', 'star'], right: ['shield', 'downloads', 'extensions']}},
+  {n: 'Quiet', d: 'Address bar only', l: {left: [], address: ['pip'], right: ['downloads']}},
+  {n: 'Navigator', d: 'All navigation buttons', l: {left: ['back', 'forward', 'reload', 'home', 'newtab'], address: ['pip', 'reader', 'star'], right: ['shield', 'downloads', 'tabs', 'extensions']}},
   {n: 'Workbench', d: 'Tools within reach', l: {left: ['back', 'forward', 'reload'], address: ['pip', 'find', 'reader', 'share', 'star'], right: ['shield', 'split', 'history', 'bookmarks', 'downloads', 'extensions']}},
 ];
 
@@ -176,7 +176,7 @@ function render() {
   if (!layout.left.length) { const e = document.createElement('span'); e.className = 'empty'; e.textContent = 'Drop here'; zl.append(e); }
   for (const k of layout.address) za.append(itemEl(k, 'address'));
   for (const k of layout.right) zr.append(itemEl(k, 'right'));
-  const lens = document.createElement('div'); lens.className = 'it lens'; lens.setAttribute('aria-label', 'Lens stays in the corner');
+  const lens = document.createElement('div'); lens.className = 'it lens'; lens.setAttribute('aria-label', 'Menu');
   const li = document.createElement('i'); li.className = 'ic'; li.style.setProperty('--i', `url("${S.lens}")`); lens.append(li); zr.append(lens);
   // library
   const lib = $('#lib'); lib.textContent = '';

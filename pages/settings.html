@@ -73,6 +73,7 @@ main{flex:1;overflow:auto;position:relative;scroll-behavior:smooth}
 .row .t{font-size:13.2px;font-weight:500;letter-spacing:-.003em}
 .row .d{color:var(--faint);font-size:11.8px;margin-top:3px;line-height:1.42}
 .row img.ic{width:32px;height:32px;flex:none;border-radius:9px;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.row img.ic.logo{box-shadow:none;border-radius:0;object-fit:contain}
 .row.flash{animation:flash 1.6s var(--ease)}
 @keyframes flash{0%,30%{background:color-mix(in srgb,var(--ap-b) 14%,transparent)}}
 .row.note{background:color-mix(in srgb,var(--ap-b) 6%,transparent)}
@@ -255,7 +256,7 @@ function heroHTML(h) {
   const spec = (k, v, sub, c) => `<div class="spec" style="--c:${c}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`;
   return `<section class="about"><div class="glow"><i></i><i></i><i></i></div>` +
     (h.icon ? `<img class="app" src="${esc(h.icon)}" alt="">` : '') +
-    `<h1 class="name">Iris</h1><p class="tag">A quiet, native browser for the Mac — the messenger between you and the web.</p><div class="bow"></div>` +
+    `<h1 class="name">Iris</h1><div class="bow"></div>` +
     `<div class="ver" data-copyver title="Copy version details"><span>Version</span><b>${esc(h.version)}</b>${h.build ? `<i></i><span>build ${esc(h.build)}</span>` : ''}${h.built ? `<i></i><span>${esc(h.built)}</span>` : ''}</div>` +
     (repo ? `<div class="acts"><a class="gh" data-repo="${esc(repo)}" title="${esc(repo)}">${GH_MARK}<span><b>${esc(slug)}</b><small>Source code on GitHub</small></span><svg class="go" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"/></svg></a></div>` : '') +
     `</section><div class="specs">` +
@@ -305,7 +306,7 @@ function hl(text) {
 }
 function rowHTML(r) {
   if (r.type === 'note') return `<div class="row note"><svg class="ni" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></svg><div class="txt"><div class="t">${hl(r.title)}</div>${r.detail ? `<div class="d">${hl(r.detail)}</div>` : ''}</div></div>`;
-  return `<div class="row${r.icon ? ' withic' : ''}" data-row="${esc(r.id)}">${r.icon ? `<img class="ic" src="${r.icon}" alt="">` : ''}<div class="txt"><div class="t">${hl(r.title)}</div>${r.detail ? `<div class="d">${hl(r.detail)}</div>` : ''}</div>${control(r)}</div>`;
+  return `<div class="row${r.icon ? ' withic' : ''}" data-row="${esc(r.id)}">${r.icon ? `<img class="ic${r.logo ? ' logo' : ''}" src="${r.icon}" alt="">` : ''}<div class="txt"><div class="t">${hl(r.title)}</div>${r.detail ? `<div class="d">${hl(r.detail)}</div>` : ''}</div>${control(r)}</div>`;
 }
 function navHTML() {
   const by = Object.fromEntries(S.map(s => [s.id, s]));
@@ -331,7 +332,7 @@ function render(animate) {
     bar.innerHTML = '';
     inner.innerHTML = `<div class="head"><span class="tl" style="--c1:var(--ap-t);--c2:var(--ap-b)"><svg viewBox="0 0 24 24">${ICON.search}</svg></span><div><h1>Search</h1><p>${n} setting${n === 1 ? '' : 's'} matching “${esc(q)}”</p></div></div>` +
       (n ? [...hits].map(([s, rows]) => `<div class="grp"><div class="res-h" data-go="${esc(s.id)}">${tile(s)}${esc(s.title)}</div><div class="card">${rows.map(rowHTML).join('')}</div></div>`).join('')
-         : `<div class="empty"><b>Nothing matches</b>Try another word, like “cookies”, “tabs” or “zoom”.</div>`);
+         : `<div class="empty"><b>Nothing matches</b>No matching settings.</div>`);
     lastShown = 'search';
     return;
   }
@@ -342,7 +343,7 @@ function render(animate) {
   bar.innerHTML = `${tile(s)}<b>${esc(s.title)}</b>`;
   inner.innerHTML = (s.hero ? heroHTML(s.hero) : `<div class="head">${tile(s)}<div><h1>${esc(s.title)}</h1>${s.subtitle ? `<p>${esc(s.subtitle)}</p>` : ''}</div></div>`) +
     s.groups.map(g => `<div class="grp">${g.title ? `<h2>${esc(g.title)}</h2>` : ''}<div class="card">${g.rows.map(rowHTML).join('')}</div></div>`).join('') +
-    (s.hero ? `<p class="colophon">Named for Iris, who carried messages along the rainbow between the heavens and the world below.</p>` : '');
+    '';
   if (animate || lastShown !== s.id) { inner.classList.remove('in'); void inner.offsetWidth; inner.classList.add('in'); }
   lastShown = s.id;
   const who = S.find(x => x.id === 'profiles'); const me = who && who.groups[0] && who.groups[0].rows[0];

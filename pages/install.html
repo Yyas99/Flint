@@ -67,8 +67,7 @@ h1{margin:18px 0 0;font:700 22px/1.2 -apple-system,system-ui;letter-spacing:-.02
   <div class="kicker" id="kicker">Install as an app</div>
   <input class="name" id="name" spellcheck="false" autocomplete="off" aria-label="App name">
   <div class="host" id="host"></div>
-  <div class="chips"><span>Its own window</span><span>A Dock icon</span><span>Other sites open in Iris</span></div>
-  <label class="opt"><span><b>Bring over your sign-in</b><small>Copies this site's cookies into the app once, so you stay signed in</small></span><input type="checkbox" class="sw" id="cookies" checked></label>
+  <label class="opt"><span><b>Keep me signed in</b><small>Copies this site's cookies to the app</small></span><input type="checkbox" class="sw" id="cookies" checked></label>
   <div class="note" id="note"></div>
   <div class="err" id="err"></div>
   <div class="acts"><button class="btn" id="cancel">Cancel</button><button class="go" id="go"><i class="spin"></i><span id="goText">Install</span></button></div>
@@ -77,7 +76,7 @@ h1{margin:18px 0 0;font:700 22px/1.2 -apple-system,system-ui;letter-spacing:-.02
 <section class="view" id="done">
   <div class="done-ring"><img class="icon" id="icon2" alt=""><div class="tick"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div></div>
   <h1 id="doneTitle"></h1>
-  <p class="sub">It's in your Applications, in Iris Apps. Drag it to the Dock to keep it there.</p>
+  <p class="sub">Installed in Applications › Iris Apps.</p>
   <div class="acts"><button class="btn" id="reveal">Show in Finder</button><button class="go" id="open"><span id="openText">Open</span></button></div>
 </section>
 
@@ -117,7 +116,7 @@ call('install.get').then(s => {
   $('#icon').src = s.icon; $('#name').value = s.name; $('#host').textContent = s.host;
   $('#kicker').textContent = s.again ? 'Already installed · install again to update it' : 'Install as an app';
   $('#goText').textContent = s.again ? 'Install again' : 'Install';
-  if (!s.manifest) $('#note').textContent = "This site doesn't describe itself as an app, so Iris makes one from its name and icon.";
+  if (!s.manifest) $('#note').textContent = "Built from the site's name and icon.";
   $('#name').focus(); $('#name').select();
 });
 </script>

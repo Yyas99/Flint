@@ -99,24 +99,9 @@ dialog h3{margin:0 0 12px;font-size:16px}
 .sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--bg);transition:left .15s}
 .sw:checked{background:var(--text)}.sw:checked::after{left:16px}
 [hidden]{display:none!important}
-
-/* Iris's own light behind the title: the Aperture colours drifting slowly, under a glass header */
-.aura{position:fixed;left:0;right:0;top:0;height:360px;z-index:-1;pointer-events:none;overflow:hidden;-webkit-mask-image:linear-gradient(180deg,#000 25%,transparent);mask-image:linear-gradient(180deg,#000 25%,transparent)}
-.aura i{position:absolute;width:44vw;height:260px;border-radius:50%;filter:blur(72px);opacity:var(--ap-glow,.2)}
-.aura i:nth-child(1){left:4vw;top:-70px;background:var(--ap-t);animation:ad1 24s ease-in-out infinite alternate}
-.aura i:nth-child(2){left:28vw;top:-110px;background:var(--ap-b);animation:ad2 28s ease-in-out infinite alternate}
-.aura i:nth-child(3){left:54vw;top:-60px;background:var(--ap-v);animation:ad3 32s ease-in-out infinite alternate}
-@keyframes ad1{to{transform:translate(8vw,34px) scale(1.12)}}
-@keyframes ad2{to{transform:translate(-6vw,46px) scale(.9)}}
-@keyframes ad3{to{transform:translate(-10vw,22px) scale(1.15)}}
-@media (prefers-reduced-motion:reduce){.aura i{animation:none}}
-header{background:transparent!important;position:relative;z-index:1}header::before{content:"";position:absolute;z-index:-1;pointer-events:none;top:0;bottom:-16px;left:calc(50% - 50vw);right:calc(50% - 50vw);background:linear-gradient(180deg,color-mix(in srgb,var(--bg) 50%,transparent),color-mix(in srgb,var(--bg) 82%,transparent) 62%,transparent);-webkit-backdrop-filter:blur(26px) saturate(1.25);backdrop-filter:blur(26px) saturate(1.25);-webkit-mask-image:linear-gradient(180deg,#000 72%,transparent);mask-image:linear-gradient(180deg,#000 72%,transparent)}
-h1{background:linear-gradient(180deg,var(--text) 40%,color-mix(in srgb,var(--text) 58%,transparent));-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:700!important;letter-spacing:-.03em!important;font-size:28px!important;line-height:1.05!important}
-h1::after{content:"";display:block;height:2px;width:38px;margin-top:9px;border-radius:2px;background:linear-gradient(90deg,var(--ap-t),var(--ap-b),var(--ap-v));box-shadow:0 0 10px color-mix(in srgb,var(--ap-b) 45%,transparent)}
 </style>
 </head>
 <body>
-<div class="aura" aria-hidden="true"><i></i><i></i><i></i></div>
 <header>
   <h1>Downloads</h1>
   <div class="speed" id="speed">Idle</div>
@@ -146,7 +131,7 @@ h1::after{content:"";display:block;height:2px;width:38px;margin-top:9px;border-r
 
 <dialog id="setDlg">
   <h3>Download settings</h3>
-  <div class="toggle"><div>Accelerator<small>Fetch files over several connections at once, like Internet Download Manager.</small></div><input type="checkbox" class="sw" id="sAccel"></div>
+  <div class="toggle"><div>Accelerator<small>Download each file over several connections.</small></div><input type="checkbox" class="sw" id="sAccel"></div>
   <div class="field"><label>Connections per download</label><div class="row2"><input type="range" id="sConns" min="1" max="16" step="1"><output id="oConns"></output></div></div>
   <div class="field"><label for="sActive">Downloads at the same time</label><select id="sActive"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></div>
   <div class="field"><label for="sLimit">Speed limit</label><select id="sLimit"><option value="0">No limit</option><option value="256">256 KB/s</option><option value="512">512 KB/s</option><option value="1024">1 MB/s</option><option value="2048">2 MB/s</option><option value="5120">5 MB/s</option><option value="10240">10 MB/s</option></select></div>
@@ -156,7 +141,7 @@ h1::after{content:"";display:block;height:2px;width:38px;margin-top:9px;border-r
 </dialog>
 
 <script nonce="{{NONCE}}">
-const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
+const call = (op, args) => window.webkit.messageHandlers.flintInternal.postMessage(Object.assign({op}, args || {}));
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtB = b => { if (!(b > 0)) return '—'; const u = ['B','KB','MB','GB','TB']; let i = 0; while (b >= 1000 && i < 4) { b /= 1000; i++; } return (i ? b.toFixed(b < 10 ? 1 : 0) : b) + ' ' + u[i]; };
@@ -210,7 +195,7 @@ function progText(x) {
 function rowHTML(x) {
   const f = x.total > 0 ? Math.min(100, x.got / x.total * 100) : (x.state === 'done' ? 100 : 0);
   const main = x.state === 'running' || x.state === 'queued' ? ['pause', I.pause, 'Pause'] : x.state === 'paused' ? ['resume', I.play, 'Resume'] : x.state === 'done' ? ['reveal', I.folder, 'Show in Finder'] : ['retry', I.retry, 'Try again'];
-  return `<div class="name"><img src="iris://dlicon/${encodeURIComponent(x.ext || 'bin')}" alt=""><div class="t"><div>${esc(x.name)}</div><small>${esc(x.host)}</small></div></div>`
+  return `<div class="name"><img src="flint://dlicon/${encodeURIComponent(x.ext || 'bin')}" alt=""><div class="t"><div>${esc(x.name)}</div><small>${esc(x.host)}</small></div></div>`
     + `<div class="num c-size">${x.total > 0 ? fmtB(x.total) : (x.state === 'running' ? fmtB(x.got) : '—')}</div>`
     + `<div class="pg"><div class="bar"><i style="width:${f}%"></i></div><span>${esc(progText(x))}</span></div>`
     + `<div class="num c-speed">${x.state === 'running' ? fmtS(x.speed) : ''}</div>`
@@ -225,7 +210,7 @@ function sorted(list) {
 function renderList() {
   const list = sorted(items.filter(x => matchCat(x, cat) && (!q || (x.name + ' ' + x.url).toLowerCase().includes(q))));
   const box = $('#list');
-  if (!list.length) { box.innerHTML = `<div class="empty"><b>${items.length ? 'Nothing here' : 'No downloads yet'}</b>${items.length ? 'Try another category or search.' : 'Files you download appear here, fetched over several connections at once.'}</div>`; return; }
+  if (!list.length) { box.innerHTML = `<div class="empty"><b>${items.length ? 'Nothing here' : 'No downloads yet'}</b>${items.length ? 'Try another category or search.' : 'No downloads.'}</div>`; return; }
   const keep = new Map([...box.querySelectorAll('.row')].map(r => [r.dataset.id, r]));
   box.querySelector('.empty')?.remove();
   let prev = null;
@@ -259,7 +244,7 @@ function renderDetails() {
     : ['running', 'queued'].includes(x.state) ? btn('pause', 'Pause', I.pause) + btn('cancel', 'Cancel', I.x) + btn('copy', 'Copy link')
     : x.state === 'paused' ? btn('resume', 'Resume', I.play) + btn('cancel', 'Cancel', I.x) + btn('copy', 'Copy link')
     : btn('retry', 'Try again', I.retry) + btn('copy', 'Copy link');
-  d.innerHTML = `<div class="dtop"><img src="iris://dlicon/${encodeURIComponent(x.ext || 'bin')}" alt=""><div class="t"><b>${esc(x.name)}</b><small>${esc(x.url)}</small></div><div class="dbtns">${btns}</div></div>`
+  d.innerHTML = `<div class="dtop"><img src="flint://dlicon/${encodeURIComponent(x.ext || 'bin')}" alt=""><div class="t"><b>${esc(x.name)}</b><small>${esc(x.url)}</small></div><div class="dbtns">${btns}</div></div>`
     + `<div class="kv"><div>Status<b class="${x.state === 'failed' ? 'err' : ''}">${esc(progText(x))}</b></div><div>Size<b>${fmtB(x.total)}</b></div><div>Downloaded<b>${fmtB(x.got)}</b></div>`
     + `<div>${x.state === 'done' ? 'Top speed' : 'Speed'}<b>${x.state === 'done' ? (fmtS(x.peak) || '—') : (fmtS(x.speed) || '—')}</b></div>`
     + `<div>Resumable<b>${x.kind === 'accel' ? (x.res ? 'Yes' : (x.total > 0 || x.state === 'done' ? 'No' : '—')) : 'WebKit'}</b></div>`

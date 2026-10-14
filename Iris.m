@@ -28,7 +28,10 @@
 #include <dns_sd.h>
 
 static void IrisReloadBlocklists(void);
-static void ShieldFetchSources(BOOL force, void (^done)(void));   // uBlock's scriptlets and stand-ins (v4l_shield)
+static void ShieldFetchSources(BOOL force, void (^done)(void));
+static NSString *gBlockPhase; static double gBlockFrac = -1;   // the filter lists being read or compiled: what's happening, and how far along (-1: idle)
+static void BlockerProgress(NSString *phase, double frac);
+static BOOL gParseReports;   // the parse in progress is the one the shield is showing   // any thread; nil phase: done   // uBlock's scriptlets and stand-ins (v4l_shield)
 static void IrisSetBlocking(BOOL on);
 static void CtlOut(NSString *s);
 static void RelayoutAll(void);
@@ -594,6 +597,7 @@ static NSURL *StripTracking(NSURL *u) {
 @property (copy) NSString *badge;   // a count drawn inside the button itself (the shield's blocked number), so hovering never covers it
 @property BOOL bare;                // a badge sitting on its own glass capsule: no chip behind it
 @property BOOL round;               // hover in the button's own shape (a circle or capsule) instead of a square-ish highlight
+@property double ringProgress; @property BOOL ringOn;   // a thin ring around the symbol, that far round (the shield while the lists compile)
 @property BOOL aperture;   // Lens: its glyph takes Iris's colours under the pointer and while open
 + (instancetype)symbol:(NSString *)s size:(CGFloat)pt tip:(NSString *)tip target:(id)t action:(SEL)a;
 @end
@@ -1323,19 +1327,19 @@ static BOOL IsWhiteTile(NSBitmapImageRep *r) {
 
 // Filter lists are downloaded here weekly; v3b_filters turns them into WebKit content rules (requests, element hiding, pop-ups).
 
+static NSArray<NSString *> *FilterListIDs(void);
 static NSArray<NSArray<NSString *> *> *FilterLists(void) {
-    return @[@[@"easylist", @"EasyList (ads)", @"https://easylist.to/easylist/easylist.txt"],
-             @[@"easyprivacy", @"EasyPrivacy (trackers)", @"https://easylist.to/easylist/easyprivacy.txt"],
-             @[@"pgl", @"Peter Lowe's ad and tracking servers", @"https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext"],
-             @[@"cookies", @"Cookie notices (Fanboy)", @"https://secure.fanboy.co.nz/fanboy-cookiemonster.txt"],
-             @[@"annoyances", @"Annoyances (Fanboy)", @"https://secure.fanboy.co.nz/fanboy-annoyance.txt"],
-             // uBlock Origin's own lists, the ones it turns on by default: its fixes, page scripts and unbreaks are most of its edge
+    // uBlock Origin's default set, nothing more: its own five lists, and the three others it turns on out of the box
+    return @[@[@"easylist", @"EasyList", @"https://easylist.to/easylist/easylist.txt"],
+             @[@"easyprivacy", @"EasyPrivacy", @"https://easylist.to/easylist/easyprivacy.txt"],
+             @[@"pgl", @"Peter Lowe's", @"https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext"],
              @[@"ubo-filters", @"uBlock filters", @"https://ublockorigin.github.io/uAssets/filters/filters.txt"],
              @[@"ubo-privacy", @"uBlock filters – Privacy", @"https://ublockorigin.github.io/uAssets/filters/privacy.txt"],
              @[@"ubo-badware", @"uBlock filters – Badware risks", @"https://ublockorigin.github.io/uAssets/filters/badware.txt"],
              @[@"ubo-quickfixes", @"uBlock filters – Quick fixes", @"https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt"],
              @[@"ubo-unbreak", @"uBlock filters – Unbreak", @"https://ublockorigin.github.io/uAssets/filters/unbreak.txt"]];
 }
+static NSArray<NSString *> *FilterListIDs(void) { NSMutableArray *a = [NSMutableArray array]; for (NSArray *l in FilterLists()) [a addObject:l[0]]; return a; }
 // uBlock's !#if directives, for a WebKit browser: Safari's side of every fork, never Chromium's or uBO Lite's.
 static BOOL FLDirectiveTrue(NSString *expr) {
     expr = Trim(expr);
@@ -1375,20 +1379,12 @@ static void FLFetchList(NSURL *u, NSInteger depth, void (^done)(NSString *text))
 }
 static NSSet<NSString *> *ListsOn(void) {
     NSArray *a = [Defaults() arrayForKey:kListsOn];
-    // Annoyances (newsletter and sign-up pop-ups, "allow notifications" boxes, chat bubbles) became a default when Iris
-    // learned element hiding; it's added once to an existing choice, and stays off if you turn it off afterwards.
-    if (a && ![Defaults() boolForKey:@"listsAnnoyancesOffered"]) {
-        [Defaults() setBool:YES forKey:@"listsAnnoyancesOffered"];
-        if (![a containsObject:@"annoyances"]) { a = [a arrayByAddingObject:@"annoyances"]; [Defaults() setObject:a forKey:kListsOn]; }
-    }
-    // uBlock Origin's own lists joined the defaults (Oct 2026): added once, then yours to turn off
-    NSArray *ubo = @[@"ubo-filters", @"ubo-privacy", @"ubo-badware", @"ubo-quickfixes", @"ubo-unbreak"];
-    if (a && ![Defaults() boolForKey:@"listsUBOOffered"]) {
-        [Defaults() setBool:YES forKey:@"listsUBOOffered"];
-        NSMutableArray *m = [a mutableCopy]; for (NSString *x in ubo) if (![m containsObject:x]) [m addObject:x];
-        a = m; [Defaults() setObject:a forKey:kListsOn];
-    }
-    return [NSSet setWithArray:a ?: [@[@"easylist", @"easyprivacy", @"pgl", @"cookies", @"annoyances"] arrayByAddingObjectsFromArray:ubo]];
+    NSArray *all = FilterListIDs();
+    // Oct 2026: down to uBlock Origin's own default set (the Fanboy lists went); everything in it on, once
+    if (a && ![Defaults() boolForKey:@"listsUBODefaultSet"]) { [Defaults() setBool:YES forKey:@"listsUBODefaultSet"]; a = all; [Defaults() setObject:a forKey:kListsOn]; }
+    NSMutableSet *on = [NSMutableSet setWithArray:a ?: all];
+    [on intersectSet:[NSSet setWithArray:all]];
+    return on;
 }
 
 @interface VBlocker ()
@@ -1436,9 +1432,12 @@ static NSString *ListDir(void) {
     if (self.busy) return;
     self.busy = YES;
     self.status = @"Downloading filter lists…";
+    BlockerProgress(@"Downloading the filter lists", 0.01);
     NSSet *on = ListsOn();
     NSString *dir = ListDir();
     dispatch_group_t g = dispatch_group_create();
+    NSSet *known = [NSSet setWithArray:FilterListIDs()];   // lists Iris no longer offers: gone from the folder too
+    for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) if ([f.pathExtension isEqualToString:@"txt"] && ![known containsObject:f.stringByDeletingPathExtension]) [NSFileManager.defaultManager removeItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
     for (NSArray *l in FilterLists()) {
         NSString *file = [[dir stringByAppendingPathComponent:l[0]] stringByAppendingPathExtension:@"txt"];
         if (![on containsObject:l[0]]) { [NSFileManager.defaultManager removeItemAtPath:file error:nil]; continue; }
@@ -1651,7 +1650,11 @@ static BOOL FLKeyedSelector(NSString *sel) {
 @implementation FLRules
 @end
 
-static FLRules *FLParse(NSString *dir) {
+// One parse at a time: the rule parser keeps a little state between a rule's parts (its $redirect), so two lists
+// being read at once (a build and the page-script layer) must not interleave.
+static FLRules *FLParseUnlocked(NSString *dir);
+static FLRules *FLParse(NSString *dir) { @synchronized (FLRules.class) { return FLParseUnlocked(dir); } }
+static FLRules *FLParseUnlocked(NSString *dir) {
     FLRules *R = [FLRules new];
     R.block = [NSMutableArray array]; R.allow = [NSMutableArray array]; R.important = [NSMutableArray array];
     R.generic = [NSMutableOrderedSet orderedSet]; R.genericExcept = [NSMutableDictionary dictionary]; R.specific = [NSMutableDictionary dictionary];
@@ -1680,6 +1683,7 @@ static FLRules *FLParse(NSString *dir) {
     NSMutableArray *exceptSel = [NSMutableArray array];   // @[sel, NSArray domains]
     NSCharacterSet *optChars = [[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789~,=|._*-"] invertedSet];
     for (NSUInteger li = 0; li < lines.count; li++) {
+        if (gParseReports && li % 15000 == 0) BlockerProgress(@"Reading the filter lists", 0.02 + 0.08 * li / MAX(1, lines.count));
         NSString *l = lines[li];
         if ([cancelled containsObject:l] || [l rangeOfString:@"badfilter"].location != NSNotFound || [seen containsObject:l]) continue;
         [seen addObject:l];
@@ -2521,7 +2525,16 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
     NSColor *c = !on ? [vDim colorWithAlphaComponent:0.3] : self.active ? vAccent : (self.hovered ? vText : vDim);
     NSImage *im = on && self.aperture && (self.hovered || self.active) ? ApertureTinted(Symbol(self.symbolName, self.symbolSize ?: 14, NSFontWeightSemibold))
                                                                         : Tinted(Symbol(self.symbolName, self.symbolSize ?: 14, NSFontWeightMedium), c);
-    if (im) DrawImage(im, NSOffsetRect(CenterIn(im.size, self.bounds), self.symbolShift, 0));
+    if (self.ringOn && im) {   // working: the glyph gives way to a small ring that fills as the work goes, in the glyph's own place
+        NSRect ir = NSOffsetRect(CenterIn(NSMakeSize(14, 14), self.bounds), self.symbolShift, 0);
+        NSBezierPath *track = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(ir, 0.9, 0.9)]; track.lineWidth = 1.8; [[vDim colorWithAlphaComponent:0.28] setStroke]; [track stroke];
+        CGFloat f = MAX(0.04, MIN(1, self.ringProgress));
+        NSBezierPath *arc = [NSBezierPath bezierPath]; arc.lineWidth = 1.8; arc.lineCapStyle = NSLineCapStyleRound;
+        BOOL fl = self.isFlipped;
+        [arc appendBezierPathWithArcWithCenter:NSMakePoint(NSMidX(ir), NSMidY(ir)) radius:6.1 startAngle:fl ? 270 : 90 endAngle:fl ? 270 + 360 * f : 90 - 360 * f clockwise:!fl];
+        [(AccentChosen() ? vAccent : vText) setStroke]; [arc stroke];
+    }
+    else if (im) DrawImage(im, NSOffsetRect(CenterIn(im.size, self.bounds), self.symbolShift, 0));
     if (chip) {
         NSDictionary *a = @{NSFontAttributeName: MMono(11, NSFontWeightMedium), NSForegroundColorAttributeName: hot ? vText : vDim};
         NSSize s = [self.badge sizeWithAttributes:a];
@@ -2877,7 +2890,9 @@ static NSString *gUpdateNotes;
 //   centre: where you are: the lock, the address, the star (and picture in picture, reader, share when they apply)
 //   right:  the browser: blocking with its count, downloads while active, a waiting update, pinned extensions, Lens
 // Everything between them belongs to the page (clicks pass straight through).
-- (NSString *)shieldCount { return self.blocked > 0 ? (self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked]) : @""; }
+- (NSString *)shieldCount {
+    if (gBlockPhase) return [NSString stringWithFormat:@"%.0f%%", MAX(0, MIN(99, gBlockFrac * 100))];   // the lists are compiling: how far, instead of a count that can't move yet
+    return self.blocked > 0 ? (self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked]) : @""; }
 - (CGFloat)shieldWidthFor:(NSString *)n { return n.length ? 23 + ceil([n sizeWithAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium)}].width) + 11 : 28; }
 // Whether an item that's in the layout shows right now (some only make sense sometimes).
 - (BOOL)itemLive:(NSString *)k {
@@ -2906,7 +2921,7 @@ static NSString *gUpdateNotes;
     NSMutableArray *circles = [NSMutableArray array], *capsules = [NSMutableArray array];
     NSString *count = [self shieldCount];
     self.shieldRect = NSZeroRect; self.dlRect = NSZeroRect; self.extRect = NSZeroRect;
-    self.shieldBtn.badge = count; self.shieldBtn.symbolShift = 0;
+    self.shieldBtn.badge = count; self.shieldBtn.symbolShift = 0; self.shieldBtn.ringOn = gBlockPhase != nil; self.shieldBtn.ringProgress = gBlockFrac;
     // the width an item takes in a group (the shield grows with its count)
     CGFloat (^widthOf)(NSString *, CGFloat) = ^CGFloat(NSString *k, CGFloat base) {
         if ([k isEqualToString:@"shield"] && count.length) return [self shieldWidthFor:count] - 28 + base;
@@ -2918,13 +2933,13 @@ static NSString *gUpdateNotes;
     CGFloat r = W - 12;
     self.lensRect = NSMakeRect(r - 28, y, 28, 28); self.menuBtn.frame = self.lensRect; r -= 28 + 6;
     [circles addObject:[NSValue valueWithRect:self.lensRect]];
-    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.aperture = YES; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
+    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.aperture = YES; self.menuBtn.toolTip = @"Menu";
     self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);
     self.updateBtn.hidden = !gUpdateReady;
     if (gUpdateReady) {
         CGFloat upW = gUpdating ? 78 : 64;
         self.updateBtn.frame = NSMakeRect(r - upW, y + 2, upW, 24); r -= upW + 6;
-        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Iris is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Iris is ready: click to switch to it (your tabs come back).";
+        self.updateBtn.toolTip = gUpdateNotes.length ? [@"Update ready:\n" stringByAppendingString:gUpdateNotes] : @"Update ready · click to restart (tabs are kept)";
         self.updateBtn.needsDisplay = YES;
     }
     NSMutableArray<NSButton *> *exts = [NSMutableArray array];
@@ -3025,7 +3040,7 @@ static NSString *gUpdateNotes;
     if (gUpdateReady) {
         CGFloat pw = gUpdating ? 78 : 64;
         self.updateBtn.frame = NSMakeRect(right - pw, y, pw, 28); right -= pw + 6;
-        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Iris is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Iris is ready: click to switch to it (your tabs come back).";
+        self.updateBtn.toolTip = gUpdateNotes.length ? [@"Update ready:\n" stringByAppendingString:gUpdateNotes] : @"Update ready · click to restart (tabs are kept)";
         self.updateBtn.needsDisplay = YES;
     }
     self.menuBtn.frame = NSMakeRect(right - 30, y, 30, 28); right -= 32;
@@ -5386,6 +5401,13 @@ static void IrisCompileRuleLists(NSArray<NSDictionary *> *chunks, NSString *fp, 
         pump = nil; [alive removeObject:queue];
     };
     [alive addObject:queue];   // the queue lives until the build is done
+    __block NSUInteger finished = 0;
+    void (^tick)(void) = ^{   // one more list ready: the shield's ring moves
+        finished++;
+        NSUInteger total = MAX(slots.count, finished);
+        BlockerProgress([NSString stringWithFormat:@"Compiling list %lu of %lu", (unsigned long)MIN(finished + 1, total), (unsigned long)total], 0.18 + 0.82 * finished / total);
+    };
+    BlockerProgress([NSString stringWithFormat:@"Compiling list 1 of %lu", (unsigned long)slots.count], 0.18);
     pump = ^{
         while (inFlight < parallel && queue.count) {
             NSDictionary *c = queue.firstObject; [queue removeObjectAtIndex:0];
@@ -5393,7 +5415,7 @@ static void IrisCompileRuleLists(NSArray<NSDictionary *> *chunks, NSString *fp, 
             NSString *ident = c[@"id"], *json = IrisChunkJSON(c), *sha = IrisSha(json);
             NSString *key = [@"ruleChunk-" stringByAppendingString:ident];
             IrisFindChunk(ident, sha, ^(WKContentRuleList *have) {
-                if (have) { got[ident] = have; reused++; inFlight--; dispatch_async(dispatch_get_main_queue(), ^{ if (pump) pump(); }); return; }
+                if (have) { got[ident] = have; reused++; inFlight--; tick(); dispatch_async(dispatch_get_main_queue(), ^{ if (pump) pump(); }); return; }
                 IrisBuildChunk(ident, json, ^(WKContentRuleList *list, NSString *why) {
                     if (list) { got[ident] = list; built++; [Defaults() setObject:sha forKey:key]; }
                     else if ([c[@"n"] unsignedIntegerValue] > 200) {   // split the list's own rules; each half keeps the exceptions
@@ -5406,7 +5428,7 @@ static void IrisCompileRuleLists(NSArray<NSDictionary *> *chunks, NSString *fp, 
                         if (at != NSNotFound) { [slots replaceObjectAtIndex:at withObject:b[@"id"]]; [slots insertObject:a[@"id"] atIndex:at]; }
                         [queue insertObject:b atIndex:0]; [queue insertObject:a atIndex:0];
                     } else { dropped += [c[@"n"] unsignedIntegerValue]; DLog(@"rule list %@ dropped: %@", ident, why); }
-                    inFlight--; dispatch_async(dispatch_get_main_queue(), ^{ if (pump) pump(); });
+                    inFlight--; tick(); dispatch_async(dispatch_get_main_queue(), ^{ if (pump) pump(); });
                 });
             });
         }
@@ -5449,6 +5471,7 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
     gRulesWaiter = then;
     void (^finish)(NSArray *, NSUInteger) = ^(NSArray *lists, NSUInteger count) {
         gRules = lists; gRuleCount = count;
+        BlockerProgress(nil, -1);
         IrisApplyRules();
         ShieldEnsure(fp, dir);   // the layers beyond WebKit's lists: page scripts, procedural hiding, stand-ins, the live gate
         void (^w)(void) = gRulesWaiter; gRulesWaiter = nil; if (w) w();
@@ -5494,15 +5517,20 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
         compiling = NO;
         if (again) { again = NO; IrisReloadBlocklistsThen(nil); }
     };
+    BlockerProgress(@"Reading the filter lists", 0.02);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSDate *t0 = NSDate.date;
+        gParseReports = YES;
         FLRules *R = FLParse(dir);
+        gParseReports = NO;
+        BlockerProgress(@"Building uBlock's page scripts", 0.10);
         NSMutableOrderedSet *sels = [NSMutableOrderedSet orderedSetWithOrderedSet:R.generic];
         for (NSString *k in R.specific) [sels unionOrderedSet:R.specific[k]];
         DLog(@"blocker: parsed %lu block, %lu important, %lu exception rules, %lu selectors, %lu page scripts, %lu procedural, %lu stand-ins in %.1fs",
              (unsigned long)R.block.count, (unsigned long)R.important.count, (unsigned long)R.allow.count, (unsigned long)sels.count,
              (unsigned long)R.scriptlets.count, (unsigned long)R.procedural.count, (unsigned long)R.redirects.count, -t0.timeIntervalSinceNow);
         ShieldRulesParsed(R, fp);   // layers 1, 3, 4 and 5 are built from the same parse
+        BlockerProgress(@"Checking the element rules", 0.14);
         dispatch_async(dispatch_get_main_queue(), ^{
             [FLSelectorCheck check:sels.array done:^(NSSet *valid) {
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
@@ -5907,7 +5935,7 @@ static void *kKVO = &kKVO;
     else if ([k isEqualToString:@"loading"]) {
         BOOL finished = self.loading && !_web.loading;
         self.loading = _web.loading;
-        if (self.loading) [self watchLoading];
+        if (self.loading) [self watchLoading]; else [self sampleHeaderColorSoon];
         if (finished && [self.url hasPrefix:@"http"] && !self.tab.owner.isPrivate) [[VHistory forProfile:self.tab.owner.profile] visit:_web.URL title:self.title];
     }
     else if ([k isEqualToString:@"_isPlayingAudio"]) {
@@ -5934,7 +5962,7 @@ static void *kKVO = &kKVO;
         VPage *p = ws; if (!p) return;
         p->_watchingLoad = NO;
         if (!p.loading) return;
-        if (!p.web.isLoading && p.web.estimatedProgress > 0.05) { p.loading = NO; p.progress = 1; [p.tab.owner pageChanged:p]; return; }
+        if (!p.web.isLoading && p.web.estimatedProgress > 0.05) { p.loading = NO; p.progress = 1; [p.tab.owner pageChanged:p]; [p sampleHeaderColorSoon]; return; }
         [p watchLoading];
     });
 }
@@ -6446,14 +6474,15 @@ static NSString *MediaKey(NSURL *u) {
 // along the page's top edge (as Safari's coloured tab bar does) and follows every change, scrolling and going back
 // included. Then the page's theme colour; then a look at whatever is painted behind the page's header.
 - (void)updateTint {
+    if (self.loading) return;   // one change per page: the band keeps the last page's colour until this one has finished loading
     NSColor *c = nil;
     @try { c = [_web valueForKey:@"_sampledPageTopColor"]; } @catch (NSException *x) {}
     if (![c isKindOfClass:NSColor.class] || c.alphaComponent < 0.5) c = nil;
+    if (!c) c = _jsTint;   // what the page paints there beats what it says its theme is (YouTube says #212121, paints #0f0f0f)
     if (!c) { @try { NSColor *t = [_web valueForKey:@"themeColor"]; if ([t isKindOfClass:NSColor.class] && t.alphaComponent >= 0.5) c = t; } @catch (NSException *x) {} }
-    if (!c) c = _jsTint;
     VTab *t = self.tab; if (!t) return;
-    NSColor *old = t.headerColor;
-    if (old == c || [old isEqual:c]) return;
+    NSColor *old = [t.headerColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace], *nc = [c colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    if (old == nc || (old && nc && fabs(old.redComponent - nc.redComponent) + fabs(old.greenComponent - nc.greenComponent) + fabs(old.blueComponent - nc.blueComponent) < 0.03)) return;   // the same colour, near enough
     t.headerColor = c;
     VWindow *w = t.owner; if (w.current == t) w.window.contentView.needsDisplay = YES;
 }
@@ -6465,10 +6494,15 @@ static NSString *MediaKey(NSURL *u) {
 }
 - (void)sampleHeaderColor {
     __weak VPage *ws = self;
-    NSString *js = @"(()=>{const P=s=>{const x=s&&s.match(/rgba?\\(([^)]+)\\)/);if(!x)return null;const p=x[1].split(',').map(parseFloat);if(p.length>3&&p[3]<0.5)return null;return p.slice(0,3)};"
-                    "let el=document.elementFromPoint(innerWidth/2,2);while(el){const v=P(getComputedStyle(el).backgroundColor);if(v)return v.join(',');el=el.parentElement}"
-                    "for(const e of[document.body,document.documentElement]){const v=e&&P(getComputedStyle(e).backgroundColor);if(v)return v.join(',')}return '255,255,255'})()";
-    void (^sample)(void) = ^{
+    // what's painted along the top edge, at a few points across, looking through overlays; the most common wins. Nothing
+    // painted yet (still loading): no answer, rather than a guess of white.
+    NSString *js = @"(()=>{const P=s=>{const x=s&&s.match(/rgba?\\(([^)]+)\\)/);if(!x)return null;const p=x[1].split(',').map(parseFloat);if(p.length>3&&p[3]<0.6)return null;return p.slice(0,3).map(Math.round).join(',')};"
+                    "if(!document.body)return '';const at=x=>{for(const el of document.elementsFromPoint(x,2)){const v=P(getComputedStyle(el).backgroundColor);if(v)return v}return null};"
+                    "const n={};let best='',bn=0;for(const f of[.15,.5,.85]){const v=at(innerWidth*f);if(!v)continue;n[v]=(n[v]||0)+1;if(n[v]>bn){bn=n[v];best=v}}"
+                    "if(best)return best;return ''})()";
+    // First choice: the pixels themselves, a thin strip along the top of what's on screen (gradients, images and
+    // canvas included), the most common colour across it. The page's styles are only asked when there's no picture.
+    void (^styles)(void) = ^{
         VPage *p = ws; if (!p || !p.web) return;
         [p.web evaluateJavaScript:js completionHandler:^(id r, NSError *e) {
             VPage *pp = ws; if (!pp) return;
@@ -6477,9 +6511,32 @@ static NSString *MediaKey(NSURL *u) {
             [pp updateTint];
         }];
     };
-    [self updateTint];
+    void (^sample)(void) = ^{
+        VPage *p = ws; WKWebView *wv = p.web; if (!wv || !wv.window || NSWidth(wv.bounds) < 50) { styles(); return; }
+        WKSnapshotConfiguration *cfg = [WKSnapshotConfiguration new];
+        cfg.rect = NSMakeRect(0, 0, NSWidth(wv.bounds), 4);
+        cfg.snapshotWidth = @(240);
+        [wv takeSnapshotWithConfiguration:cfg completionHandler:^(NSImage *im, NSError *e) {
+            VPage *pp = ws; if (!pp) return;
+            CGImageRef cg = [im CGImageForProposedRect:NULL context:nil hints:nil];
+            NSBitmapImageRep *rep = cg ? [[NSBitmapImageRep alloc] initWithCGImage:cg] : nil;
+            NSInteger w = rep.pixelsWide, n = 0, best = 0; NSMutableDictionary<NSNumber *, NSNumber *> *count = [NSMutableDictionary dictionary];
+            NSMutableDictionary<NSNumber *, NSColor *> *sample = [NSMutableDictionary dictionary];
+            for (NSInteger x = 2; x < w - 2; x += 2) {
+                NSColor *c = [[rep colorAtX:x y:0] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+                if (!c || c.alphaComponent < 0.9) continue;
+                n++;
+                NSNumber *k = @(((int)(c.redComponent * 31) << 10) | ((int)(c.greenComponent * 31) << 5) | (int)(c.blueComponent * 31));   // near-identical shades count together
+                count[k] = @(count[k].integerValue + 1); if (!sample[k]) sample[k] = c;
+            }
+            NSNumber *top = nil; for (NSNumber *k in count) if (count[k].integerValue > best) { best = count[k].integerValue; top = k; }
+            if (n >= 10 && best * 10 >= n * 4) { pp->_jsTint = [NSColor colorWithSRGBRed:sample[top].redComponent green:sample[top].greenComponent blue:sample[top].blueComponent alpha:1]; [pp updateTint]; }   // a clear majority
+            else if (n >= 10) { pp->_jsTint = nil; [pp updateTint]; }   // a busy picture along the top: no band colour fits it
+            else styles();
+        }];
+    };
+    if (self.loading) return;   // sampled once, when the page has finished
     sample();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1200 * NSEC_PER_MSEC), dispatch_get_main_queue(), sample);   // late headers
 }
 
 // WebKit tells us each time a content rule acts (the built-in lists and extensions' rules alike):
@@ -8435,6 +8492,7 @@ static NSData *ShieldGet(NSString *url) {   // on a background queue only
     [r setValue:@"Iris" forHTTPHeaderField:@"User-Agent"];
     [[NSURLSession.sharedSession dataTaskWithRequest:r completionHandler:^(NSData *d, NSURLResponse *resp, NSError *e) {
         if (d && [(NSHTTPURLResponse *)resp statusCode] == 200) out = d;
+        else DLog(@"shield: %@ → %ld %@", url.lastPathComponent, (long)[(NSHTTPURLResponse *)resp statusCode], e.localizedDescription ?: @"");
         dispatch_semaphore_signal(s);
     }] resume];
     dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_SEC));
@@ -8458,30 +8516,38 @@ static void ShieldFetchSources(BOOL force, void (^done)(void)) {
         NSData *rel = ShieldGet(@"https://api.github.com/repos/gorhill/uBlock/releases/latest");
         id j = rel ? [NSJSONSerialization JSONObjectWithData:rel options:0 error:nil] : nil;
         if ([j isKindOfClass:NSDictionary.class] && [j[@"tag_name"] isKindOfClass:NSString.class] && [j[@"tag_name"] length]) ref = j[@"tag_name"];
+        DLog(@"shield: fetching uBlock Origin %@ sources", ref);
         if ([ref isEqualToString:cur] && ShieldSrcDir()) { [fm setAttributes:@{NSFileModificationDate: NSDate.date} ofItemAtPath:curFile error:nil]; if (done) done(); return; }
-        NSString *dir = [root stringByAppendingPathComponent:[ref stringByAppendingString:@".building"]];
-        [fm removeItemAtPath:dir error:nil];
-        NSString *base = [NSString stringWithFormat:@"https://raw.githubusercontent.com/gorhill/uBlock/%@/src/", ref];
-        BOOL ok = YES;
-        NSMutableArray *queue = [@[@"js/resources/scriptlets.js", @"js/make-scriptlets.js", @"js/arglist-parser.js", @"js/redirect-resources.js",
-                                   @"js/scriptlet.template.js", @"js/scriptlet-begin.template.js", @"js/scriptlet-end.template.js"] mutableCopy];
-        NSMutableSet *seen = [NSMutableSet set];
+        // the latest release; if it doesn't have everything Iris builds with yet, uBlock's current source
+        NSString *dir = nil, *base = nil; BOOL ok = NO; NSMutableSet *seen = nil;
         NSRegularExpression *imp = [NSRegularExpression regularExpressionWithPattern:@"import\\s+(?:[^'\";]*?\\s+from\\s+)?['\"](\\.{1,2}/[^'\"]+)['\"]" options:0 error:nil];
-        while (queue.count) {
-            NSString *p = queue.lastObject; [queue removeLastObject];
-            if ([seen containsObject:p]) continue;
-            [seen addObject:p];
-            NSData *d = ShieldGet([base stringByAppendingString:p]);
-            if (!d) { ok = NO; DLog(@"shield: couldn't fetch %@ (%@)", p, ref); break; }
-            NSString *dest = [dir stringByAppendingPathComponent:p];
-            [fm createDirectoryAtPath:dest.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
-            [d writeToFile:dest atomically:YES];
-            if ([p hasSuffix:@".template.js"]) continue;
-            NSString *src = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
-            for (NSTextCheckingResult *m in [imp matchesInString:src options:0 range:NSMakeRange(0, src.length)]) {
-                NSString *q = ShieldNormPath(p, [src substringWithRange:[m rangeAtIndex:1]]);
-                if ([q hasPrefix:@"js/"] && ![seen containsObject:q]) [queue addObject:q];
+        for (NSString *tryRef in [ref isEqualToString:@"master"] ? @[@"master"] : @[ref, @"master"]) {
+            ref = tryRef;
+            dir = [root stringByAppendingPathComponent:[ref stringByAppendingString:@".building"]];
+            [fm removeItemAtPath:dir error:nil];
+            base = [NSString stringWithFormat:@"https://raw.githubusercontent.com/gorhill/uBlock/%@/src/", ref];
+            ok = YES;
+            NSMutableArray *queue = [@[@"js/resources/scriptlets.js", @"js/make-scriptlets.js", @"js/arglist-parser.js", @"js/redirect-resources.js",
+                                       @"js/scriptlet.template.js", @"js/scriptlet-begin.template.js", @"js/scriptlet-end.template.js"] mutableCopy];
+            seen = [NSMutableSet set];
+            while (queue.count) {
+                NSString *p = queue.lastObject; [queue removeLastObject];
+                if ([seen containsObject:p]) continue;
+                [seen addObject:p];
+                NSData *d = ShieldGet([base stringByAppendingString:p]);
+                if (!d) { ok = NO; DLog(@"shield: %@ has no %@", ref, p); break; }
+                NSString *dest = [dir stringByAppendingPathComponent:p];
+                [fm createDirectoryAtPath:dest.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+                [d writeToFile:dest atomically:YES];
+                if ([p hasSuffix:@".template.js"]) continue;
+                NSString *src = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
+                for (NSTextCheckingResult *m in [imp matchesInString:src options:0 range:NSMakeRange(0, src.length)]) {
+                    NSString *q = ShieldNormPath(p, [src substringWithRange:[m rangeAtIndex:1]]);
+                    if ([q hasPrefix:@"js/"] && ![seen containsObject:q]) [queue addObject:q];
+                }
             }
+            if (ok) break;
+            [fm removeItemAtPath:dir error:nil];
         }
         if (ok) {   // the stand-in scripts uBlock serves in place of blocked ones
             NSString *rr = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"js/redirect-resources.js"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
@@ -8492,6 +8558,8 @@ static void ShieldFetchSources(BOOL force, void (^done)(void)) {
                 NSData *d = ShieldGet([NSString stringWithFormat:@"%@web_accessible_resources/%@", base, n]);
                 if (d) [d writeToFile:[[dir stringByAppendingPathComponent:@"war"] stringByAppendingPathComponent:n] atomically:YES];
             }
+            NSData *logo = ShieldGet([base stringByAppendingString:@"img/ublock.svg"]);   // uBlock's own mark, shown beside its lists (credit where it's due)
+            if (logo) { [fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"img"] withIntermediateDirectories:YES attributes:nil error:nil]; [logo writeToFile:[dir stringByAppendingPathComponent:@"img/ublock.svg"] atomically:YES]; }
             NSString *final = [root stringByAppendingPathComponent:ref];
             [fm removeItemAtPath:final error:nil];
             [fm moveItemAtPath:dir toPath:final error:nil];
@@ -8501,6 +8569,17 @@ static void ShieldFetchSources(BOOL force, void (^done)(void)) {
         } else [fm removeItemAtPath:dir error:nil];
         if (done) done();
     });
+}
+
+// uBlock Origin's logo, from its own source, as a data URL for the settings page (nil until the sources are here)
+static NSString *ShieldLogoURL(void) {
+    NSString *d = ShieldSrcDir(); NSData *svg = d ? [NSData dataWithContentsOfFile:[d stringByAppendingPathComponent:@"img/ublock.svg"]] : nil;
+    if (!svg && d) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{   // sources fetched before the logo was: fetch it alone
+        static BOOL tried; if (tried) return; tried = YES;
+        NSData *x = ShieldGet([NSString stringWithFormat:@"https://raw.githubusercontent.com/gorhill/uBlock/%@/src/img/ublock.svg", ShieldSrcRef()]);
+        if (x) { [NSFileManager.defaultManager createDirectoryAtPath:[d stringByAppendingPathComponent:@"img"] withIntermediateDirectories:YES attributes:nil error:nil]; [x writeToFile:[d stringByAppendingPathComponent:@"img/ublock.svg"] atomically:YES]; }
+    });
+    return svg ? [@"data:image/svg+xml;base64," stringByAppendingString:[svg base64EncodedStringWithOptions:0]] : nil;
 }
 
 #pragma mark Building the layers from one parse
@@ -8637,12 +8716,12 @@ static void ShieldLoad(NSDictionary *cache) {
     GateStart();
 }
 static void ShieldEnsure(NSString *fp, NSString *dir) {
-    if (([gShieldFP isEqualToString:fp] && [gShieldRef isEqualToString:ShieldSrcRef()]) || gShieldBuilding) return;
     static BOOL fetching;
     if (!ShieldSrcDir() && !fetching) {   // no uBlock sources yet: build what we can now, again once they arrive
         fetching = YES;
         ShieldFetchSources(NO, ^{ dispatch_async(dispatch_get_main_queue(), ^{ fetching = NO; if (ShieldSrcDir()) ShieldEnsure(fp, dir); }); });
     }
+    if (([gShieldFP isEqualToString:fp] && [gShieldRef isEqualToString:ShieldSrcRef()]) || gShieldBuilding) return;
     NSData *d = [NSData dataWithContentsOfFile:ShieldCacheFile()];
     NSDictionary *cache = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
     if ([cache isKindOfClass:NSDictionary.class] && [cache[@"fp"] isEqual:fp] && [cache[@"ref"] isEqual:ShieldSrcRef()]) { ShieldLoad(cache); return; }
@@ -10216,6 +10295,7 @@ static const CGFloat kRowPitch = 88 + 26 + 10;   // vertical: a card, its line u
 - (void)flashNewTab;
 - (void)setApproach:(CGFloat)target;
 - (NSRect)edgeRect;
+- (NSRect)openZoneInRoot;
 @end
 @implementation VShelfHandle
 - (BOOL)isFlipped { return YES; }
@@ -10341,6 +10421,25 @@ static const CFTimeInterval kFlashLen = 1.35;
     }
 }
 - (void)mouseDown:(NSEvent *)e { VWindow *w = WinFor(self); [w showShelf:YES]; VTabShelf *s = (VTabShelf *)w.shelf; s.sticky = YES; [w.window makeFirstResponder:s.search]; }
+// Where hovering opens the tabs: exactly what's drawn, the line of dots and the grey backing that grows out of the
+// edge to meet the pointer (plus a few points' grace), in the window's coordinates. Nothing wider.
+- (NSRect)openZoneInRoot {
+    VWindow *w = WinFor(self);
+    NSInteger n = MIN(40, (NSInteger)w.tabs.count), side = ShelfSide();
+    NSRect f = self.frame;
+    CGFloat len = side ? NSHeight(f) : NSWidth(f);
+    CGFloat dot = 5, curW = 16, gap = n > 1 ? MIN(4, (len - 20 - curW - (n - 1) * dot) / (n - 1)) : 0;
+    if (gap < 1.5) { gap = 1.5; dot = MAX(2, (len - 20 - curW - (n - 1) * gap) / MAX(1, n - 1)); }
+    CGFloat total = n ? curW + (n - 1) * (dot + gap) : 56;
+    CGFloat G = n == 1 ? 54 : total + 14;                                    // the backing's length along the edge
+    CGFloat L = self.lift, ease = L * L * (3 - 2 * L);
+    CGFloat D = 7 + 12 * ease + dot + 5 + 3;                                 // edge to the backing's far side, plus grace
+    CGFloat g = 4;                                                           // grace along the edge
+    NSView *root = self.superview; CGFloat W = NSWidth(root.bounds), H = NSHeight(root.bounds);
+    if (side == 1) return NSMakeRect(-2, NSMidY(f) - G / 2 - g, D + 2, G + 2 * g);
+    if (side == 2) return NSMakeRect(W - D, NSMidY(f) - G / 2 - g, D + 2, G + 2 * g);
+    return NSMakeRect(NSMidX(f) - G / 2 - g, H - D, G + 2 * g, D + 2);
+}
 @end
 
 // Hovering the bottom edge of a Iris window brings its tabs up, even while another app is in front
@@ -10348,6 +10447,8 @@ static const CFTimeInterval kFlashLen = 1.35;
 // The hover zone: a band around the tab map at the middle of the bottom edge (360 × 24 pt), not the whole edge,
 // so reaching for a link low on the page doesn't bring the tabs up.
 static BOOL ShelfZone(NSView *root, NSPoint p) {
+    VWindow *w = WinFor(root); VShelfHandle *hd = (VShelfHandle *)w.shelfHandle;
+    if (hd && !hd.hidden) return NSPointInRect(p, [hd openZoneInRoot]);   // on the line or its grey backing, nowhere else
     CGFloat H = NSHeight(root.bounds), W = NSWidth(root.bounds); NSInteger side = ShelfSide();
     if (side == 1) return fabs(p.y - ShelfMidY(H)) <= 180 && p.x >= -1 && p.x <= 24;
     if (side == 2) return fabs(p.y - ShelfMidY(H)) <= 180 && p.x >= W - 24 && p.x <= W + 1;
@@ -10513,10 +10614,15 @@ static void InstallShelfMonitor(void) {
         s.frame = [self shelfRestFrame]; s.alphaValue = 0; s.hidden = NO;
         ((VShelfStrip *)s.strip).kbd = -1;
         [s layoutShelf]; [s scrollToCurrent]; [s displayIfNeeded];
+        [s.layer removeAllAnimations];
         [CATransaction commit];
+        [CATransaction flush];   // the start position reaches the screen now: after a fresh launch the layer still held its first,
+                                 // full-height frame and the slide began from there (it seemed to drop in from above)
         self.shelfHandle.hidden = YES;
+        NSRect rest = s.frame;
         dispatch_async(dispatch_get_main_queue(), ^{   // next turn: the start position is on screen before it moves
             if (!s.shown) return;
+            [CATransaction begin]; [CATransaction setDisableActions:YES]; s.frame = rest; [s.layer removeAllAnimations]; [CATransaction commit];
             [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
                 ctx.duration = 0.18; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
                 s.animator.frame = f; s.animator.alphaValue = 1;
@@ -11038,7 +11144,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         NSArray *exts = FExtHost.shared.extensions;
         VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:@"Extensions"];
         h.icon = Tinted(Symbol(@"puzzlepiece.extension", 16, NSFontWeightMedium), vText);
-        h.meta = w.isPrivate ? @"They don't run in private windows" : [NSString stringWithFormat:@"%lu installed · pin one to keep it beside this button", (unsigned long)exts.count];
+        h.meta = w.isPrivate ? @"They don't run in private windows" : [NSString stringWithFormat:@"%lu installed", (unsigned long)exts.count];
         y += 40 + 14;
         for (id e in exts) {
             NSString *ident = [e valueForKey:@"ident"];
@@ -11114,11 +11220,12 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         BOOL global = [Defaults() boolForKey:kBlock], allowed = [SiteArray(self.owner.isPrivate, kAllowlist) containsObject:host];
         VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:!global ? @"Blocking is off" : (web && allowed) ? [@"Allowed on " stringByAppendingString:host] : @"Blocking ads and trackers"];
         h.icon = Tinted(Symbol(global && !(web && allowed) ? @"checkmark.shield" : @"shield.slash", 16, NSFontWeightMedium), vText);
-        h.meta = [@"Filter lists · " stringByAppendingString:VBlocker.shared.status ?: @""];
+        h.meta = gBlockPhase ? [NSString stringWithFormat:@"%@ · %.0f%%", gBlockPhase, gBlockFrac * 100] : [@"Filter lists · " stringByAppendingString:VBlocker.shared.status ?: @""];
         y += 40 + 14;
         CGFloat sw = floor((cw - 8) / 2);
         VPItem *s1 = [self add:VPStat rect:NSMakeRect(x, y, sw, 62) title:[NSString stringWithFormat:@"%ld", (long)t.blocked]]; s1.meta = @"On this page";
         VPItem *s2 = [self add:VPStat rect:NSMakeRect(x + sw + 8, y, cw - sw - 8, 62) title:gRuleCount >= 1000 ? [NSString stringWithFormat:@"%.0fk", gRuleCount / 1000.0] : [NSString stringWithFormat:@"%lu", (unsigned long)gRuleCount]]; s2.meta = @"Rules in the lists";
+        if (gBlockPhase) { s2.title = [NSString stringWithFormat:@"%.0f%%", gBlockFrac * 100]; s2.meta = gBlockPhase; }
         y += 62 + 16;
         if (web) {
             VPItem *bs = [self add:VPToggle rect:NSMakeRect(x, y, cw, 40) title:[@"Block on " stringByAppendingString:site]]; bs.on = global && !allowed;
@@ -11159,7 +11266,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     if (w.isPrivate) { h.icon = Tinted(Symbol(@"eye.slash", 16, NSFontWeightMedium), vText); h.meta = @"Nothing is kept when it closes"; }
     else if (IrisIsDev()) {   // the testing copy says so, plainly, wherever you'd look for whose browser this is
         h.title = @"Iris Dev"; h.icon = NSApp.applicationIconImage; h.on = YES;
-        h.meta = [NSString stringWithFormat:@"Testing copy · %@ profile · its own tabs and sign-ins", ProfileName(w.profile)];
+        h.meta = [NSString stringWithFormat:@"Development build · %@ profile", ProfileName(w.profile)];
         VPItem *ch = [self add:VPPill rect:NSMakeRect(W - P - 132, y + 6, 132, 28) title:@"Change profile"]; ch.symbol = @"person.2";
         ch.act = profiles;
     }
@@ -11468,6 +11575,29 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     return hit != nil;
 }
 @end
+
+// The filter lists are being fetched, read or compiled: the shield shows how far along (a ring and a percentage instead of
+// a count that can't move yet), and an open shield panel says what's happening.
+static void BlockerProgress(NSString *phase, double frac) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BOOL was = gBlockPhase != nil;
+        if (!phase && !was) return;
+        static double lastFrac; static NSTimeInterval lastAt;
+        NSTimeInterval now = NSDate.timeIntervalSinceReferenceDate;
+        if (phase && was && [phase isEqualToString:gBlockPhase] && fabs(frac - lastFrac) < 0.01 && now - lastAt < 1) return;
+        gBlockPhase = phase; gBlockFrac = phase ? MAX(gBlockFrac, frac) : -1;   // never runs backwards within one build
+        if (!phase) gBlockFrac = -1;
+        lastFrac = gBlockFrac; lastAt = now;
+        for (VWindow *w in gWindows) {
+            VButton *b = w.toolbar.shieldBtn;
+            b.ringOn = phase != nil; b.ringProgress = gBlockFrac;
+            b.toolTip = phase ? [NSString stringWithFormat:@"%@ · %.0f%%", phase, gBlockFrac * 100] : @"Ads and trackers";
+            [w.toolbar placePillButtons]; b.needsDisplay = YES; w.toolbar.needsDisplay = YES;
+            VLensPanel *p = (VLensPanel *)w.lensPanel;
+            if (p && [[p valueForKey:@"shown"] boolValue] && p.mode == 2) [p rebuild];
+        }
+    });
+}
 #pragma mark - Browser window
 
 @interface VRoot : NSView
@@ -11481,7 +11611,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     // under the page's rounded top corners too, so they melt into it; a faint shade at the very top keeps the window's edge.
     VWindow *w = WinFor(self);
     NSColor *c = [w.current.headerColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-    if (!c || gWebApp) return;
+    if (!c || gWebApp || w.current.isHome) return;
     CGFloat band = NSMinY(w.content.frame) + 12;
     [c setFill]; NSRectFill(NSMakeRect(0, 0, NSWidth(self.bounds), band));
     CGFloat lum = 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent;
@@ -11796,7 +11926,7 @@ static NSString *CreateProfile(NSString *name) {
 - (void)manageProfiles:(id)s { [self showSettingsSection:@"profiles"]; }
 - (void)newProfile:(id)s {
     NSAlert *a = [NSAlert new]; a.messageText = @"New profile";
-    a.informativeText = @"For another person, or a part of your life you keep apart. It opens as its own app, with its own extensions, passwords, bookmarks, downloads, history and sign-ins.";
+    a.informativeText = @"A separate app with its own extensions, passwords, bookmarks and history.";
     NSTextField *f = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)]; f.placeholderString = @"Name, e.g. Work";
     a.accessoryView = f; [a addButtonWithTitle:@"Create"]; [a addButtonWithTitle:@"Cancel"];
     a.window.initialFirstResponder = f;
@@ -15131,6 +15261,12 @@ static void CtlOut(NSString *s) {
             for (FExt *e in FExtHost.shared.extensions) if ([e isKindOfClass:FExt.class] && e.background) [o appendFormat:@"  ext pid=%d %@\n", pidOf(e.background), e.name];
             CtlOut(o);
         }
+        else if ([cmd isEqualToString:@"tint"]) {   // dev: the band's colour and where it came from
+            WKWebView *wv = self.current.web.web; id sp = nil, th = nil;
+            @try { sp = [wv valueForKey:@"_sampledPageTopColor"]; } @catch (NSException *x) { sp = @"(no SPI)"; }
+            @try { th = [wv valueForKey:@"themeColor"]; } @catch (NSException *x) {}
+            CtlOut([NSString stringWithFormat:@"tint header=%@ sampled=%@ theme=%@ url=%@ gate=%u conns=%ld uncloaked=%ld shield=%@ src=%@", self.current.headerColor, sp, th, wv.URL.host, gGatePort, gGateConnections, gGateUncloaked, gShieldFP ? ShieldStats() : @"-", ShieldSrcRef()]);
+        }
         else if ([cmd isEqualToString:@"status"]) {
             CtlOut([NSString stringWithFormat:@"status tabs=%lu cur=%lu url=%@ title=%@ loading=%d progress=%.2f blocked=%ld rules=%lu extensions=%d side=%.0f split=%lu",
                     (unsigned long)self.tabs.count, (unsigned long)[self.tabs indexOfObject:self.current], w.url, w.title, w.loading, w.progress, (long)w.blocked,
@@ -16061,7 +16197,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     double zcur = [Defaults() objectForKey:kDefaultZoom] ? [Defaults() doubleForKey:kDefaultZoom] : 1.0;
     NSInteger zi = 2; for (NSUInteger k = 0; k < zs.count; k++) if (fabs([zs[k] doubleValue] - zcur) < 0.01) zi = (NSInteger)k;
     NSUInteger ownZoom = [Defaults() dictionaryForKey:kZoom].count;
-    [S addObject:SSection(@"general", @"General", @"How Iris starts and how it treats your tabs.", @"gear", @[
+    [S addObject:SSection(@"general", @"General", @"Startup and tabs.", @"gear", @[
         SGroup(@"Default browser", @[ isDefault ? SValue(@"Iris is your default browser", @"Links you click in other apps open here.", @"✓")
             : SButton(@"makeDefault", @"Iris isn't your default browser", @"Links you click in other apps open here.", @"Make Default", ^(NSDictionary *a, void (^done)(NSString *)) {
                 NSURL *me = NSBundle.mainBundle.bundleURL;
@@ -16071,14 +16207,14 @@ static NSArray *SettingsSchema(VWindow *win) {
             }) ]),
         SGroup(@"Startup", @[ SSelect(@"startup", @"When Iris opens", nil, @[@"Continue where you left off", @"Open a new tab"], [Defaults() integerForKey:kStartup], ^(NSInteger i) { [Defaults() setInteger:i forKey:kStartup]; }) ]),
         SGroup(@"Tabs", @[
-            SSelect(@"sleep", @"Put background tabs to sleep", @"Sleeping tabs free their memory and wake instantly when you return to them.", @[@"After 5 minutes", @"After 10 minutes", @"After 30 minutes", @"After 1 hour", @"Never"], (NSInteger)si,
+            SSelect(@"sleep", @"Put background tabs to sleep", @"Frees their memory.", @[@"After 5 minutes", @"After 10 minutes", @"After 30 minutes", @"After 1 hour", @"Never"], (NSInteger)si,
                     ^(NSInteger i) { [Defaults() setInteger:[mins[(NSUInteger)i] integerValue] forKey:kSleepMins]; }),
-            SSelect(@"shelfSide", @"Where your tabs live", @"Hover that edge of the window to bring them out. Along a side, they run top to bottom.", @[@"Bottom", @"Left side", @"Right side"], ShelfSide(),
+            SSelect(@"shelfSide", @"Tab position", nil, @[@"Bottom", @"Left side", @"Right side"], ShelfSide(),
                     ^(NSInteger i) {
                         [Defaults() setInteger:i forKey:kShelfSide];
                         for (VWindow *w in gWindows) { [w showShelf:NO]; [(VTabShelf *)w.shelf reload]; [w layout]; w.shelfHandle.needsDisplay = YES; [w.shelfHandle updateTrackingAreas]; }
                     }),
-            SKey(kAutoPiP, @"Float playing videos when you switch tabs", @"A video that’s playing moves to picture in picture while you’re on another tab, and back when you return.", NO, nil) ]),
+            SKey(kAutoPiP, @"Picture in picture when switching tabs", nil, NO, nil) ]),
         SGroup(@"Page zoom", @[
             SSelect(@"zoom", @"Default zoom", @"Sites you've zoomed individually keep their own level.", @[@"75%", @"90%", @"100%", @"110%", @"125%", @"150%"], zi, ^(NSInteger i) {
                 double z = [zs[(NSUInteger)i] doubleValue]; [Defaults() setDouble:z forKey:kDefaultZoom];
@@ -16098,19 +16234,19 @@ static NSArray *SettingsSchema(VWindow *win) {
     gSSet[@"accent"] = ^(id v) { [Defaults() setInteger:[v integerValue] forKey:kAccent]; IrisApplyTheme(); };
     NSMutableArray *tb = [NSMutableArray array];
     // which buttons, and where, is Customise Toolbar's job: here just the way in, and the one standing choice
-    [tb addObject:SButton(@"tbCustomise", @"Arrange the toolbar", @"Drag any of its items between the left, the address bar and the right, or take them off. Right-click the bar for the same.", @"Customise…", ^(NSDictionary *a, void (^done)(NSString *)) { [win showToolbarCustomiser:nil]; done(nil); })];
-    [tb addObject:SSwitch(@"tb.dlalways", @"Always show Downloads", @"Otherwise its button appears only while something is downloading or just finished.", ToolbarShows(@"dlalways"), ^(id v) { SetToolbarShows(@"dlalways", [v boolValue]); RelayoutAll(); })];
+    [tb addObject:SButton(@"tbCustomise", @"Arrange the toolbar", nil, @"Customise…", ^(NSDictionary *a, void (^done)(NSString *)) { [win showToolbarCustomiser:nil]; done(nil); })];
+    [tb addObject:SSwitch(@"tb.dlalways", @"Always show Downloads", nil, ToolbarShows(@"dlalways"), ^(id v) { SetToolbarShows(@"dlalways", [v boolValue]); RelayoutAll(); })];
     NSArray *fonts = @[@0, @9, @10, @11, @12, @14, @16];
     NSUInteger mi = [fonts indexOfObject:@([Defaults() integerForKey:kMinFont])]; if (mi == NSNotFound) mi = 0;
-    [S addObject:SSection(@"appearance", @"Appearance", @"Make Iris look the way you want. Changes apply instantly.", @"brush", @[
+    [S addObject:SSection(@"appearance", @"Appearance", @"Theme and layout.", @"brush", @[
         SGroup(@"Theme", @[
-            SSelect(@"theme", @"Theme", @"Carbon is near-black. Pages follow light or dark where they support it.", @[@"Follow macOS", @"Graphite", @"Carbon", @"Light"], [Defaults() integerForKey:kTheme],
+            SSelect(@"theme", @"Theme", nil, @[@"Follow macOS", @"Graphite", @"Carbon", @"Light"], [Defaults() integerForKey:kTheme],
                     ^(NSInteger i) { [Defaults() setInteger:i forKey:kTheme]; IrisApplyTheme(); }),
             accentRow ]),
         SGroup(@"Tabs", @[
-            SKey(kShelfNoHover, @"Show tabs when the pointer reaches their edge", @"⌘S brings them out at any time. Choose the edge in General › Tabs.", YES, ^{ RelayoutAll(); }),
-            SKey(kShelfNoHint, @"Show the tab map", @"A dot for each tab along the edge, the one you're on longer; hover or click it.", YES, ^{ RelayoutAll(); }) ]),
-        SGroup(@"Top bar", [@[ SSelect(@"addrWidth", @"Address width", @"How wide the address capsule grows.", @[@"Full", @"Medium", @"Compact"], [Defaults() integerForKey:kAddrWidth],
+            SKey(kShelfNoHover, @"Show tabs on hover", @"⌘S shows them any time.", YES, ^{ RelayoutAll(); }),
+            SKey(kShelfNoHint, @"Show tab indicator", nil, YES, ^{ RelayoutAll(); }) ]),
+        SGroup(@"Top bar", [@[ SSelect(@"addrWidth", @"Address width", nil, @[@"Full", @"Medium", @"Compact"], [Defaults() integerForKey:kAddrWidth],
                                       ^(NSInteger i) { [Defaults() setInteger:i forKey:kAddrWidth]; RelayoutAll(); }) ] arrayByAddingObjectsFromArray:tb]),
         SGroup(@"New tab page", @[ SKey(kHomeTopSites, @"Show your most visited sites", nil, NO, ^{ RelayoutAll(); }) ]),
         SGroup(@"Text", @[ SSelect(@"minFont", @"Minimum font size", @"Tiny text on pages is enlarged to at least this size. Applies to pages you open next.", @[@"None", @"9 pt", @"10 pt", @"11 pt", @"12 pt", @"14 pt", @"16 pt"], (NSInteger)mi,
@@ -16141,11 +16277,11 @@ static NSArray *SettingsSchema(VWindow *win) {
     // ── Privacy & Security
     NSMutableDictionary *manage = SButton(@"manageData", @"Cookies and website data", @"See which sites store data on this Mac and remove it.", @"Manage…", ^(NSDictionary *a, void (^done)(NSString *)) { done(nil); });
     manage[@"dataManager"] = @YES;
-    [S addObject:SSection(@"privacy", @"Privacy & Security", @"Iris sends nothing to advertisers, and your data stays on this Mac.", @"hand", @[
+    [S addObject:SSection(@"privacy", @"Privacy & Security", @"Tracking, cookies and private windows.", @"hand", @[
         SGroup(@"Tracking", @[
-            SKey(kBlock, @"Block ads and trackers", @"Requests to known ad and tracking servers are never made.", NO, ^{ IrisSetBlocking([Defaults() boolForKey:kBlock]); for (VWindow *w in gWindows) [w refreshChrome]; }),
+            SKey(kBlock, @"Block ads and trackers", nil, NO, ^{ IrisSetBlocking([Defaults() boolForKey:kBlock]); for (VWindow *w in gWindows) [w refreshChrome]; }),
             SKey(kStrip, @"Remove tracking tags from links", @"Strips utm_, fbclid, gclid and similar parameters before a page loads.", NO, nil),
-            SKey(kCookieReject, @"Reject cookie banners", @"Answers consent pop-ups with “Reject all” on sites that offer it. Turning the shield off for a site skips it there.", NO, nil),
+            SKey(kCookieReject, @"Reject cookie banners", @"Clicks “Reject all” on consent pop-ups.", NO, nil),
             SValue(@"Prevent cross-site tracking", @"WebKit's Intelligent Tracking Prevention limits cookies that follow you between sites.", @"Always on"),
             SKey(kGPC, @"Ask sites not to sell or share my data", @"Sends the Global Privacy Control signal. Applies to pages you open next.", NO, nil) ]),
         SGroup(@"Private windows", @[
@@ -16153,7 +16289,7 @@ static NSArray *SettingsSchema(VWindow *win) {
                     @[@"Never", @"When my Mac locks or sleeps", @"Also after 1 minute away from Iris", @"Also after 5 minutes away from Iris", @"Also after 15 minutes away from Iris"], [Defaults() integerForKey:kPrivLock],
                     ^(NSInteger i) { [Defaults() setInteger:i forKey:kPrivLock]; }),
             SKey(kPrivHide, @"Hide private windows from screenshots and screen sharing", @"They show up blank in screenshots, recordings and shared screens, including your own.", NO, ^{ PrivateApplyCaptureSetting(); }),
-            SNote(@"Always on in private windows", @"No history, cookies or site data kept; what you decide on sites is forgotten when the last one closes; tracking tags removed; WebKit's own tracking and fingerprinting protections and HTTPS first; no extensions; each window signed in separately; never restored by macOS.") ]),
+            SNote(@"Always on in private windows", @"No history or site data kept, no extensions, tracking tags removed, HTTPS first, fingerprinting protection.") ]),
         SGroup(@"Security", @[
             SKey(kHTTPSOnly, @"HTTPS-only mode", @"Tries every site over a secure connection and warns you before opening one that isn't.", NO, nil),
             SValue(@"Fraudulent website warnings", @"Off: it would send the addresses you visit to Google Safe Browsing.", @"Off") ]),
@@ -16186,46 +16322,50 @@ static NSArray *SettingsSchema(VWindow *win) {
     [S addObject:SSection(@"sites", @"Site Settings", @"Choices you've made for individual sites. Change them from the lock icon in the address bar.", @"sliders", @[
         SGroup(@"JavaScript", js), SGroup(@"Location, camera and microphone", cam), SGroup(@"Ad blocking", allowRows) ])];
 
-    // ── Ad blocking
+    // ── Ad blocking: uBlock Origin's default set, one switch per source; the rest is one status line
     NSMutableArray *lists = [NSMutableArray array]; NSSet *on = ListsOn();
+    NSArray *ubo = @[@"ubo-filters", @"ubo-privacy", @"ubo-badware", @"ubo-quickfixes", @"ubo-unbreak"];
+    void (^setLists)(NSArray *, BOOL) = ^(NSArray *ids, BOOL v) {
+        NSMutableSet *s = [ListsOn() mutableCopy]; for (NSString *k in ids) { if (v) [s addObject:k]; else [s removeObject:k]; }
+        [Defaults() setObject:s.allObjects forKey:kListsOn]; [VBlocker.shared updateLists:NO done:nil];
+    };
+    NSMutableDictionary *uboRow = [SSwitch(@"list.ubo", @"uBlock Origin", @"© Raymond Hill and contributors · GPLv3", [on containsObject:@"ubo-filters"], ^(id v) { setLists(ubo, [v boolValue]); }) mutableCopy];
+    NSString *logo = ShieldLogoURL(); if (logo) { uboRow[@"icon"] = logo; uboRow[@"logo"] = @YES; }
+    [lists addObject:uboRow];
     for (NSArray *l in FilterLists()) {
-        NSString *k = l[0];
-        [lists addObject:SSwitch([@"list." stringByAppendingString:k], l[1], nil, [on containsObject:k], ^(id v) {
-            NSMutableSet *s = [ListsOn() mutableCopy]; if ([v boolValue]) [s addObject:k]; else [s removeObject:k];
-            [Defaults() setObject:s.allObjects forKey:kListsOn]; [VBlocker.shared updateLists:NO done:nil]; })];
+        NSString *k = l[0]; if ([ubo containsObject:k]) continue;
+        [lists addObject:SSwitch([@"list." stringByAppendingString:k], l[1], nil, [on containsObject:k], ^(id v) { setLists(@[k], [v boolValue]); })];
     }
-    [S addObject:SSection(@"blocking", @"Ad Blocking", @"Filter lists Iris uses to recognise ad and tracker servers. They update themselves weekly.", @"shield", @[
+    NSString *state = gBlockPhase ? [NSString stringWithFormat:@"%@ · %.0f%%", gBlockPhase, gBlockFrac * 100]
+                    : [NSString stringWithFormat:@"%@%@", VBlocker.shared.status ?: @"", gShieldFP ? [NSString stringWithFormat:@" · %@ scripts", @(gShieldScriptletCount)] : @""];
+    [S addObject:SSection(@"blocking", @"Ad Blocking", @"Updated weekly.", @"shield", @[
         SGroup(@"Lists", lists),
-        SGroup(@"Element hiding", @[ SSwitch(kHideElements, @"Hide ad spaces and page clutter", @"Hides the boxes ads leave behind, cookie notices and other annoyances with style rules. Ads and trackers are blocked either way; off makes busy pages a little lighter.",
-                                             ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kHideElements]; IrisApplyRules(); ShieldChanged(); }) ]),
-        SGroup(@"Beyond the lists", @[
-            SValue(@"uBlock Origin's page scripts", @"uBlock's own scriptlets, procedural hiding and stand-in scripts, built from uBlock's source (fetched from its repository with the lists).",
-                   gShieldFP ? ShieldStats() : (ShieldSrcRef().length ? @"Building…" : @"Arrives with the next list update")),
-            SSwitch(kShieldGate, @"Live gate", [NSString stringWithFormat:@"Every connection pages make passes through Iris, which follows a site's DNS aliases and stops trackers disguised as the site itself (CNAME cloaking). macOS 14 or later. %@",
-                                                 gGatePort ? [NSString stringWithFormat:@"Live: %ld connections, %ld disguised trackers stopped.", gGateConnections, gGateUncloaked] : @"Not running."],
-                    [Defaults() boolForKey:kShieldGate], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kShieldGate]; if ([v boolValue]) GateStart(); else GateStop(); }) ]),
-        SGroup(@"Updates", @[ SValue(@"Status", nil, VBlocker.shared.status ?: @""),
-            SButton(@"updateLists", @"Update the lists now", nil, @"Update Now", ^(NSDictionary *a, void (^done)(NSString *)) { [win updateListsNow:nil]; done(@"Updating filter lists…"); }) ]) ])];
+        SGroup(nil, @[ SSwitch(kHideElements, @"Hide page clutter", nil,
+                               ![Defaults() objectForKey:kHideElements] || [Defaults() boolForKey:kHideElements], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kHideElements]; IrisApplyRules(); ShieldChanged(); }),
+                       SSwitch(kShieldGate, @"Unmask disguised trackers", gGatePort && gGateUncloaked ? [NSString stringWithFormat:@"%ld stopped", gGateUncloaked] : nil,
+                               [Defaults() boolForKey:kShieldGate], ^(id v) { [Defaults() setBool:[v boolValue] forKey:kShieldGate]; if ([v boolValue]) GateStart(); else GateStop(); }) ]),
+        SGroup(nil, @[ SValue(@"Status", nil, state),
+                       SButton(@"updateLists", @"Update lists", nil, @"Update Now", ^(NSDictionary *a, void (^done)(NSString *)) { [win updateListsNow:nil]; done(@"Updating…"); }) ]) ])];
 
     // ── Performance
     BOOL arm = MacIsAppleSilicon();
-    [S addObject:SSection(@"performance", @"Performance", @"Engine-level controls that change how much work your Mac does.", @"gauge", @[
+    [S addObject:SSection(@"performance", @"Performance", @"Video, background tabs and memory.", @"gauge", @[
         SGroup(@"Video", @[
             SSelect(@"codec", @"Video format", arm ? @"Apple silicon decodes H.264, VP9 and (on newer chips) AV1 in hardware, so Automatic is usually best here. Applies to pages you open or reload."
                                                    : @"This Mac's Intel chip decodes H.264 in hardware; VP9 and AV1 fall back to the processor, which costs battery, heat and fan noise. H.264 tops out at 1080p on YouTube. Applies to pages you open or reload.",
                     @[@"Automatic", @"Avoid AV1", @"H.264 only"], [Defaults() integerForKey:kCodec], ^(NSInteger i) { [Defaults() setInteger:i forKey:kCodec]; IrisCodecChanged(); }),
-            SKey(kCodec30, @"Limit videos to 30 fps", @"Turns down 60 fps streams: half the frames to decode. Sports and games look less smooth.", NO, ^{ IrisCodecChanged(); }) ]),
+            SKey(kCodec30, @"Limit videos to 30 fps", @"Saves power on 60 fps video.", NO, ^{ IrisCodecChanged(); }) ]),
         SGroup(@"Engine", @[
-            SKey(kThrottleOn, @"Hold back background tabs", @"On: background pages share a quarter of your Mac's processor on battery and 40% plugged in (averaged over 10 seconds, bursts run free), and hidden tabs' timers slow down. The page you're looking at, anything that played sound in the last 90 seconds and Picture in Picture are never slowed. Off: every tab uses whatever it needs.", NO, ^{
+            SKey(kThrottleOn, @"Limit background tabs", @"Caps background tabs at 25% CPU on battery, 40% plugged in. Tabs playing audio are exempt.", NO, ^{
                 if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start]; else [VGovernor stop];
                 [gApp applyThrottleNow]; }),
-            SSelect(@"bgThrottle", @"Background tabs", @"When holding back is on: saving power slows a hidden tab's timers further the longer it stays hidden, as Safari does. Music and calls keep playing.",
+            SSelect(@"bgThrottle", @"Background tabs", @"Power saving slows hidden tabs' timers further over time.",
                     @[@"Standard", @"Save power on battery", @"Always save power"], [Defaults() integerForKey:kBgThrottle], ^(NSInteger i) { [Defaults() setInteger:i forKey:kBgThrottle]; [gApp applyThrottleNow]; }),
-            SKey(kSingleProcess, @"One process for all tabs", @"Saves a lot of memory with many tabs open. If one tab crashes, all of them reload. Takes effect when Iris restarts.", NO, nil) ]),
+            SKey(kSingleProcess, @"One process for all tabs", @"Saves memory; one crash reloads every tab. Needs a restart.", NO, nil) ]),
         SGroup(@"Launch", @[
-            SKey(kRestorePaused, @"Restored video starts paused", @"The tab you were on comes back without playing by itself.", NO, nil),
-            SKey(kResumeMedia, @"Videos resume where you left off", @"After a restart, a reopened tab or a sleeping tab waking, the video picks up at the same moment.", NO, nil),
-            SKey(kLazyRestore, @"Load the open tab when you click it", @"At launch, the tab you were on waits as a card until you click it, so nothing loads until you want it.", NO, nil) ])
+            SKey(kRestorePaused, @"Restored video starts paused", nil, NO, nil),
+            SKey(kResumeMedia, @"Videos resume where you left off", nil, NO, nil),
+            SKey(kLazyRestore, @"Don't load tabs at launch", @"Tabs load when clicked.", NO, nil) ])
     ])];
 
     // ── Extensions
@@ -16257,7 +16397,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         for (VWindow *w in gWindows) if (!w.isPrivate) { [w saveSession]; break; }
         [NSTask launchedTaskWithLaunchPath:@"/bin/sh" arguments:@[@"-c", [NSString stringWithFormat:@"sleep 1.2; open \"%@\"", NSBundle.mainBundle.bundlePath]]];
         [NSApp terminate:nil]; })];
-    [S addObject:SSection(@"extensions", @"Extensions", @"Chrome extensions running on Iris's own extension layer.", @"puzzle", @[ SGroup(@"Installed", exts), SGroup(@"Add", add) ])];
+    [S addObject:SSection(@"extensions", @"Extensions", @"Chrome extensions.", @"puzzle", @[ SGroup(@"Installed", exts), SGroup(@"Add", add) ])];
     NSMutableArray *apps = [NSMutableArray array];   // sites installed as apps
     for (NSDictionary *a in WebAppRegistry()) {
         if (![NSFileManager.defaultManager fileExistsAtPath:a[@"path"] ?: @""]) continue;
@@ -16265,11 +16405,11 @@ static NSArray *SettingsSchema(VWindow *win) {
         [apps addObject:SButton([@"appRemove." stringByAppendingString:a[@"id"]], [NSString stringWithFormat:@"Uninstall %@", a[@"name"] ?: @"the app"], @"It moves to the Bin, and the sign-in and website data it kept on this Mac are removed.", @"Uninstall",
                                 ^(NSDictionary *x, void (^done)(NSString *)) { WebAppUninstall(a); done([NSString stringWithFormat:@"%@ uninstalled", a[@"name"] ?: @"App"]); })];
     }
-    if (!apps.count) [apps addObject:SNote(@"No apps yet", @"On a site that can be installed, a button appears in the address bar. Any site works from File → Install Site as App…")];
-    NSArray *appTail = @[SButton(@"appsFolder", @"Iris Apps folder", @"Where installed apps live. Drag one to the Dock to keep it there.", @"Show", ^(NSDictionary *x, void (^done)(NSString *)) {
+    if (!apps.count) [apps addObject:SNote(@"No apps yet", @"File › Install Site as App…")];
+    NSArray *appTail = @[SButton(@"appsFolder", @"Iris Apps folder", nil, @"Show", ^(NSDictionary *x, void (^done)(NSString *)) {
         [NSFileManager.defaultManager createDirectoryAtPath:WebAppsDir() withIntermediateDirectories:YES attributes:nil error:nil];
         [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:WebAppsDir()]]; done(nil); })];
-    [S addObject:SSection(@"apps", @"Apps", @"Sites installed as apps: each with its own window, Dock icon and sign-in.", @"apps", @[ SGroup(@"Installed", apps), SGroup(nil, appTail) ])];
+    [S addObject:SSection(@"apps", @"Apps", @"Sites installed as apps.", @"apps", @[ SGroup(@"Installed", apps), SGroup(nil, appTail) ])];
 
     // ── Downloads
     NSString *dir = [Defaults() stringForKey:kDownloadDir];
@@ -16278,7 +16418,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     NSArray *conns = @[@1, @2, @4, @6, @8, @12, @16], *actives = @[@1, @2, @3, @4, @5, @6, @8];
     NSUInteger ai = [actives indexOfObject:@([Defaults() integerForKey:kDLActive])]; if (ai == NSNotFound) ai = 2;
     NSUInteger ci = [conns indexOfObject:@([Defaults() integerForKey:kDLConns])]; if (ci == NSNotFound) ci = 4;
-    [S addObject:SSection(@"downloads", @"Downloads", @"Where files go, and how Iris fetches them.", @"download", @[
+    [S addObject:SSection(@"downloads", @"Downloads", @"Download folder and speed.", @"download", @[
         SGroup(@"Location", @[
             SButton(@"chooseDownloads", dir.length ? dir.stringByAbbreviatingWithTildeInPath : @"~/Downloads", @"Current download folder", @"Change…", ^(NSDictionary *a, void (^done)(NSString *)) {
                 NSOpenPanel *p = [NSOpenPanel openPanel]; p.canChooseDirectories = YES; p.canChooseFiles = NO; p.canCreateDirectories = YES; p.prompt = @"Use Folder";
@@ -16286,9 +16426,9 @@ static NSArray *SettingsSchema(VWindow *win) {
             }),
             SKey(kAskDownload, @"Ask where to save each file", @"Uses the standard save sheet (one connection).", NO, nil),
             SButton(@"openDownloads", @"Show the download folder", nil, @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [NSWorkspace.sharedWorkspace openURL:win.downloadFolder]; done(nil); }),
-            SButton(@"downloadManager", @"Download manager", @"Every download, with speed, slices and controls. ⌥⌘L", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [win showDownloadManager:nil]; done(nil); }) ]),
+            SButton(@"downloadManager", @"Download manager", @"⌥⌘L", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [win showDownloadManager:nil]; done(nil); }) ]),
         SGroup(@"Accelerator", @[
-            SKey(kDLAccel, @"Download with several connections", @"Like Internet Download Manager: a file is fetched in slices at once, and can be paused and resumed, even after quitting.", NO, nil),
+            SKey(kDLAccel, @"Download with several connections", @"Faster downloads that can be paused and resumed.", NO, nil),
             SSelect(@"dlConns", @"Connections per download", nil, @[@"1", @"2", @"4", @"6", @"8", @"12", @"16"], (NSInteger)ci, ^(NSInteger i) { [Defaults() setInteger:[conns[(NSUInteger)i] integerValue] forKey:kDLConns]; }),
             SSelect(@"dlActive", @"Downloads at the same time", @"The rest wait in line.", @[@"1", @"2", @"3", @"4", @"5", @"6", @"8"], (NSInteger)ai,
                     ^(NSInteger i) { [Defaults() setInteger:[actives[(NSUInteger)i] integerValue] forKey:kDLActive]; }),
@@ -16308,7 +16448,7 @@ static NSArray *SettingsSchema(VWindow *win) {
             row[@"icon"] = PNGDataURL(ProfileAvatar(pid, p[@"name"], 40), 40);
             [profRows addObject:row];
         }
-        [S addObject:SSection(@"profiles", @"Profiles", IrisIsDev() ? @"Iris Dev is a profile of its own." : @"Each profile is a different person, in its own app with its own extensions, passwords, bookmarks, downloads, history and sign-ins. Add, rename, recolour or delete profiles in Iris.", @"person", @[
+        [S addObject:SSection(@"profiles", @"Profiles", IrisIsDev() ? @"Iris Dev is a profile of its own." : @"Manage profiles in Iris.", @"person", @[
             SGroup(@"Profiles", profRows) ])];
     } else {
     for (NSDictionary *p in Profiles()) {
@@ -16368,12 +16508,12 @@ static NSArray *SettingsSchema(VWindow *win) {
         };
         [profRows addObject:sw];
     }
-    NSMutableDictionary *newProf = SButton(@"profNew", @"New profile", @"For another person, or a part of your life you keep apart. Nothing is shared with it.", @"Add…", ^(NSDictionary *a, void (^done)(NSString *)) {
+    NSMutableDictionary *newProf = SButton(@"profNew", @"New profile", @"A separate app with its own data.", @"Add…", ^(NSDictionary *a, void (^done)(NSString *)) {
         NSString *n = Trim([a[@"name"] description] ?: @"");
         OpenProfileWindow(CreateProfile(n)); RelayoutAll(); done(@"Profile created");
     });
     newProf[@"prompt"] = @{@"title": @"New profile", @"text": @"It opens as its own app, with its own extensions, passwords, bookmarks, downloads, history and sign-ins.", @"ok": @"Create", @"fields": @[@{@"name": @"name", @"placeholder": @"Name, e.g. Work"}]};
-    [S addObject:SSection(@"profiles", @"Profiles", @"Each profile is a different person: its own app in Applications › Iris Profiles, with its own extensions, passwords, bookmarks, downloads, history and sign-ins. Nothing passes between them.", @"person", @[
+    [S addObject:SSection(@"profiles", @"Profiles", @"Each profile is a separate app with its own data.", @"person", @[
         SGroup(@"Your profiles", profRows), SGroup(nil, @[ newProf ]) ])];
     }
 
@@ -16387,7 +16527,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         done([NSString stringWithFormat:@"Imported %lu bookmarks", (unsigned long)VBookmarks.shared.allURLs.count]);
     });
     helium[@"confirm"] = @{@"title": @"Import bookmarks from Helium?", @"text": @"Iris's current bookmarks will be replaced.", @"ok": @"Import"};
-    [S addObject:SSection(@"bookmarks", @"Bookmarks & Import", @"Bring your bookmarks and site icons over from another browser.", @"bookmark", @[
+    [S addObject:SSection(@"bookmarks", @"Bookmarks & Import", @"Import from another browser.", @"bookmark", @[
         SGroup(@"Your bookmarks", @[ SValue(@"Saved bookmarks", nil, [NSString stringWithFormat:@"%lu", (unsigned long)VBookmarks.shared.allURLs.count]),
             SButton(@"bmManager", @"Bookmark manager", @"Edit, sort, import and export. ⌥⌘B", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [win showBookmarks:nil]; done(nil); }) ]),
         SGroup(@"Import", @[ helium ]) ])];
@@ -16401,7 +16541,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         NSMutableArray *rows = [NSMutableArray array]; for (NSArray *r in g[1]) [rows addObject:SValue(r[0], nil, r[1])];
         [sg addObject:SGroup(g[0], rows)];
     }
-    [S addObject:SSection(@"shortcuts", @"Shortcuts", @"The keyboard does almost everything in Iris.", @"command", sg)];
+    [S addObject:SSection(@"shortcuts", @"Shortcuts", @"Keyboard shortcuts.", @"command", sg)];
 
     // ── Advanced
     NSMutableDictionary *reset = SButton(@"resetSettings", @"Restore default settings", @"Your bookmarks, history, tabs and extensions are kept.", @"Reset…", ^(NSDictionary *a, void (^done)(NSString *)) {
@@ -16413,7 +16553,7 @@ static NSArray *SettingsSchema(VWindow *win) {
         done(@"Settings restored");
     });
     reset[@"confirm"] = @{@"title": @"Restore default settings?", @"text": @"Theme, search engine, privacy, site and download choices go back to their defaults.", @"ok": @"Reset", @"danger": @YES};
-    [S addObject:SSection(@"advanced", @"Advanced", @"For when a site needs convincing, or you're building one.", @"wrench", @[
+    [S addObject:SSection(@"advanced", @"Advanced", @"Developer and compatibility options.", @"wrench", @[
         SGroup(@"Compatibility", @[ SSelect(@"ua", @"Identify Iris as", @"Some sites only work properly for certain browsers. Applies to pages you open next.", @[@"Safari (recommended)", @"Chrome", @"Firefox"], [Defaults() integerForKey:kUserAgent],
                                             ^(NSInteger i) { [Defaults() setInteger:i forKey:kUserAgent]; }) ]),
         SGroup(@"Developers", @[ SValue(@"Web Inspector", @"Right-click any page and choose Inspect Element.", @"On"),
@@ -16438,6 +16578,12 @@ static NSArray *SettingsSchema(VWindow *win) {
                        @"os": os.patchVersion ? [NSString stringWithFormat:@"%ld.%ld.%ld", (long)os.majorVersion, (long)os.minorVersion, (long)os.patchVersion] : [NSString stringWithFormat:@"%ld.%ld", (long)os.majorVersion, (long)os.minorVersion],
                        @"threads": @(NSProcessInfo.processInfo.activeProcessorCount), @"extensions": @(FExtHost.shared.extensions.count), @"rules": @(gRuleCount),
                        @"repo": @"https://github.com/Yyas99/Iris", @"icon": iconURL};
+    about[@"groups"] = @[ SGroup(@"Acknowledgements", @[
+        SNote(@"WebKit", @"Apple Inc. and the WebKit contributors · LGPL 2.1 and BSD licences"),
+        SNote(@"uBlock Origin", @"Raymond Hill and contributors · GPLv3 · its filter lists, page scripts, stand-in scripts and logo"),
+        SNote(@"EasyList and EasyPrivacy", @"The EasyList authors · GPLv3 or CC BY-SA 3.0"),
+        SNote(@"Peter Lowe's blocklist", @"Peter Lowe · pgl.yoyo.org"),
+        SNote(@"SQLite", @"D. Richard Hipp and contributors · public domain") ]) ];
     [S addObject:about];
     return S;
 }
