@@ -249,6 +249,35 @@ static void RoundRect(NSRect r, CGFloat radius, NSColor *fill) {
 static void ShardStroke(NSRect r, CGFloat c, NSColor *color, CGFloat w) {
     NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r, w / 2, w / 2) xRadius:c yRadius:c]; p.lineWidth = w; [color setStroke]; [p stroke];
 }
+// Aperture: Iris's own colours (the loading line), the same whatever accent is chosen. Kept for the moments
+// that are Iris's: progress, where you are, a new build waiting. Everything else stays in your accent.
+static NSColor *ApTeal(void)   { return ThemeIsLight() ? Hex(0x22b3a0) : Hex(0x7fe3d1); }
+static NSColor *ApBlue(void)   { return ThemeIsLight() ? Hex(0x4a78ee) : Hex(0x86a3f7); }
+static NSColor *ApViolet(void) { return ThemeIsLight() ? Hex(0x8c63e6) : Hex(0xb796f5); }
+static NSGradient *ApertureGradient(CGFloat alpha) {
+    return [[NSGradient alloc] initWithColors:@[[ApTeal() colorWithAlphaComponent:alpha], [ApBlue() colorWithAlphaComponent:alpha], [ApViolet() colorWithAlphaComponent:alpha]]];
+}
+static NSColor *ApertureAt(CGFloat t) {   // 0 teal … 0.5 blue … 1 violet
+    t = MAX(0, MIN(1, t));
+    return t < 0.5 ? [ApTeal() blendedColorWithFraction:t * 2 ofColor:ApBlue()] : [ApBlue() blendedColorWithFraction:(t - 0.5) * 2 ofColor:ApViolet()];
+}
+// A rounded outline drawn in the Aperture gradient (the same footprint as ShardStroke).
+static void ApertureStroke(NSRect r, CGFloat c, CGFloat w) {
+    NSBezierPath *ring = [NSBezierPath bezierPathWithRoundedRect:r xRadius:c yRadius:c];
+    [ring appendBezierPath:[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r, w, w) xRadius:MAX(0, c - w) yRadius:MAX(0, c - w)]];
+    ring.windingRule = NSWindingRuleEvenOdd;
+    [ApertureGradient(1) drawInBezierPath:ring angle:-35];
+}
+// A symbol filled with the Aperture gradient instead of one colour.
+static NSImage *ApertureTinted(NSImage *im) {
+    if (!im) return nil;
+    return [NSImage imageWithSize:im.size flipped:NO drawingHandler:^BOOL(NSRect r) {
+        [ApertureGradient(1) drawInRect:r angle:-45];
+        [im drawInRect:r fromRect:NSZeroRect operation:NSCompositingOperationDestinationIn fraction:1];
+        return YES;
+    }];
+}
+static CGFloat gSlowMo = 1;   // dev: stretch Iris's own animations to check them ("slowmo 8" in control.txt)
 // Monolith: the page is one slab; the controls float over it as dark glass.
 static NSColor *MGlass(void) { return ThemeIsLight() ? HexA(0xffffff, 0.92) : HexA(0x0f1013, 0.9); }
 static NSColor *MGlassEdge(void) { return ThemeIsLight() ? HexA(0x000000, 0.09) : HexA(0xffffff, 0.08); }
@@ -475,6 +504,7 @@ static NSURL *StripTracking(NSURL *u) {
 @property (copy) NSString *symbolName;
 @property CGFloat symbolSize, symbolShift;   // shift: moves the symbol sideways (a chip with a count beside it)
 @property (nonatomic) BOOL active, hovered;
+@property BOOL aperture;   // Lens: its glyph takes Iris's colours under the pointer and while open
 + (instancetype)symbol:(NSString *)s size:(CGFloat)pt tip:(NSString *)tip target:(id)t action:(SEL)a;
 @end
 
@@ -2200,7 +2230,8 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
     BOOL on = self.enabled;
     if (on && (self.hovered || self.isHighlighted)) RoundRect(NSInsetRect(self.bounds, 1, 2), 7, self.isHighlighted ? vActive : vHover);
     NSColor *c = !on ? [vDim colorWithAlphaComponent:0.3] : self.active ? vAccent : (self.hovered ? vText : vDim);
-    NSImage *im = Tinted(Symbol(self.symbolName, self.symbolSize ?: 14, NSFontWeightMedium), c);
+    NSImage *im = on && self.aperture && (self.hovered || self.active) ? ApertureTinted(Symbol(self.symbolName, self.symbolSize ?: 14, NSFontWeightSemibold))
+                                                                        : Tinted(Symbol(self.symbolName, self.symbolSize ?: 14, NSFontWeightMedium), c);
     if (im) DrawImage(im, NSOffsetRect(CenterIn(im.size, self.bounds), self.symbolShift, 0));
 }
 @end
@@ -2302,28 +2333,104 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
     if (self.value < 0) return;
     NSRect b = NSInsetRect(self.bounds, (NSWidth(self.bounds) - 22) / 2, (NSHeight(self.bounds) - 22) / 2);
     NSBezierPath *track = [NSBezierPath bezierPathWithOvalInRect:b]; track.lineWidth = 2; [[vLine colorWithAlphaComponent:0.9] setStroke]; [track stroke];
-    NSBezierPath *arc = [NSBezierPath bezierPath]; arc.lineWidth = 2; arc.lineCapStyle = NSLineCapStyleRound;
-    [arc appendBezierPathWithArcWithCenter:NSMakePoint(NSMidX(b), NSMidY(b)) radius:NSWidth(b) / 2 startAngle:90 endAngle:90 - 360 * MAX(0.03, MIN(1, self.value)) clockwise:YES];
-    [vAccent setStroke]; [arc stroke];
+    // the arc in Aperture's colours, teal at the start through blue to violet, drawn as short overlapping steps
+    CGFloat v = MAX(0.03, MIN(1, self.value)), sweep = 360 * v; NSInteger steps = MAX(2, (NSInteger)ceil(sweep / 6));
+    NSPoint mid = NSMakePoint(NSMidX(b), NSMidY(b)); CGFloat rad = NSWidth(b) / 2;
+    for (NSInteger k = 0; k < steps; k++) {
+        CGFloat a0 = 90 - sweep * k / steps, a1 = 90 - sweep * (k + 1) / steps - (k + 1 < steps ? 0.8 : 0);
+        NSBezierPath *seg = [NSBezierPath bezierPath]; seg.lineWidth = 2; seg.lineCapStyle = (k == 0 || k == steps - 1) ? NSLineCapStyleRound : NSLineCapStyleButt;
+        [seg appendBezierPathWithArcWithCenter:mid radius:rad startAngle:a0 endAngle:a1 clockwise:YES];
+        [ApertureAt(v * (k + 0.5) / steps) setStroke]; [seg stroke];
+    }
+}
+@end
+
+static BOOL gUpdateReady, gUpdating;
+static NSString *gUpdateNotes;
+// The pill's colour runs like the loading line: Aperture's teal, blue and violet flowing through it, on the GPU
+// (one gradient twice the pill's width, slid along by one period, forever) so it costs nothing while it waits.
+@interface VPillFlow : NSView
+@property (strong) CAGradientLayer *flow;
+@end
+@implementation VPillFlow
+- (NSView *)hitTest:(NSPoint)p { return nil; }
+- (void)refresh {
+    if (!self.flow) { self.wantsLayer = YES; self.layer.masksToBounds = YES; self.flow = [CAGradientLayer layer]; [self.layer addSublayer:self.flow];
+                      self.flow.startPoint = CGPointMake(0, 0.5); self.flow.endPoint = CGPointMake(1, 0.5); }
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    CGFloat W = NSWidth(self.bounds), H = NSHeight(self.bounds);
+    self.layer.cornerRadius = H / 2;
+    NSArray *cycle = @[(id)ApTeal().CGColor, (id)ApBlue().CGColor, (id)ApViolet().CGColor, (id)ApBlue().CGColor];
+    self.flow.colors = [[cycle arrayByAddingObjectsFromArray:cycle] arrayByAddingObject:(id)ApTeal().CGColor];   // two periods, seamless
+    self.flow.frame = CGRectMake(-W, 0, 2 * W, H);
+    self.layer.opacity = gUpdating ? 0.4 : 1;
+    [CATransaction commit];
+    [self.flow removeAnimationForKey:@"flow"];
+    if (gUpdating || W < 1) return;
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"position.x"];
+    a.fromValue = @(0); a.toValue = @(W);   // the gradient's centre moves one period to the right, then starts over unseen
+    a.duration = 2.6; a.repeatCount = HUGE_VALF; a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+    [self.flow addAnimation:a forKey:@"flow"];
+}
+@end
+// Over the flow: a soft light along the top edge, and the word.
+@interface VPillLabel : NSView
+@end
+@implementation VPillLabel
+- (NSView *)hitTest:(NSPoint)p { return nil; }
+- (void)drawRect:(NSRect)dirty {
+    NSRect r = NSInsetRect(self.bounds, 0.5, 3.5);
+    BOOL light = ThemeIsLight();
+    NSBezierPath *pill = [NSBezierPath bezierPathWithRoundedRect:r xRadius:NSHeight(r) / 2 yRadius:NSHeight(r) / 2];
+    NSGradient *sheen = [[NSGradient alloc] initWithStartingColor:[NSColor colorWithWhite:1 alpha:gUpdating ? 0.08 : light ? 0.22 : 0.3] endingColor:[NSColor colorWithWhite:1 alpha:0]];
+    [sheen drawInBezierPath:pill angle:self.isFlipped ? 90 : -90];
+    NSButton *b = (NSButton *)self.superview; if (b.cell.isHighlighted) { [[NSColor colorWithWhite:0 alpha:0.18] setFill]; [pill fill]; }
+    NSColor *ink = gUpdating ? vText : light ? NSColor.whiteColor : Hex(0x0b0d16);
+    NSDictionary *a = @{NSFontAttributeName: UIFont(11.5, NSFontWeightSemibold), NSForegroundColorAttributeName: ink};
+    NSString *t = gUpdating ? @"Updating" : @"Update";
+    NSSize s = [t sizeWithAttributes:a];
+    [t drawAtPoint:NSMakePoint(round(NSMidX(r) - s.width / 2), round(NSMidY(r) - s.height / 2)) withAttributes:a];
 }
 @end
 
 // A newer build waiting to be switched to (development): the "Update" pill at the far right.
-static BOOL gUpdateReady, gUpdating;
-static NSString *gUpdateNotes;
 @interface VPillButton : NSButton
+@property (strong) VPillFlow *flowView;
+@property (strong) VPillLabel *labelView;
 @end
 @implementation VPillButton
 - (BOOL)mouseDownCanMoveWindow { return NO; }
+- (void)ensureParts {
+    if (self.flowView) return;
+    self.flowView = [[VPillFlow alloc] initWithFrame:NSZeroRect]; [self addSubview:self.flowView];
+    self.labelView = [[VPillLabel alloc] initWithFrame:NSZeroRect]; [self addSubview:self.labelView];
+}
+- (void)setFrameSize:(NSSize)s {
+    [super setFrameSize:s];
+    [self ensureParts];
+    self.labelView.frame = self.bounds;
+    self.flowView.frame = NSInsetRect(self.bounds, 0.5, 3.5);
+    [self.flowView refresh]; self.labelView.needsDisplay = YES;
+}
+- (void)setHidden:(BOOL)h { BOOL was = self.isHidden; [super setHidden:h]; if (was && !h) [self.flowView refresh]; }
+- (void)highlight:(BOOL)f { [super highlight:f]; self.labelView.needsDisplay = YES; }
 - (void)drawRect:(NSRect)dirty {
+    // under the flow: its blue glow, so the pill sits in a little light of its own
+    [self ensureParts];
     NSRect r = NSInsetRect(self.bounds, 0.5, 3.5);
-    BOOL down = self.cell.isHighlighted;
-    NSColor *fill = gUpdating ? [vText colorWithAlphaComponent:0.25] : [vText colorWithAlphaComponent:down ? 0.75 : 0.92];
-    RoundRect(r, NSHeight(r) / 2, fill);
-    NSDictionary *a = @{NSFontAttributeName: UIFont(11.5, NSFontWeightSemibold), NSForegroundColorAttributeName: gUpdating ? vText : vBg};
-    NSString *t = gUpdating ? @"Updating" : @"Update";
-    NSSize s = [t sizeWithAttributes:a];
-    [t drawAtPoint:NSMakePoint(round(NSMidX(r) - s.width / 2), round(NSMidY(r) - s.height / 2)) withAttributes:a];
+    if (!gUpdating) {
+        [NSGraphicsContext saveGraphicsState];
+        NSShadow *glow = [NSShadow new]; glow.shadowBlurRadius = 6; glow.shadowOffset = NSZeroSize;
+        glow.shadowColor = [ApBlue() colorWithAlphaComponent:ThemeIsLight() ? 0.35 : 0.5]; [glow set];
+        RoundRect(r, NSHeight(r) / 2, ApBlue());
+        [NSGraphicsContext restoreGraphicsState];
+    }
+    static BOOL lastUpdating; static NSInteger lastLight = -1;
+    if (lastUpdating != gUpdating || lastLight != ThemeIsLight()) {   // state or theme changed: recolour the flow (not on every redraw)
+        lastUpdating = gUpdating; lastLight = ThemeIsLight();
+        dispatch_async(dispatch_get_main_queue(), ^{ [self.flowView refresh]; });
+    }
+    self.labelView.needsDisplay = YES;
 }
 @end
 
@@ -2494,7 +2601,7 @@ static NSString *gUpdateNotes;
     x += pillW + 6;
     if (dl) { self.dlRect = NSMakeRect(x, y, 28, 28); self.dlBtn.frame = self.dlRect; self.dlBtn.symbolSize = 11.5; x += 34; } else self.dlRect = NSZeroRect;
     self.lensRect = NSMakeRect(W - 12 - 28, y, 28, 28); self.menuBtn.frame = self.lensRect;
-    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
+    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.aperture = YES; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
     self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);   // Lens: the browser; the shield: blocking; the lock: this site
     self.avatarRect = NSZeroRect; self.profileBtn.hidden = YES;   // your profile lives in Lens
     (void)ow;
@@ -5440,7 +5547,15 @@ static NSString *ErrorPage(NSString *title, NSString *heading, NSString *body, N
         ".ic{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;background:var(--card);border:1px solid var(--border);font-size:22px}"
         ".acts{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0}.acts a{padding:8px 16px;border-radius:999px;text-decoration:none;font-weight:600;font-size:13.5px;border:1px solid var(--border);color:var(--text);background:var(--pill)}"
         ".acts a.primary{background:var(--accent);color:var(--onaccent);border-color:transparent}details{color:var(--faint);font-size:12.5px}summary{cursor:pointer;color:var(--dim)}"
-        "details a{color:var(--accent)}code{font:12px ui-monospace,Menlo;color:var(--faint);word-break:break-all}</style><main>%@<h1>%@</h1>%@<div class=acts>%@</div>%@</main>",
+        "details a{color:var(--accent)}code{font:12px ui-monospace,Menlo;color:var(--faint);word-break:break-all}"
+        // the loading line, stopped part-way: Aperture's colours, breathing slowly, with a faint glow of them behind the page
+        ".ap{position:relative;height:3px;width:44%%;margin:0 0 34px;border-radius:3px;background:linear-gradient(90deg,var(--ap-t),var(--ap-b) 55%%,var(--ap-v));"
+        "box-shadow:0 0 16px color-mix(in srgb,var(--ap-b) 50%%,transparent);transform-origin:left;animation:apb 3.4s ease-in-out infinite}"
+        ".ap::after{content:'';position:absolute;right:-1px;top:50%%;width:7px;height:7px;margin-top:-3.5px;border-radius:50%%;background:#fff;box-shadow:0 0 10px 2px var(--ap-v);opacity:.85}"
+        "@keyframes apb{50%%{opacity:.6;transform:scaleX(.94)}}"
+        ".glow{position:fixed;left:-10vw;right:-10vw;top:-30vh;height:70vh;z-index:-1;pointer-events:none;filter:blur(80px);opacity:var(--ap-glow);"
+        "background:radial-gradient(40%% 50%% at 30%% 50%%,var(--ap-t),transparent),radial-gradient(40%% 50%% at 55%% 40%%,var(--ap-b),transparent),radial-gradient(40%% 50%% at 78%% 55%%,var(--ap-v),transparent)}"
+        "@media (prefers-reduced-motion:reduce){.ap{animation:none}}</style><div class=glow></div><main><div class=ap></div>%@<h1>%@</h1>%@<div class=acts>%@</div>%@</main>",
         ErrEsc(title), ThemeCSS(), @"", ErrEsc(heading), body, actions, detail ?: @""];
 }
 
@@ -7678,20 +7793,23 @@ static NSString *ThemeCSS(void) {
             ThemeIsLight() ? @"light" : @"dark", CSSColor(vContentBg), CSSColor(vCard), CSSColor(vPill), CSSColor(vText), CSSColor(vDim), CSSColor(vFaint),
             CSSColor(vSep), CSSColor(vHover), CSSColor(vActive), CSSColor(vAccent), CSSColor(vBorder), CSSColor(vToast), CSSColor(vBadgeText), CSSColor(vEmber),
             CSSColor(AccentChosen() ? vAccent : vText), AccentChosen() ? @"#fff" : CSSColor(vContentBg)];
+    // Aperture's colours (the loading line) for the section marker, whatever accent is chosen
+    vars = [vars stringByAppendingString:ThemeIsLight() ? @":root{--ap-t:#22b3a0;--ap-b:#4a78ee;--ap-v:#8c63e6;--ap-glow:.14}" : @":root{--ap-t:#7fe3d1;--ap-b:#86a3f7;--ap-v:#b796f5;--ap-glow:.22}"];
     return [vars stringByAppendingString:@" .btn,.search input,.field input,.field select,.acts a,.bar button,.bar a,.selbar{border-radius:8px!important}"
         ".list,.menu,dialog,.pop{border-radius:12px!important}"
         ".search input:focus,.field input:focus,.field select:focus{box-shadow:0 0 0 3px color-mix(in srgb,var(--pick) 18%,transparent)!important;border-color:color-mix(in srgb,var(--pick) 60%,transparent)!important}"
         ".btn.primary,.acts a.primary{background:var(--pick)!important;color:var(--onpick)!important;border-color:transparent!important}"
         ".btn.danger{background:var(--text)!important;color:var(--bg)!important;border-color:transparent!important}"
         ".sw:checked{background:var(--pick)!important}.sws button.on{border-color:var(--pick)!important}"   // your accent: switches that are on, the chosen swatch
-        "nav a.on{box-shadow:inset 3px 0 0 var(--pick)}"                                              // the section you're in
+        "nav a.on{position:relative}"                                                                 // the section you're in: an Aperture bar
+        "nav a.on::before{content:'';position:absolute;left:0;top:7px;bottom:7px;width:3px;border-radius:3px;background:linear-gradient(180deg,var(--ap-t),var(--ap-b) 50%,var(--ap-v));box-shadow:0 0 8px color-mix(in srgb,var(--ap-b) 60%,transparent)}"
         "input[type=checkbox],input[type=radio],input[type=range],progress{accent-color:var(--pick)}"
         "::selection{background:color-mix(in srgb,var(--pick) 30%,transparent)}"
         ".menu button:hover{background:var(--active)!important;color:var(--text)!important}"
         "mark{background:color-mix(in srgb,var(--text) 18%,transparent)!important;color:inherit!important}"
         "h1{font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;font-weight:650;letter-spacing:-.022em}"
         "h2{letter-spacing:.02em}"
-        ".prog{background:var(--dim)!important}.search svg{z-index:2}"];
+        ".prog{background:linear-gradient(90deg,var(--ap-t),var(--ap-b),var(--ap-v))!important}.search svg{z-index:2}"];
 }
 
 static NSString *InternalPagePath(NSString *name) {
@@ -8442,7 +8560,8 @@ static const CGFloat kRowPitch = 88 + 26 + 10;   // vertical: a card, its line u
         [title drawInRect:NSMakeRect(tx, NSMaxY(c) - 23, NSMaxX(c) - tx - 8, 16) withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightMedium), NSForegroundColorAttributeName: NSColor.whiteColor, NSParagraphStyleAttributeName: ps}];
         if (alpha < 1) { [[vBg colorWithAlphaComponent:1 - alpha] setFill]; NSRectFillUsingOperation(c, NSCompositingOperationSourceOver); }
         [NSGraphicsContext restoreGraphicsState];
-        if (cur) ShardStroke(NSInsetRect(c, -3, -3), 14, accent, 1.5);
+        if (cur && !w.isPrivate) ApertureStroke(NSInsetRect(c, -3, -3), 14, 1.75);
+        else if (cur) ShardStroke(NSInsetRect(c, -3, -3), 14, accent, 1.5);
         else if (kb) ShardStroke(NSInsetRect(c, -3, -3), 14, [accent colorWithAlphaComponent:0.7], 1.5);
         else if (hov) ShardStroke(NSInsetRect(c, -3, -3), 14, [vText colorWithAlphaComponent:0.35], 1);
         else ShardStroke(c, 12, MGlassEdge(), 1);
@@ -8618,7 +8737,7 @@ static const CGFloat kRowPitch = 88 + 26 + 10;   // vertical: a card, its line u
     for (NSInteger i = 0; i < (NSInteger)ps.count && i < [self cols] * 3; i++) {
         VTab *t = ps[(NSUInteger)i]; NSRect r = [self tile:i];
         RoundRect(r, 14, MCard());
-        if (t == w.current) ShardStroke(NSInsetRect(r, -3, -3), 16, w.isPrivate ? vText : ProfileColor(w.profile), 1.5);
+        if (t == w.current) { if (w.isPrivate) ShardStroke(NSInsetRect(r, -3, -3), 16, vText, 1.5); else ApertureStroke(NSInsetRect(r, -3, -3), 16, 1.75); }
         else if (i == self.hover) ShardStroke(NSInsetRect(r, -3, -3), 16, [vText colorWithAlphaComponent:0.35], 1);
         ShelfIcon(t, NSMakeRect(NSMidX(r) - 14, NSMidY(r) - 14, 28, 28), 9);
         NSString *b = ShelfBadge(t);
@@ -8938,7 +9057,9 @@ static const CFTimeInterval kFlashLen = 1.35;
         CGFloat wd = cur ? curW : dot;
         NSColor *c = cur ? pick : [Hex(0x8a8c93) colorWithAlphaComponent:(t.audible && !t.muted) ? 0.95 : (self.hover ? 0.8 : 0.55 + 0.25 * ease)];
         if (e > 0.001 && i == n - 1 && !cur) c = [c blendedColorWithFraction:e ofColor:vEmber] ?: c;   // the new one, at the right end
-        RoundRect(NSMakeRect(x, y, wd, dot), dot / 2, c);
+        NSRect pr = NSMakeRect(x, y, wd, dot);
+        if (cur && !w.isPrivate) [ApertureGradient(1) drawInBezierPath:[NSBezierPath bezierPathWithRoundedRect:pr xRadius:dot / 2 yRadius:dot / 2] angle:0];
+        else RoundRect(pr, dot / 2, c);
         x += wd + gap;
     }
     if (e > 0.001) {   // the spark heads right, where the new tab is
@@ -9291,6 +9412,7 @@ typedef NS_ENUM(NSInteger, VPKind) { VPLabel, VPRow, VPToggle, VPChip, VPTile, V
 @property (strong) NSMutableArray<VPItem *> *items;
 @property NSInteger hover;
 @property BOOL shown;
+@property CGFloat irisX;   // where the button that opened it sits, across the panel: it opens from there like an iris (<0: just fades in)
 - (void)build;   // subclasses: fill the items and set the height
 - (VPItem *)add:(VPKind)k rect:(NSRect)r title:(NSString *)t;
 - (void)present:(NSRect)frame;
@@ -9319,7 +9441,7 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
 - (void)scrollWheel:(NSEvent *)e {}   // the page behind a panel stays put
 - (instancetype)initWithFrame:(NSRect)r {
     if (!(self = [super initWithFrame:r])) return nil;
-    self.items = [NSMutableArray array]; self.hover = -1; self.hidden = YES;
+    self.items = [NSMutableArray array]; self.hover = -1; self.hidden = YES; self.irisX = -1;
     self.wantsLayer = YES;
     self.layer.shadowColor = NSColor.blackColor.CGColor; self.layer.shadowOpacity = ThemeIsLight() ? 0.14 : 0.45;
     self.layer.shadowRadius = 30; self.layer.shadowOffset = CGSizeMake(0, -14);
@@ -9365,14 +9487,41 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
     [CATransaction commit];
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!self.shown) return;
+        if (self.irisX >= 0 && self.layer) [self irisOpen:frame.size];
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
-            ctx.duration = 0.14; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            ctx.duration = 0.14 * gSlowMo; ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
             self.animator.frame = frame; self.animator.alphaValue = 1;
         }];
     });
 }
+// Opening like an aperture: a circle widens from the button's side of the panel until it uncovers all of it,
+// then the panel's shadow settles in underneath (a mask would have clipped it while the circle grew).
+- (void)irisOpen:(NSSize)size {
+    CGFloat W = size.width, H = size.height, cx = MAX(0, MIN(W, self.irisX));
+    BOOL down = NO; for (CALayer *l = self.layer; l; l = l.superlayer) down ^= l.geometryFlipped;   // which way is up for the layer
+    CGFloat cy = down ? 0 : H, R = hypot(MAX(cx, W - cx), H) + 6;
+    CAShapeLayer *m = [CAShapeLayer layer]; m.frame = CGRectMake(0, 0, W, H);
+    CGPathRef from = CGPathCreateWithEllipseInRect(CGRectMake(cx - 10, cy - 10, 20, 20), NULL);
+    CGPathRef to = CGPathCreateWithEllipseInRect(CGRectMake(cx - R, cy - R, 2 * R, 2 * R), NULL);
+    m.path = to; self.layer.mask = m;
+    float shadow = self.layer.shadowOpacity;
+    [CATransaction begin];
+    [CATransaction setCompletionBlock:^{
+        if (self.layer.mask != m) return;
+        self.layer.mask = nil;
+        CABasicAnimation *s = [CABasicAnimation animationWithKeyPath:@"shadowOpacity"]; s.fromValue = @0; s.toValue = @(shadow); s.duration = 0.16 * gSlowMo;
+        [self.layer addAnimation:s forKey:@"shadowIn"];
+    }];
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"path"];
+    a.fromValue = (__bridge id)from; a.toValue = (__bridge id)to; a.duration = 0.3 * gSlowMo;
+    a.timingFunction = [CAMediaTimingFunction functionWithControlPoints:0.22 :0.9 :0.25 :1];
+    [m addAnimation:a forKey:@"iris"];
+    [CATransaction commit];
+    CGPathRelease(from); CGPathRelease(to);
+}
 - (void)dismiss {
     if (!self.shown) return;
+    if (self.layer.mask) self.layer.mask = nil;
     self.shown = NO; self.hover = -1;
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.1; self.animator.alphaValue = 0; }
                        completionHandler:^{ if (!self.shown) self.hidden = YES; }];
@@ -9473,8 +9622,11 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
             case VPSep: { [[vText colorWithAlphaComponent:0.06] setFill]; NSRectFillUsingOperation(r, NSCompositingOperationSourceOver); break; }
             case VPHeader: {
                 NSRect ic = NSMakeRect(NSMinX(r), NSMidY(r) - 19, 38, 38);
-                RoundRect(ic, 10, ThemeIsLight() ? HexA(0x000000, 0.06) : Hex(0x1f2126));
-                if (it.icon) DrawImage(it.icon, NSInsetRect(ic, 10, 10)); else DrawImage(PanelLetter(it.title, 38), ic);
+                if (it.on && it.icon) DrawImage(it.icon, ic);   // a profile's avatar fills its own circle
+                else {
+                    RoundRect(ic, 10, ThemeIsLight() ? HexA(0x000000, 0.06) : Hex(0x1f2126));
+                    if (it.icon) DrawImage(it.icon, NSInsetRect(ic, 10, 10)); else DrawImage(PanelLetter(it.title, 38), ic);
+                }
                 [it.title drawInRect:NSMakeRect(NSMaxX(ic) + 12, NSMinY(r) + 1, NSWidth(r) - 50, 18) withAttributes:@{NSFontAttributeName: UIFont(14, NSFontWeightSemibold), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: tr}];
                 [it.meta drawInRect:NSMakeRect(NSMaxX(ic) + 12, NSMinY(r) + 22, NSWidth(r) - 50, 16) withAttributes:@{NSFontAttributeName: MMono(11.5, NSFontWeightRegular), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: tr}];
                 break;
@@ -9592,16 +9744,19 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     }
 
     // ---- Lens: the browser (the page's own settings live behind the lock and the shield) ----
-    VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw - 128, 40) title:@"Iris"];
-    h.icon = Tinted(Symbol(@"camera.aperture", 16, NSFontWeightMedium), vText);
-    h.meta = w.isPrivate ? @"Private window" : [NSString stringWithFormat:@"%lu tabs in this window", (unsigned long)w.tabs.count];
-    VPItem *av = [self add:VPAvatar rect:NSMakeRect(W - P - 118, y + 5, 118, 30) title:w.isPrivate ? @"Private" : ProfileName(w.profile)];
-    av.icon = w.isPrivate ? Tinted(Symbol(@"eye.slash", 14, NSFontWeightMedium), vText) : ProfileAvatar(w.profile, ProfileName(w.profile), 22);
-    if (!w.isPrivate) av.act = ^(NSEvent *e, NSRect r) {
+    // the top of Lens is you: the profile this window belongs to, and a way to change it
+    void (^profiles)(NSEvent *, NSRect) = ^(NSEvent *e, NSRect r) {
         NSView *root = ww.window.contentView;
         NSRect rr = [root convertRect:r fromView:nil];
         PopMenu([ww profilesMenu], NSMakePoint(NSMinX(rr), NSMaxY(rr) + 4), root);
     };
+    VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, w.isPrivate ? cw : cw - 140, 40) title:w.isPrivate ? @"Private window" : ProfileName(w.profile)];
+    if (w.isPrivate) { h.icon = Tinted(Symbol(@"eye.slash", 16, NSFontWeightMedium), vText); h.meta = @"Nothing is kept when it closes"; }
+    else {
+        h.icon = ProfileAvatar(w.profile, ProfileName(w.profile), 38); h.on = YES; h.meta = @"Profile";
+        VPItem *ch = [self add:VPPill rect:NSMakeRect(W - P - 132, y + 6, 132, 28) title:@"Change profile"]; ch.symbol = @"person.2";
+        ch.act = profiles;
+    }
     y += 40 + 16;
 
     NSArray *exts = FExtHost.shared.extensions;
@@ -9887,6 +10042,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     CGFloat px = MAX(8, MIN(NSWidth(root.bounds) - W - 8, round(NSMidX(lr) - W / 2)));
     NSRect f = NSMakeRect(px, NSMaxY([root convertRect:tb.pill fromView:tb]) + 8, W, H);
     if (p.shown) { p.frame = f; PanelShadow(p); p.needsDisplay = YES; return; }
+    p.irisX = NSMidX(lr) - px;   // it opens from the button you pressed
     [p present:f];
 }
 - (void)toggleLens:(id)s { [self openLensMode:0 under:self.toolbar.lensRect]; }
@@ -12208,6 +12364,19 @@ static void CtlOut(NSString *s) {
             [Defaults() setInteger:MAX(0, MIN(2, arg.integerValue)) forKey:kShelfSide];
             for (VWindow *x in gWindows) { [x showShelf:NO]; [(VTabShelf *)x.shelf reload]; [x layout]; x.shelfHandle.needsDisplay = YES; [x.shelfHandle updateTrackingAreas]; }
         }
+        else if ([cmd isEqualToString:@"ringshot"]) {   // dev: the downloads ring at a value, drawn large to shots/ring.png
+            VRing *r = [[VRing alloc] initWithFrame:NSMakeRect(0, 0, 30, 28)]; r.value = arg.doubleValue;
+            NSImage *im = [NSImage imageWithSize:NSMakeSize(120, 112) flipped:NO drawingHandler:^BOOL(NSRect rr) {
+                [vBg setFill]; NSRectFill(rr);
+                NSAffineTransform *t = [NSAffineTransform transform]; [t scaleBy:4]; [t concat]; [r drawRect:r.bounds]; return YES; }];
+            NSString *dir = [CtlDir() stringByAppendingPathComponent:@"shots"];
+            [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithData:im.TIFFRepresentation];
+            [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[dir stringByAppendingPathComponent:@"ring.png"] atomically:YES];
+            CtlOut(@"ringshot");
+        }
+        else if ([cmd isEqualToString:@"slowmo"]) gSlowMo = MAX(1, MIN(20, arg.doubleValue));   // dev: "slowmo 8" stretches panel animations, "slowmo 1" back
+        else if ([cmd isEqualToString:@"hover"]) { VButton *b = self.toolbar.menuBtn; b.hovered = [arg isEqualToString:@"lens"]; b.needsDisplay = YES; }   // dev: Lens as if under the pointer
         else if ([cmd isEqualToString:@"loadline"]) {   // dev: hold the loading line at a point ("loadline 0.55"), or "loadline off"
             VLoadLine *ll = (VLoadLine *)self.loadLine;
             if ([arg isEqualToString:@"off"]) [ll loading:NO progress:1]; else [ll loading:YES progress:arg.doubleValue];
