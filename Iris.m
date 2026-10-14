@@ -504,6 +504,9 @@ static NSURL *StripTracking(NSURL *u) {
 @property (copy) NSString *symbolName;
 @property CGFloat symbolSize, symbolShift;   // shift: moves the symbol sideways (a chip with a count beside it)
 @property (nonatomic) BOOL active, hovered;
+@property (copy) NSString *badge;   // a count drawn inside the button itself (the shield's blocked number), so hovering never covers it
+@property BOOL bare;                // a badge sitting on its own glass capsule: no chip behind it
+@property BOOL round;               // hover in the button's own shape (a circle or capsule) instead of a square-ish highlight
 @property BOOL aperture;   // Lens: its glyph takes Iris's colours under the pointer and while open
 + (instancetype)symbol:(NSString *)s size:(CGFloat)pt tip:(NSString *)tip target:(id)t action:(SEL)a;
 @end
@@ -2227,12 +2230,21 @@ static void BeginURLDrag(NSView<NSDraggingSource> *v, NSEvent *e, NSString *url,
 - (void)mouseExited:(NSEvent *)e { self.hovered = NO; self.needsDisplay = YES; }
 - (void)setActive:(BOOL)a { _active = a; self.needsDisplay = YES; }
 - (void)drawRect:(NSRect)r {
-    BOOL on = self.enabled;
-    if (on && (self.hovered || self.isHighlighted)) RoundRect(NSInsetRect(self.bounds, 1, 2), 7, self.isHighlighted ? vActive : vHover);
+    BOOL on = self.enabled, hot = on && (self.hovered || self.isHighlighted), chip = self.badge.length > 0;
+    // the highlight follows the shape the button sits in: a circle or capsule fills it, a chip with a count stays a chip
+    NSRect hb = chip ? (self.bare ? NSInsetRect(self.bounds, 1, 1) : self.bounds) : self.round ? NSInsetRect(self.bounds, 1, 1) : NSInsetRect(self.bounds, 1, 2);
+    CGFloat rad = chip || self.round ? NSHeight(hb) / 2 : 7;
+    if (chip && !hot && !self.bare) RoundRect(hb, rad, MChip());
+    if (hot) RoundRect(hb, rad, self.isHighlighted ? vActive : vHover);
     NSColor *c = !on ? [vDim colorWithAlphaComponent:0.3] : self.active ? vAccent : (self.hovered ? vText : vDim);
     NSImage *im = on && self.aperture && (self.hovered || self.active) ? ApertureTinted(Symbol(self.symbolName, self.symbolSize ?: 14, NSFontWeightSemibold))
                                                                         : Tinted(Symbol(self.symbolName, self.symbolSize ?: 14, NSFontWeightMedium), c);
     if (im) DrawImage(im, NSOffsetRect(CenterIn(im.size, self.bounds), self.symbolShift, 0));
+    if (chip) {
+        NSDictionary *a = @{NSFontAttributeName: MMono(11, NSFontWeightMedium), NSForegroundColorAttributeName: hot ? vText : vDim};
+        NSSize s = [self.badge sizeWithAttributes:a];
+        [self.badge drawAtPoint:NSMakePoint(NSMinX(self.bounds) + 23, round(NSMidY(self.bounds) - s.height / 2)) withAttributes:a];
+    }
 }
 @end
 
@@ -2561,57 +2573,70 @@ static NSString *gUpdateNotes;
 }
 - (NSView *)extensionButtonFor:(NSString *)ident { for (NSButton *b in self.extBtns) if ([b.identifier isEqualToString:ident]) return b; return nil; }
 
-// Monolith: back/forward, the address, Lens and your profile float over the top of the page as capsules.
+// Monolith: the controls float over the top of the page as three groups, by what they do.
+//   left:   moving through the page's history: back, forward, reload (home and new tab if you add them)
+//   centre: where you are: the lock, the address, the star (and picture in picture, reader, share when they apply)
+//   right:  the browser: blocking with its count, downloads while active, a waiting update, pinned extensions, Lens
 // Everything between them belongs to the page (clicks pass straight through).
+- (NSString *)shieldCount { return self.blocked > 0 ? (self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked]) : @""; }
+- (CGFloat)shieldWidthFor:(NSString *)n { return n.length ? 23 + ceil([n sizeWithAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium)}].width) + 11 : 28; }
 - (void)layoutCapsule {
     CGFloat W = NSWidth(self.bounds), y = 4;   // slim: 28-point capsules in a 36-point band
-    VWindow *ow = WinFor(self);
     self.sideBtn.hidden = YES; self.extMenuBtn.hidden = YES;   // no sidebar any more; extensions live in Lens
-    // the left capsule: whichever of back, forward, home and new tab you've chosen
     NSMutableArray *navBtns = [NSMutableArray array];
-    for (NSArray *b in @[@[@"back", self.backBtn], @[@"forward", self.fwdBtn], @[@"home", self.homeBtn], @[@"newtab", self.addTabBtn]]) {
+    for (NSArray *b in @[@[@"back", self.backBtn], @[@"forward", self.fwdBtn], @[@"reload", self.reloadBtn], @[@"home", self.homeBtn], @[@"newtab", self.addTabBtn]]) {
         VButton *v = b[1]; v.hidden = !ToolbarShows(b[0]);
-        if (!v.hidden) { [navBtns addObject:v]; v.symbolSize = 12.5; }
+        if (!v.hidden) { [navBtns addObject:v]; v.symbolSize = v == self.reloadBtn ? 12 : 12.5; }
     }
     self.readerBtn.hidden = !ToolbarShows(@"reader"); self.shareBtn.hidden = !ToolbarShows(@"share");
-    self.reloadBtn.hidden = !ToolbarShows(@"reload");
     self.privateBadge = NSZeroRect; self.profileRect = NSZeroRect;
-    BOOL dl = VDownloads.shared.worthShowing || ToolbarShows(@"dlalways");
-    self.dlBtn.hidden = !dl;
+    self.avatarRect = NSZeroRect; self.profileBtn.hidden = YES;   // your profile lives in Lens
+    for (VButton *b in @[self.reloadBtn, self.shieldBtn, self.shareBtn, self.readerBtn, self.pipBtn, self.starBtn, self.infoBtn, self.menuBtn, self.dlBtn, self.backBtn, self.fwdBtn, self.homeBtn, self.addTabBtn]) b.round = YES;
+
+    // the right group, laid out from the corner inward
+    CGFloat r = W - 12;
+    self.lensRect = NSMakeRect(r - 28, y, 28, 28); self.menuBtn.frame = self.lensRect; r -= 28 + 6;
+    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.aperture = YES; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
+    self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);   // Lens: the browser; the shield: blocking; the lock: this site
     NSMutableArray<NSButton *> *exts = [NSMutableArray array];
     for (NSButton *b in self.extBtns) { b.hidden = !ExtensionPinned(b.identifier); if (!b.hidden) [exts addObject:b]; }
-    CGFloat extW = exts.count ? 6 + exts.count * 28 : 0;   // pinned extensions: their own capsule, left of Lens
-    self.extRect = extW ? NSMakeRect(W - 12 - 28 - 6 - extW, y, extW, 28) : NSZeroRect;
+    CGFloat extW = exts.count ? 6 + exts.count * 28 : 0;
+    if (extW) { self.extRect = NSMakeRect(r - extW, y, extW, 28); r -= extW + 6; } else self.extRect = NSZeroRect;
     for (NSUInteger i = 0; i < exts.count; i++) exts[i].frame = NSMakeRect(NSMinX(self.extRect) + 3 + i * 28, y + 5, 28, 18);
-    CGFloat upW = gUpdateReady ? (gUpdating ? 78 : 64) : 0;
+    self.updateBtn.hidden = !gUpdateReady;
+    if (gUpdateReady) {
+        CGFloat upW = gUpdating ? 78 : 64;
+        self.updateBtn.frame = NSMakeRect(r - upW, y + 2, upW, 24); r -= upW + 6;
+        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Iris is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Iris is ready: click to switch to it (your tabs come back).";
+        self.updateBtn.needsDisplay = YES;
+    }
+    BOOL dl = VDownloads.shared.worthShowing || ToolbarShows(@"dlalways");
+    self.dlBtn.hidden = !dl;
+    if (dl) { self.dlRect = NSMakeRect(r - 28, y, 28, 28); self.dlBtn.frame = self.dlRect; self.dlBtn.symbolSize = 11.5; r -= 28 + 6; } else self.dlRect = NSZeroRect;
+    self.shieldBtn.hidden = !ToolbarShows(@"shield");
+    if (!self.shieldBtn.hidden) {
+        NSString *n = [self shieldCount]; CGFloat sw = [self shieldWidthFor:n];
+        self.shieldRect = NSMakeRect(r - sw, y, sw, 28); r -= sw + 6;
+        self.shieldBtn.frame = self.shieldRect; self.shieldBtn.symbolSize = 11.5; self.shieldBtn.bare = YES;
+        self.shieldBtn.symbolShift = n.length ? round(14 - sw / 2) : 0;
+        if (![self.shieldBtn.badge ?: @"" isEqualToString:n]) self.shieldBtn.badge = n;
+        self.shieldBtn.needsDisplay = YES;
+    } else self.shieldRect = NSZeroRect;
+    CGFloat rightEdge = r;   // the left and centre groups stay clear of this
+
+    // the left and centre groups, centred in the window (and pushed left if the right group needs the room)
     CGFloat navW = navBtns.count ? 6 + navBtns.count * 29 : 0;
-    CGFloat fixed = (navW ? navW + 6 : 0) + (dl ? 34 : 0) + (upW > 0 ? upW + 6 : 0);
     NSInteger widthMode = [Defaults() integerForKey:kAddrWidth];   // Full, Medium, Compact
     CGFloat maxPill = widthMode == 2 ? 420 : widthMode == 1 ? 560 : 720;
-    CGFloat avail = W - self.leftInset - 8 - 44 - (extW ? extW + 6 : 0);   // Lens keeps the far right corner, extensions sit beside it
-    CGFloat pillW = MAX(220, MIN(maxPill, avail - fixed));
-    CGFloat total = fixed + pillW;
-    CGFloat x = MAX(self.leftInset, round((W - total) / 2));
-    if (extW) x = MAX(self.leftInset, MIN(x, NSMinX(self.extRect) - 8 - total));   // never under the extensions
+    CGFloat avail = rightEdge - self.leftInset - 8 - (navW ? navW + 6 : 0);
+    CGFloat pillW = MAX(220, MIN(maxPill, avail));
+    CGFloat total = (navW ? navW + 6 : 0) + pillW;
+    CGFloat x = MAX(self.leftInset, MIN(round((W - total) / 2), rightEdge - total));
     self.navRect = navW ? NSMakeRect(x, y, navW, 28) : NSZeroRect;
     for (NSUInteger i = 0; i < navBtns.count; i++) ((NSView *)navBtns[i]).frame = NSMakeRect(x + 3 + i * 29, y, 29, 28);
     if (navW) x += navW + 6;
     self.pill = NSMakeRect(x, y, pillW, 28);
     self.infoBtn.frame = NSMakeRect(x + 7, y + 3, 22, 22);
-    x += pillW + 6;
-    if (dl) { self.dlRect = NSMakeRect(x, y, 28, 28); self.dlBtn.frame = self.dlRect; self.dlBtn.symbolSize = 11.5; x += 34; } else self.dlRect = NSZeroRect;
-    self.lensRect = NSMakeRect(W - 12 - 28, y, 28, 28); self.menuBtn.frame = self.lensRect;
-    self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.aperture = YES; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
-    self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);   // Lens: the browser; the shield: blocking; the lock: this site
-    self.avatarRect = NSZeroRect; self.profileBtn.hidden = YES;   // your profile lives in Lens
-    (void)ow;
-    self.updateBtn.hidden = !gUpdateReady;
-    if (gUpdateReady) {
-        self.updateBtn.frame = NSMakeRect(x, y + 2, upW, 24);
-        self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Iris is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Iris is ready: click to switch to it (your tabs come back).";
-        self.updateBtn.needsDisplay = YES;
-    }
-    self.shieldBtn.hidden = !ToolbarShows(@"shield");
     [self placePillButtons];
     self.needsDisplay = YES;
 }
@@ -2619,7 +2644,7 @@ static NSString *gUpdateNotes;
     if (!self.capsule || self.hidden) return [super hitTest:p];
     NSPoint q = [self convertPoint:p fromView:self.superview];
     NSRect up = self.updateBtn.hidden ? NSZeroRect : self.updateBtn.frame;
-    for (NSValue *v in @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill], [NSValue valueWithRect:self.dlRect], [NSValue valueWithRect:self.lensRect], [NSValue valueWithRect:self.avatarRect], [NSValue valueWithRect:self.extRect], [NSValue valueWithRect:up]])
+    for (NSValue *v in @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill], [NSValue valueWithRect:self.dlRect], [NSValue valueWithRect:self.lensRect], [NSValue valueWithRect:self.avatarRect], [NSValue valueWithRect:self.extRect], [NSValue valueWithRect:self.shieldRect], [NSValue valueWithRect:up]])
         if (NSPointInRect(q, v.rectValue)) return [super hitTest:p];
     return nil;   // the page underneath gets it
 }
@@ -2687,15 +2712,12 @@ static NSString *gUpdateNotes;
 // the right end of the address bar: the star, and the picture-in-picture button when the page has a video
 - (void)placePillButtons {
     if (self.capsule) {
+        if (!self.shieldBtn.hidden) {   // the count changed width: lay the right group out again
+            NSString *n = [self shieldCount];
+            if (fabs([self shieldWidthFor:n] - NSWidth(self.shieldRect)) > 0.5) { [self layoutCapsule]; return; }
+            if (![self.shieldBtn.badge ?: @"" isEqualToString:n]) { self.shieldBtn.badge = n; self.shieldBtn.needsDisplay = YES; }
+        }
         CGFloat y = NSMinY(self.pill), r = NSMaxX(self.pill) - 6;
-        if (!self.reloadBtn.hidden) { self.reloadBtn.frame = NSMakeRect(r - 26, y, 26, 28); self.reloadBtn.symbolSize = 11.5; r -= 28; }
-        if (!self.shieldBtn.hidden) {
-            NSString *n = self.blocked > 0 ? (self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked]) : @"";
-            CGFloat sw = n.length ? 24 + ceil([n sizeWithAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium)}].width) + 9 : 26;
-            self.shieldRect = NSMakeRect(r - sw, y + 3, sw, 22);
-            self.shieldBtn.frame = self.shieldRect; self.shieldBtn.symbolShift = n.length ? round(13 - sw / 2) : 0; self.shieldBtn.symbolSize = 11;
-            r -= sw + 4;
-        } else self.shieldRect = NSZeroRect;
         for (VButton *b in @[self.shareBtn, self.readerBtn]) if (!b.hidden) { b.frame = NSMakeRect(r - 24, y + 3, 24, 22); b.symbolSize = 11.5; r -= 25; }
         if (!self.pipBtn.hidden) { self.pipBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.pipBtn.symbolSize = 11.5; r -= 25; }
         if (!self.starBtn.hidden) { self.starBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.starBtn.symbolSize = 11.5; r -= 25; }
@@ -2788,6 +2810,7 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         NSMutableArray *round = [NSMutableArray arrayWithObject:[NSValue valueWithRect:self.pill]];
         if (!NSIsEmptyRect(self.navRect)) [round addObject:[NSValue valueWithRect:self.navRect]];
         if (!NSIsEmptyRect(self.extRect)) [round addObject:[NSValue valueWithRect:self.extRect]];
+        if (!NSIsEmptyRect(self.shieldRect) && !self.shieldBtn.hidden) [round addObject:[NSValue valueWithRect:self.shieldRect]];
         NSMutableArray *circles = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.lensRect], nil];
         if (!NSIsEmptyRect(self.avatarRect)) [circles addObject:[NSValue valueWithRect:self.avatarRect]];
         if (!NSIsEmptyRect(self.dlRect)) [circles addObject:[NSValue valueWithRect:self.dlRect]];
@@ -2798,11 +2821,7 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         for (NSValue *v in round) ShardStroke(v.rectValue, 14, MGlassEdge(), 1);
         for (NSValue *v in circles) { NSBezierPath *o = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(v.rectValue, 0.5, 0.5)]; o.lineWidth = 1; [MGlassEdge() setStroke]; [o stroke]; }
         if (self.editing) ShardStroke(self.pill, 14, AccentChosen() ? [vAccent colorWithAlphaComponent:0.75] : [vText colorWithAlphaComponent:0.22], 1);
-        if (!NSIsEmptyRect(self.shieldRect) && self.blocked > 0) {
-            RoundRect(self.shieldRect, 11, MChip());
-            NSString *n = self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked];
-            [n drawAtPoint:NSMakePoint(NSMinX(self.shieldRect) + 23, NSMinY(self.shieldRect) + 4) withAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium), NSForegroundColorAttributeName: vDim}];
-        }
+        // (the shield's count is drawn by the shield button itself, so its hover can't hide it)
         NSRect av = self.avatarRect;
         if (NSIsEmptyRect(av)) return;
         if (ow.isPrivate) { NSImage *eye = Tinted(Symbol(@"eye.slash", 13, NSFontWeightMedium), vText); DrawImage(eye, CenterIn(eye.size, av)); }
@@ -3722,6 +3741,15 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
     [vContentBg setFill]; NSRectFill(NSIntersectionRect(dirty, self.bounds));
     BOOL priv = WinFor(self).isPrivate;
     CGFloat W = NSWidth(self.bounds), top = self.top;
+    if (!priv) {   // Iris's own light behind the day: teal, blue and violet, very soft, as on the About page
+        CGFloat a = ThemeIsLight() ? 0.075 : 0.11;
+        NSArray *glows = @[@[ApTeal(), @(-190), @(40)], @[ApBlue(), @(10), @(-10)], @[ApViolet(), @(200), @(50)]];
+        for (NSArray *g in glows) {
+            NSColor *c = g[0]; NSPoint p = NSMakePoint(W / 2 + [g[1] doubleValue], top + [g[2] doubleValue]);
+            NSGradient *rg = [[NSGradient alloc] initWithColors:@[[c colorWithAlphaComponent:a], [c colorWithAlphaComponent:a * 0.45], [c colorWithAlphaComponent:0]]];
+            [rg drawFromCenter:p radius:0 toCenter:p radius:MIN(340, W * 0.4) options:0];
+        }
+    }
     // the day, set in a book face: calm, like the first page of something
     NSDateFormatter *f = [NSDateFormatter new];
     f.dateFormat = @"EEEE";
@@ -3735,11 +3763,27 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
     NSDictionary *sa = @{NSFontAttributeName: UIFont(13, NSFontWeightRegular), NSForegroundColorAttributeName: vDim};
     NSSize ss = [sub sizeWithAttributes:sa];
     [sub drawAtPoint:NSMakePoint(round((W - ss.width) / 2), top + ds.height + 4) withAttributes:sa];
-    // where you start typing
+    if (!priv) {   // a short Aperture line under the date, with its glow
+        NSRect bow = NSMakeRect(round(W / 2 - 22), top + ds.height + ss.height + 14, 44, 2);
+        [NSGraphicsContext saveGraphicsState];
+        NSShadow *gl = [NSShadow new]; gl.shadowBlurRadius = 8; gl.shadowOffset = NSZeroSize; gl.shadowColor = [ApBlue() colorWithAlphaComponent:0.6]; [gl set];
+        [ApBlue() setFill]; [[NSBezierPath bezierPathWithRoundedRect:bow xRadius:1 yRadius:1] fill];
+        [NSGraphicsContext restoreGraphicsState];
+        [ApertureGradient(1) drawInBezierPath:[NSBezierPath bezierPathWithRoundedRect:bow xRadius:1 yRadius:1] angle:0];
+    }
+    // where you start typing: while you type, its edge takes Iris's colours
     self.strike = [self strikeRect];
     BOOL typing = self.field.currentEditor != nil;
-    RoundRect(self.strike, 12, typing ? vPillFocus : vPill);
-    ShardStroke(self.strike, 12, typing ? vLine : vSep, 1);
+    if (typing && !priv) {
+        [NSGraphicsContext saveGraphicsState];
+        NSShadow *gl = [NSShadow new]; gl.shadowBlurRadius = 14; gl.shadowOffset = NSZeroSize; gl.shadowColor = [ApBlue() colorWithAlphaComponent:ThemeIsLight() ? 0.18 : 0.28]; [gl set];
+        RoundRect(self.strike, 12, vPillFocus);
+        [NSGraphicsContext restoreGraphicsState];
+        ApertureStroke(self.strike, 12, 1.25);
+    } else {
+        RoundRect(self.strike, 12, typing ? vPillFocus : vPill);
+        ShardStroke(self.strike, 12, typing ? vLine : vSep, 1);
+    }
     NSImage *mg = Tinted(Symbol(@"magnifyingglass", 13, NSFontWeightMedium), vFaint);
     DrawImage(mg, CenterIn(mg.size, NSMakeRect(NSMinX(self.strike) + 14, NSMinY(self.strike), 20, 44)));
     if (priv) {
@@ -3756,6 +3800,7 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
         if (hov) RoundRect(r, 12, vHover);
         NSRect well = NSMakeRect(NSMidX(r) - 22, NSMinY(r) + 10, 44, 44);
         RoundRect(well, 12, hov ? vActive : vPill);
+        if (hov) ApertureStroke(NSInsetRect(well, -1, -1), 13, 1.25);   // the one under the pointer: ringed in Iris's colours
         NSImage *ic = [VFavicons.shared iconForURL:t[@"u"]];
         if (ic) DrawImage(ic, CenterIn(NSMakeSize(22, 22), well));
         else {
@@ -12776,6 +12821,11 @@ static void RunBuildScript(NSString *stamp) {
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     [Defaults() registerDefaults:@{kDLAccel: @YES, kCodec: @(MacIsAppleSilicon() ? 0 : 2), kCodec30: @NO, kBgThrottle: @1, kSingleProcess: @NO, kRestorePaused: @YES, kResumeMedia: @YES, kLazyRestore: @NO, kBlock: @YES, kStrip: @YES, kCookieReject: @YES, kAutoPiP: @YES, kSleepMins: @10, kShowBookmarks: @YES, kSearch: @0, kStartup: @0, kScripts: @YES, kAskDownload: @NO,
                                    kThrottleOn: @YES, kTheme: @1, kAccent: @0, kDensity: @1, kHTTPSOnly: @NO, kGPC: @YES, kHomeTopSites: @YES, kConfirmQuit: @NO, kSuggestNet: @YES}];
+    if (![Defaults() boolForKey:@"toolbarGroupsV2"]) {   // the bar regrouped (Oct 2026): home and new tab leave it, ⌘T and the tab strip cover them
+        NSMutableArray *x = [[Defaults() arrayForKey:kShowExtra] ?: @[] mutableCopy];
+        [x removeObject:@"home"]; [x removeObject:@"newtab"];
+        [Defaults() setObject:x forKey:kShowExtra]; [Defaults() setBool:YES forKey:@"toolbarGroupsV2"];
+    }
     InitPalette();
     NSApp.appearance = ThemeAppearance();   // the palette and the app agree from the first frame
     // the Dock keeps an old icon for ad-hoc builds; hand it the current one directly
@@ -13633,3 +13683,4 @@ static void SettingsOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply
     }
     reply(nil, @"unknown");
 }
+// The Update pill flows in Aperture colours while a newer build waits (VPillFlow).
