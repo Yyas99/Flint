@@ -5860,7 +5860,7 @@ static void PrivateProtect(WKWebpagePreferences *prefs) {
 
 @implementation VPage {
     FWebView *_web;
-    BOOL _observing, _audioKVO, _watchingLoad, _tintKVO, _tintQueued;
+    BOOL _observing, _audioKVO, _watchingLoad, _tintKVO, _tintQueued, _tintHeld; NSUInteger _tintGen;
     NSColor *_jsTint;   // the colour the page script found at the top of the page (when WebKit has none of its own)
     NSString *_lastMethod;   // the request method of the latest navigation (only GET downloads can be accelerated)
     NSURL *_httpsUpgradeOf;
@@ -5930,7 +5930,7 @@ static void *kKVO = &kKVO;
 - (void)observeValueForKeyPath:(NSString *)k ofObject:(id)o change:(NSDictionary *)c context:(void *)ctx {
     if (ctx != kKVO) { [super observeValueForKeyPath:k ofObject:o change:c context:ctx]; return; }
     if ([k isEqualToString:@"title"]) { if (_web.title.length) self.title = _web.title; }
-    else if ([k isEqualToString:@"URL"]) { if (_web.URL) self.url = _web.URL.absoluteString; [self sampleHeaderColorSoon]; }   // back and forward inside single-page sites change only the address
+    else if ([k isEqualToString:@"URL"]) { if (_web.URL) self.url = _web.URL.absoluteString; [self sampleAfterInPageMove]; }   // back and forward inside single-page sites change only the address
     else if ([k isEqualToString:@"themeColor"] || [k isEqualToString:@"_sampledPageTopColor"]) { [self updateTint]; return; }
     else if ([k isEqualToString:@"loading"]) {
         BOOL finished = self.loading && !_web.loading;
@@ -6112,7 +6112,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     dispatch_async(dispatch_get_main_queue(), ^{ if (t && [PW.tabs containsObject:t]) [PW closeTab:t]; });
 }
 
-- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { self.blocked = 0; self.tab.blocked = 0; self.tab.installable = NO; _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; _jsTint = nil; [self sampleHeaderColorSoon]; }
+- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { self.blocked = 0; self.tab.blocked = 0; self.tab.installable = NO; _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; _jsTint = nil; [self holdTintUntilReady]; }
 // The tab you had open at launch comes back paused, and stays paused until you click or press a key on it.
 // Playback is refused the way a browser's autoplay block refuses it (the page's play() is turned down with
 // "not allowed"), so YouTube shows its play button instead of starting and being stopped a moment later.
@@ -6128,7 +6128,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
         "for(const v of document.querySelectorAll('video,audio'))if(!v.paused)v.pause()})()" completionHandler:nil];
 }
 - (void)webView:(WKWebView *)w didFinishNavigation:(WKNavigation *)n {
-    [self sampleHeaderColor];
+    if (_tintHeld) [self releaseTint]; else [self sampleHeaderColorSoon];
     if (!gWebApp && [w.URL.scheme hasPrefix:@"http"]) {   // does the site offer itself as an app? (the address bar's install button)
         __weak VPage *ws = self;
         [w evaluateJavaScript:@"!!document.querySelector('link[rel~=\"manifest\"]')" completionHandler:^(id r, NSError *e) {
@@ -6474,7 +6474,7 @@ static NSString *MediaKey(NSURL *u) {
 // along the page's top edge (as Safari's coloured tab bar does) and follows every change, scrolling and going back
 // included. Then the page's theme colour; then a look at whatever is painted behind the page's header.
 - (void)updateTint {
-    if (self.loading) return;   // one change per page: the band keeps the last page's colour until this one has finished loading
+    if (_tintHeld) return;   // one change per page: the band keeps the last page's colour until this one is ready
     NSColor *c = nil;
     @try { c = [_web valueForKey:@"_sampledPageTopColor"]; } @catch (NSException *x) {}
     if (![c isKindOfClass:NSColor.class] || c.alphaComponent < 0.5) c = nil;
@@ -6486,6 +6486,19 @@ static NSString *MediaKey(NSURL *u) {
     t.headerColor = c;
     VWindow *w = t.owner; if (w.current == t) w.window.contentView.needsDisplay = YES;
 }
+// A new page: the band waits until it has loaded, or 1.5 s at most (pages that stream, like video, never quite finish)
+- (void)holdTintUntilReady {
+    _tintHeld = YES; NSUInteger gen = ++_tintGen;
+    __weak VPage *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ VPage *p = ws; if (p && p->_tintGen == gen && p->_tintHeld) [p releaseTint]; });
+}
+// Single-page sites (YouTube going to another video) change the address without loading: look once things have settled
+- (void)sampleAfterInPageMove {
+    if (_tintHeld) return;
+    NSUInteger gen = ++_tintGen; __weak VPage *ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 900 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ VPage *p = ws; if (p && p->_tintGen == gen) [p sampleHeaderColor]; });
+}
+- (void)releaseTint { if (!_tintHeld) return; _tintHeld = NO; [self sampleHeaderColorSoon]; }
 - (void)sampleHeaderColorSoon {
     if (_tintQueued) return;
     _tintQueued = YES;
@@ -6514,7 +6527,7 @@ static NSString *MediaKey(NSURL *u) {
     void (^sample)(void) = ^{
         VPage *p = ws; WKWebView *wv = p.web; if (!wv || !wv.window || NSWidth(wv.bounds) < 50) { styles(); return; }
         WKSnapshotConfiguration *cfg = [WKSnapshotConfiguration new];
-        cfg.rect = NSMakeRect(0, 0, NSWidth(wv.bounds), 4);
+        cfg.rect = NSMakeRect(0, wv.isFlipped ? 6 : NSHeight(wv.bounds) - 10, NSWidth(wv.bounds), 4);   // just under the top edge (clear of the thin loading bars sites draw there)
         cfg.snapshotWidth = @(240);
         [wv takeSnapshotWithConfiguration:cfg completionHandler:^(NSImage *im, NSError *e) {
             VPage *pp = ws; if (!pp) return;
@@ -6531,11 +6544,11 @@ static NSString *MediaKey(NSURL *u) {
             }
             NSNumber *top = nil; for (NSNumber *k in count) if (count[k].integerValue > best) { best = count[k].integerValue; top = k; }
             if (n >= 10 && best * 10 >= n * 4) { pp->_jsTint = [NSColor colorWithSRGBRed:sample[top].redComponent green:sample[top].greenComponent blue:sample[top].blueComponent alpha:1]; [pp updateTint]; }   // a clear majority
-            else if (n >= 10) { pp->_jsTint = nil; [pp updateTint]; }   // a busy picture along the top: no band colour fits it
+            else if (n >= 10) { if (!pp.tab.headerColor) { pp->_jsTint = nil; [pp updateTint]; } }   // a busy picture along the top: keep what the band has
             else styles();
         }];
     };
-    if (self.loading) return;   // sampled once, when the page has finished
+    if (_tintHeld) return;   // sampled once, when the page is ready
     sample();
 }
 
@@ -9073,34 +9086,99 @@ static NSMutableDictionary *CleanNode(id n, int depth) {
 
 static NSString *AppSupport(NSString *rel) { return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"] stringByAppendingPathComponent:rel]; }
 
-// Chromium-family browsers keep bookmarks in the same JSON format.
+// Every browser on this Mac, every profile in it: Chromium-family browsers keep bookmarks in the same JSON format
+// (one folder per profile, names in "Local State"); Firefox-family ones in places.sqlite (profiles listed in profiles.ini).
 static NSArray<NSArray<NSString *> *> *ChromiumSources(void) {
-    return @[@[@"chrome", @"Google Chrome", @"Google/Chrome"], @[@"helium", @"Helium", @"net.imput.helium"], @[@"brave", @"Brave", @"BraveSoftware/Brave-Browser"],
-             @[@"edge", @"Microsoft Edge", @"Microsoft Edge"], @[@"vivaldi", @"Vivaldi", @"Vivaldi"], @[@"arc", @"Arc", @"Arc/User Data"], @[@"chromium", @"Chromium", @"Chromium"]];
+    return @[@[@"Google Chrome", @"Google/Chrome", @"com.google.Chrome"], @[@"Chrome Beta", @"Google/Chrome Beta", @"com.google.Chrome.beta"], @[@"Chrome Canary", @"Google/Chrome Canary", @"com.google.Chrome.canary"],
+             @[@"Helium", @"net.imput.helium", @"net.imput.helium"], @[@"Brave", @"BraveSoftware/Brave-Browser", @"com.brave.Browser"], @[@"Brave Beta", @"BraveSoftware/Brave-Browser-Beta", @"com.brave.Browser.beta"],
+             @[@"Microsoft Edge", @"Microsoft Edge", @"com.microsoft.edgemac"], @[@"Vivaldi", @"Vivaldi", @"com.vivaldi.Vivaldi"], @[@"Arc", @"Arc/User Data", @"company.thebrowser.Browser"],
+             @[@"Chromium", @"Chromium", @"org.chromium.Chromium"], @[@"Opera", @"com.operasoftware.Opera", @"com.operasoftware.Opera"], @[@"Opera GX", @"com.operasoftware.OperaGX", @"com.operasoftware.OperaGX"],
+             @[@"Thorium", @"Thorium", @"org.chromium.Thorium"], @[@"Comet", @"Comet", @"ai.perplexity.comet"], @[@"Dia", @"Dia/User Data", @"company.thebrowser.dia"],
+             @[@"Yandex", @"Yandex/YandexBrowser", @"ru.yandex.desktop.yandex-browser"], @[@"Sidekick", @"Sidekick", @"com.pushplaylabs.sidekick"]];
 }
-static NSString *ChromiumBookmarksFile(NSString *rel) {
-    for (NSString *p in @[@"Default", @"Profile 1", @"Profile 2", @"Profile 3"]) {
-        NSString *f = [[AppSupport(rel) stringByAppendingPathComponent:p] stringByAppendingPathComponent:@"Bookmarks"];
-        if ([NSFileManager.defaultManager fileExistsAtPath:f]) return f;
+static NSArray<NSArray<NSString *> *> *GeckoSources(void) {
+    return @[@[@"Firefox", @"Firefox", @"org.mozilla.firefox"], @[@"Zen", @"zen", @"app.zen-browser.zen"], @[@"LibreWolf", @"librewolf", @"org.mozilla.librewolf"],
+             @[@"Floorp", @"Floorp", @"one.ablaze.floorp"], @[@"Waterfox", @"Waterfox", @"net.waterfox.waterfox"]];
+}
+static NSString *ChromiumBookmarksFile(NSString *rel, NSString *prof) {
+    NSString *f = [[AppSupport(rel) stringByAppendingPathComponent:prof ?: @""] stringByAppendingPathComponent:@"Bookmarks"];
+    return [NSFileManager.defaultManager fileExistsAtPath:f] ? f : nil;
+}
+static NSArray<NSArray<NSString *> *> *ChromiumProfiles(NSString *rel) {   // [folder, name]
+    NSFileManager *fm = NSFileManager.defaultManager; NSString *base = AppSupport(rel);
+    if (![fm fileExistsAtPath:base]) return @[];
+    NSData *ls = [NSData dataWithContentsOfFile:[base stringByAppendingPathComponent:@"Local State"]];
+    NSDictionary *st = ls ? [NSJSONSerialization JSONObjectWithData:ls options:0 error:nil] : nil;
+    NSDictionary *info = [st isKindOfClass:NSDictionary.class] && [st[@"profile"] isKindOfClass:NSDictionary.class] ? st[@"profile"][@"info_cache"] : nil;
+    NSMutableArray *out = [NSMutableArray array];
+    if (ChromiumBookmarksFile(rel, @"")) [out addObject:@[@"", @"Default"]];   // Opera: one profile, at the top
+    for (NSString *d in [[fm contentsOfDirectoryAtPath:base error:nil] sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
+        if (!([d isEqualToString:@"Default"] || [d hasPrefix:@"Profile "]) || !ChromiumBookmarksFile(rel, d)) continue;
+        NSDictionary *pi = [info isKindOfClass:NSDictionary.class] && [info[d] isKindOfClass:NSDictionary.class] ? info[d] : nil;
+        id n = pi[@"name"], g = pi[@"gaia_name"];   // the name the browser shows: yours if you named it, else the account's
+        if ([pi[@"is_using_default_name"] boolValue] && [g isKindOfClass:NSString.class] && [g length]) n = g;
+        [out addObject:@[d, [n isKindOfClass:NSString.class] && [n length] ? n : d]];
     }
-    return nil;
+    return out;
 }
-static NSString *GeckoPlaces(NSString *rel) {
-    NSString *dir = [AppSupport(rel) stringByAppendingPathComponent:@"Profiles"];
-    NSString *best = nil; NSDate *bestDate = nil;
-    for (NSString *p in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] ?: @[]) {
-        NSString *f = [[dir stringByAppendingPathComponent:p] stringByAppendingPathComponent:@"places.sqlite"];
-        NSDate *d = [NSFileManager.defaultManager attributesOfItemAtPath:f error:nil].fileModificationDate;
-        if (d && (!bestDate || [d compare:bestDate] == NSOrderedDescending)) { best = f; bestDate = d; }
+static NSArray<NSArray<NSString *> *> *GeckoProfiles(NSString *rel) {   // [places.sqlite path, name]
+    NSFileManager *fm = NSFileManager.defaultManager; NSString *base = AppSupport(rel);
+    NSMutableArray *out = [NSMutableArray array]; NSMutableSet *seen = [NSMutableSet set];
+    void (^add)(NSString *, BOOL, NSString *) = ^(NSString *path, BOOL relative, NSString *name) {
+        if (!path.length) return;
+        NSString *pl = [(relative ? [base stringByAppendingPathComponent:path] : path) stringByAppendingPathComponent:@"places.sqlite"];
+        if (![fm fileExistsAtPath:pl] || [seen containsObject:pl]) return;
+        [seen addObject:pl]; [out addObject:@[pl, name.length ? name : path.lastPathComponent]];
+    };
+    NSString *ini = [NSString stringWithContentsOfFile:[base stringByAppendingPathComponent:@"profiles.ini"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
+    // Firefox's profile manager (2025 on) keeps the names you see in a small database beside profiles.ini
+    NSMutableArray *stores = [NSMutableArray array];
+    for (NSString *raw in [ini componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) { NSString *l = Trim(raw); if ([l hasPrefix:@"StoreID="] && ![stores containsObject:[l substringFromIndex:8]]) [stores addObject:[l substringFromIndex:8]]; }
+    for (NSString *sid in stores) {
+        NSString *db = [[base stringByAppendingPathComponent:@"Profile Groups"] stringByAppendingPathComponent:[sid stringByAppendingString:@".sqlite"]];
+        if ([sid containsString:@"/"] || ![fm fileExistsAtPath:db]) continue;
+        NSString *tmp = SupportFile(@"import-groups.sqlite");
+        for (NSString *sfx in @[@"", @"-wal"]) { [fm removeItemAtPath:[tmp stringByAppendingString:sfx] error:nil]; if ([fm fileExistsAtPath:[db stringByAppendingString:sfx]]) [fm copyItemAtPath:[db stringByAppendingString:sfx] toPath:[tmp stringByAppendingString:sfx] error:nil]; }
+        sqlite3 *h = NULL;
+        if (sqlite3_open_v2(tmp.fileSystemRepresentation, &h, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+            sqlite3_stmt *st = NULL;
+            if (sqlite3_prepare_v2(h, "SELECT path, name FROM Profiles", -1, &st, NULL) == SQLITE_OK) {
+                while (sqlite3_step(st) == SQLITE_ROW) {
+                    const char *pp = (const char *)sqlite3_column_text(st, 0), *nn = (const char *)sqlite3_column_text(st, 1);
+                    if (!pp) continue;
+                    NSString *path = @(pp); add(path, !path.isAbsolutePath, nn ? @(nn) : nil);
+                }
+                sqlite3_finalize(st);
+            }
+            sqlite3_close(h);
+        }
+        for (NSString *sfx in @[@"", @"-wal", @"-shm"]) [fm removeItemAtPath:[tmp stringByAppendingString:sfx] error:nil];
     }
-    return best;
+    // the classic list: profiles.ini's own sections
+    __block NSString *name = nil, *path = nil; __block BOOL relative = YES;
+    for (NSString *raw in [[ini componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] arrayByAddingObject:@"[end]"]) {
+        NSString *l = Trim(raw);
+        if ([l hasPrefix:@"["]) { add(path, relative, name); name = nil; path = nil; relative = YES; continue; }
+        if ([l hasPrefix:@"Name="]) name = [l substringFromIndex:5];
+        else if ([l hasPrefix:@"Path="]) path = [l substringFromIndex:5];
+        else if ([l hasPrefix:@"IsRelative="]) relative = [[l substringFromIndex:11] isEqualToString:@"1"];
+    }
+    // and anything else with bookmarks under Profiles
+    NSString *dir = [base stringByAppendingPathComponent:@"Profiles"];
+    for (NSString *p in [fm contentsOfDirectoryAtPath:dir error:nil] ?: @[]) {
+        NSRange dot = [p rangeOfString:@"."];
+        add([@"Profiles" stringByAppendingPathComponent:p], YES, dot.location != NSNotFound ? [p substringFromIndex:dot.location + 1] : p);
+    }
+    return out;
 }
+// One entry per browser profile, named "Browser – Profile"; the id says where to read it.
 static NSArray<NSDictionary *> *ImportSources(void) {
     NSMutableArray *out = [NSMutableArray array];
-    for (NSArray *s in ChromiumSources()) if (ChromiumBookmarksFile(s[2])) [out addObject:@{@"id": s[0], @"name": s[1]}];
-    if (GeckoPlaces(@"Firefox")) [out addObject:@{@"id": @"firefox", @"name": @"Firefox"}];
-    if (GeckoPlaces(@"zen")) [out addObject:@{@"id": @"zen", @"name": @"Zen"}];
-    [out addObject:@{@"id": @"safari", @"name": @"Safari"}];
+    for (NSArray *s in ChromiumSources()) for (NSArray *p in ChromiumProfiles(s[1]))
+        [out addObject:@{@"id": [NSString stringWithFormat:@"c|%@|%@", s[1], p[0]], @"name": [NSString stringWithFormat:@"%@ – %@", s[0], p[1]], @"browser": s[0], @"profile": p[1], @"bundle": s[2]}];
+    for (NSArray *s in GeckoSources()) for (NSArray *p in GeckoProfiles(s[1]))
+        [out addObject:@{@"id": [@"g|" stringByAppendingString:p[0]], @"name": [NSString stringWithFormat:@"%@ – %@", s[0], p[1]], @"browser": s[0], @"profile": p[1], @"bundle": s[2]}];
+    [out addObject:@{@"id": @"safari", @"name": @"Safari", @"browser": @"Safari", @"profile": @"Safari", @"bundle": @"com.apple.Safari"}];
     return out;
 }
 
@@ -9161,10 +9239,12 @@ static NSArray *GeckoTree(NSString *places, NSString **err) {
 }
 
 static NSArray *ImportTree(NSString *source, NSString **err) {
-    for (NSArray *s in ChromiumSources()) if ([s[0] isEqualToString:source]) {
-        NSData *d = [NSData dataWithContentsOfFile:ChromiumBookmarksFile(s[2]) ?: @""];
+    NSArray *parts = [source componentsSeparatedByString:@"|"];
+    if (parts.count == 3 && [parts[0] isEqualToString:@"c"]) {
+        if ([parts[1] containsString:@".."] || [parts[2] containsString:@".."] || [parts[2] containsString:@"/"]) { *err = @"Unknown browser."; return nil; }
+        NSData *d = [NSData dataWithContentsOfFile:ChromiumBookmarksFile(parts[1], parts[2]) ?: @""];
         NSDictionary *root = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
-        if (![root isKindOfClass:NSDictionary.class]) { *err = [NSString stringWithFormat:@"Couldn't read %@'s bookmarks.", s[1]]; return nil; }
+        if (![root isKindOfClass:NSDictionary.class]) { *err = @"Couldn't read that profile's bookmarks."; return nil; }
         NSMutableArray *out = [NSMutableArray array];
         NSDictionary *names = @{@"bookmark_bar": @"Bookmarks Bar", @"other": @"Other Bookmarks", @"synced": @"Mobile Bookmarks"};
         for (NSString *k in @[@"bookmark_bar", @"other", @"synced"]) {
@@ -9173,10 +9253,9 @@ static NSArray *ImportTree(NSString *source, NSString **err) {
         }
         return out;
     }
-    if ([source isEqualToString:@"firefox"] || [source isEqualToString:@"zen"]) {
-        NSString *places = GeckoPlaces([source isEqualToString:@"zen"] ? @"zen" : @"Firefox");
-        if (!places) { *err = @"No profile found."; return nil; }
-        return GeckoTree(places, err);
+    if (parts.count == 2 && [parts[0] isEqualToString:@"g"]) {
+        if (![parts[1] hasSuffix:@"/places.sqlite"] || ![NSFileManager.defaultManager fileExistsAtPath:parts[1]]) { *err = @"No profile found."; return nil; }
+        return GeckoTree(parts[1], err);
     }
     if ([source isEqualToString:@"safari"]) {
         NSString *f = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Safari/Bookmarks.plist"];
@@ -9189,6 +9268,21 @@ static NSArray *ImportTree(NSString *source, NSString **err) {
     return nil;
 }
 
+// Adds a source's bookmarks as one folder, "Imported from …", at the end of yours (nothing is replaced). nil: done.
+static NSString *ImportIntoBookmarks(NSDictionary *src, NSUInteger *added) {
+    NSString *err = nil;
+    NSArray *t = ImportTree(src[@"id"], &err);
+    if (!t) return err ?: @"Nothing to import.";
+    NSMutableArray *clean = [NSMutableArray array];
+    for (id n in t) { NSMutableDictionary *k = CleanNode(n, 0); if (k) [clean addObject:k]; }
+    NSMutableDictionary *f = [@{@"name": [@"Imported from " stringByAppendingString:src[@"name"]], @"children": clean} mutableCopy];
+    __block NSUInteger n = 0; __block void (^count)(NSArray *); __block __weak void (^wc)(NSArray *);
+    count = ^(NSArray *a) { for (NSDictionary *x in a) { if (x[@"children"]) wc(x[@"children"]); else n++; } }; wc = count; count(clean);
+    if (!n) return @"No bookmarks found.";
+    [VBookmarks.shared.bar addObject:f]; BookmarksChanged();
+    if (added) *added = n;
+    return nil;
+}
 
 static NSMutableDictionary<NSString *, NSDictionary *> *gReader;   // reader articles, by one-time id (in memory only)
 static NSMutableDictionary<NSString *, NSDictionary *> *gSource;   // the page as it stands (live DOM), captured for the source viewer, by one-time id
@@ -12191,7 +12285,7 @@ static NSString *CreateProfile(NSString *name) {
 - (void)saveSession {
     if (gQuitting || gWebApp) return;   // an installed app doesn't keep Iris's tabs   // the quit already saved; nothing after it may replace that
     NSMutableArray *normal = [NSMutableArray array];
-    for (VWindow *w in gWindows) if (!w.isPrivate) [normal addObject:[w sessionDict]];
+    for (VWindow *w in gWindows) if (!w.isPrivate && !objc_getAssociatedObject(w, "irisTestWindow")) [normal addObject:[w sessionDict]];   // (the dev harness's test window is never kept)
     if (!normal.count) { [Defaults() setObject:@{@"tabs": @[], @"current": @0} forKey:kTabsState]; DLog(@"session: no windows left, nothing saved"); return; }
     NSMutableDictionary *main = [normal[0] mutableCopy];
     if (normal.count > 1) main[@"windows"] = [normal subarrayWithRange:NSMakeRange(1, normal.count - 1)];
@@ -15124,8 +15218,13 @@ static void CtlOut(NSString *s) {
         }
         else if ([cmd isEqualToString:@"privlock"]) PrivateLockAll(@"test");
         else if ([cmd isEqualToString:@"privstate"]) CtlOut([NSString stringWithFormat:@"privstate locked=%d thisLocked=%d private=%d remembered=%@ restorable=%d sharing=%ld", gPrivLocked, PrivateWindowLocked(self), self.isPrivate, [gPrivSite.allKeys componentsJoinedByString:@","] ?: @"-", self.window.restorable, (long)self.window.sharingType]);
-        else if ([cmd isEqualToString:@"window"]) {   // a fresh window; the rest of the commands run in it
-            VWindow *nw = [[VWindow alloc] initPrivate:NO state:@{}]; [nw showWindow:nil]; [nw windowDidResize:nil];
+        else if ([cmd isEqualToString:@"window"]) {   // the test window (one, reused, never restored); the rest of the commands run in it
+            static __weak VWindow *test;
+            VWindow *nw = test && [gWindows containsObject:test] && test.window.isVisible ? test : nil;
+            if (!nw) {
+                nw = [[VWindow alloc] initPrivate:NO state:@{}]; objc_setAssociatedObject(nw, "irisTestWindow", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                [nw showWindow:nil]; [nw windowDidResize:nil]; test = nw;
+            }
             [nw.window makeKeyAndOrderFront:nil];
             CtlOut(@"window opened");
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [nw runControl:lines]; });
@@ -15261,11 +15360,23 @@ static void CtlOut(NSString *s) {
             for (FExt *e in FExtHost.shared.extensions) if ([e isKindOfClass:FExt.class] && e.background) [o appendFormat:@"  ext pid=%d %@\n", pidOf(e.background), e.name];
             CtlOut(o);
         }
+        else if ([cmd isEqualToString:@"importsrc"]) {   // dev: the import list, and what each browser says about its profiles
+            for (NSDictionary *x in ImportSources()) CtlOut([NSString stringWithFormat:@"src %@ = %@", x[@"id"], x[@"name"]]);
+            NSData *ls = [NSData dataWithContentsOfFile:AppSupport(@"net.imput.helium/Local State")];
+            NSDictionary *st = ls ? [NSJSONSerialization JSONObjectWithData:ls options:0 error:nil] : nil;
+            CtlOut([NSString stringWithFormat:@"helium info %@", [st valueForKeyPath:@"profile.info_cache"] ?: @"(none)"]);
+            CtlOut([NSString stringWithFormat:@"ff ini %@", [NSString stringWithContentsOfFile:AppSupport(@"Firefox/profiles.ini") encoding:NSUTF8StringEncoding error:nil] ?: @"(none)"]);
+        }
+        else if ([cmd isEqualToString:@"tidy"]) {   // dev: close every window but the first (the test window and any left from earlier runs)
+            NSArray *all = gWindows.copy; NSUInteger n = 0;
+            for (VWindow *w in all) if (w != all.firstObject && !w.isPrivate) { [w.window close]; n++; }
+            CtlOut([NSString stringWithFormat:@"closed %lu windows", (unsigned long)n]);
+        }
         else if ([cmd isEqualToString:@"tint"]) {   // dev: the band's colour and where it came from
             WKWebView *wv = self.current.web.web; id sp = nil, th = nil;
             @try { sp = [wv valueForKey:@"_sampledPageTopColor"]; } @catch (NSException *x) { sp = @"(no SPI)"; }
             @try { th = [wv valueForKey:@"themeColor"]; } @catch (NSException *x) {}
-            CtlOut([NSString stringWithFormat:@"tint header=%@ sampled=%@ theme=%@ url=%@ gate=%u conns=%ld uncloaked=%ld shield=%@ src=%@", self.current.headerColor, sp, th, wv.URL.host, gGatePort, gGateConnections, gGateUncloaked, gShieldFP ? ShieldStats() : @"-", ShieldSrcRef()]);
+            CtlOut([NSString stringWithFormat:@"tint flipped=%d header=%@ sampled=%@ theme=%@ url=%@ gate=%u conns=%ld uncloaked=%ld shield=%@ src=%@", wv.isFlipped, self.current.headerColor, sp, th, wv.URL.host, gGatePort, gGateConnections, gGateUncloaked, gShieldFP ? ShieldStats() : @"-", ShieldSrcRef()]);
         }
         else if ([cmd isEqualToString:@"status"]) {
             CtlOut([NSString stringWithFormat:@"status tabs=%lu cur=%lu url=%@ title=%@ loading=%d progress=%.2f blocked=%ld rules=%lu extensions=%d side=%.0f split=%lu",
@@ -16518,19 +16629,29 @@ static NSArray *SettingsSchema(VWindow *win) {
     }
 
     // ── Bookmarks & Import
-    NSMutableDictionary *helium = SButton(@"reimport", @"Helium", @"Replaces Iris's bookmarks with Helium's, including folders and icons.", @"Import…", ^(NSDictionary *a, void (^done)(NSString *)) {
-        [NSFileManager.defaultManager removeItemAtPath:SupportFile(@"bookmarks.json") error:nil];
-        [Defaults() removeObjectForKey:@"iconsImported"];
-        [VBookmarks.shared performSelector:@selector(load)];
-        [VFavicons.shared performSelector:@selector(importHelium)];
-        for (VWindow *w in gWindows) [w.bookmarksBar reload];
-        done([NSString stringWithFormat:@"Imported %lu bookmarks", (unsigned long)VBookmarks.shared.allURLs.count]);
-    });
-    helium[@"confirm"] = @{@"title": @"Import bookmarks from Helium?", @"text": @"Iris's current bookmarks will be replaced.", @"ok": @"Import"};
+    // every browser profile on this Mac in one menu, and one Import: it lands as its own folder, nothing replaced
+    static NSInteger pick;
+    NSArray<NSDictionary *> *srcs = ImportSources();
+    pick = MAX(0, MIN((NSInteger)srcs.count - 1, pick));
+    NSMutableArray *labels = [NSMutableArray array];
+    for (NSDictionary *x in srcs) [labels addObject:[x[@"profile"] isEqualToString:x[@"browser"]] ? x[@"browser"] : [NSString stringWithFormat:@"%@ · %@", x[@"profile"], x[@"browser"]]];
+    NSMutableDictionary *row = [SSelect(@"importFrom", @"Import from", nil, labels, pick, ^(NSInteger i) { pick = i; }) mutableCopy];
+    NSDictionary *chosen = srcs.count ? srcs[(NSUInteger)pick] : nil;
+    gSAct[@"importGo"] = ^(NSDictionary *a, void (^done)(NSString *)) {
+        if (!chosen) { done(@"No browsers found"); return; }
+        NSUInteger n = 0; NSString *err = ImportIntoBookmarks(chosen, &n);
+        done(err ?: [NSString stringWithFormat:@"Imported %lu bookmarks from %@", (unsigned long)n, chosen[@"profile"]]);
+    };
+    row[@"more"] = @[@{@"id": @"importGo", @"label": @"Import"}];
+    static NSMutableDictionary *icons; if (!icons) icons = [NSMutableDictionary dictionary];   // the chosen browser's own icon
+    NSString *bid = chosen[@"bundle"];
+    if (bid && !icons[bid]) { NSURL *app = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:bid]; icons[bid] = (app ? PNGDataURL([NSWorkspace.sharedWorkspace iconForFile:app.path], 64) : nil) ?: @""; }
+    if ([icons[bid] length]) { row[@"icon"] = icons[bid]; row[@"logo"] = @YES; }
+    NSArray *imports = @[ row ];
     [S addObject:SSection(@"bookmarks", @"Bookmarks & Import", @"Import from another browser.", @"bookmark", @[
         SGroup(@"Your bookmarks", @[ SValue(@"Saved bookmarks", nil, [NSString stringWithFormat:@"%lu", (unsigned long)VBookmarks.shared.allURLs.count]),
             SButton(@"bmManager", @"Bookmark manager", @"Edit, sort, import and export. ⌥⌘B", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [win showBookmarks:nil]; done(nil); }) ]),
-        SGroup(@"Import", @[ helium ]) ])];
+        SGroup(@"Import", imports) ])];
 
     // ── Shortcuts
     NSMutableArray *sg = [NSMutableArray array];
