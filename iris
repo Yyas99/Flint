@@ -1,7 +1,8 @@
 #!/bin/bash
 # Iris: builds Iris.app (AppKit window + WebKit, Safari's engine) and opens it.
-#   ./iris          build if anything changed, then open
-#   ./iris build    force a rebuild, then open
+#   ./iris          build into Iris Dev.app (and restart it) if anything changed
+#   ./iris build    force a rebuild into Iris Dev.app
+#   ./iris ship     send the build tested in Iris Dev to Iris (the Update pill appears)
 #   ./iris stop     quit Iris
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -63,19 +64,29 @@ if [ -f "$DIR/jobs/run.sh" ]; then
 fi
 done_line "Tools" "$(clang --version | head -1 | sed 's/ (.*//') · $(uname -m) · macOS $(sw_vers -productVersion)"
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# One compile, two apps. "Iris Dev" is where every new build lands: it restarts with it right away and keeps its own
+# tabs, settings and website data, so testing never touches the Iris you browse with. Iris.app changes only when a
+# tested build is shipped to it ("./iris ship"): then the Update pill appears and you switch when it suits you.
+DEVAPP="$DIR/Iris Dev.app"; OUT="$DIR/.build"; mkdir -p "$OUT"
+write_bundle() {   # app path, name, bundle id, executable name, icon file (in the Iris folder)
+  local A="$1" NAME="$2" ID="$3" EXE="$4" ICON="$5" URLS=""
+  mkdir -p "$A/Contents/MacOS" "$A/Contents/Resources"
+  if [ "$ID" = "com.y.iris" ]; then   # only Iris itself offers to be your browser
+    URLS='<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>Web site URL</string><key>CFBundleURLSchemes</key><array><string>http</string><string>https</string></array></dict></array>
+  <key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeName</key><string>HTML document</string><key>CFBundleTypeRole</key><string>Viewer</string><key>LSItemContentTypes</key><array><string>public.html</string></array></dict></array>'
+  fi
+  cat > "$A/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Iris</string>
-  <key>CFBundleDisplayName</key><string>Iris</string>
-  <key>CFBundleIdentifier</key><string>com.y.iris</string>
-  <key>CFBundleExecutable</key><string>Iris</string>
+  <key>CFBundleName</key><string>$NAME</string>
+  <key>CFBundleDisplayName</key><string>$NAME</string>
+  <key>CFBundleIdentifier</key><string>$ID</string>
+  <key>CFBundleExecutable</key><string>$EXE</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>4</string>
   <key>CFBundleShortVersionString</key><string>0.4</string>
-  <key>CFBundleIconFile</key><string>Iris</string>
+  <key>CFBundleIconFile</key><string>${ICON%.icns}</string>
   <key>LSMinimumSystemVersion</key><string>12.3</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -85,43 +96,62 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSLocationWhenInUseUsageDescription</key><string>A website wants to know your location.</string>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
   <key>NSHumanReadableCopyright</key><string>MIT licence · WebKit</string>
-  <key>CFBundleURLTypes</key><array><dict>
-    <key>CFBundleURLName</key><string>Web site URL</string>
-    <key>CFBundleURLSchemes</key><array><string>http</string><string>https</string></array>
-  </dict></array>
-  <key>CFBundleDocumentTypes</key><array><dict>
-    <key>CFBundleTypeName</key><string>HTML document</string>
-    <key>CFBundleTypeRole</key><string>Viewer</string>
-    <key>LSItemContentTypes</key><array><string>public.html</string></array>
-  </dict></array>
+  $URLS
 </dict></plist>
 PLIST
-[ -f "$DIR/Iris.icns" ] && cp -f "$DIR/Iris.icns" "$APP/Contents/Resources/Iris.icns"
-cp -f "$DIR/ext-shim.js" "$APP/Contents/Resources/ext-shim.js"
-if [ -d "$DIR/pages" ]; then rm -rf "$APP/Contents/Resources/pages"; cp -R "$DIR/pages" "$APP/Contents/Resources/pages"; fi
-# developer switches travel inside the app, so Iris never has to reach into Documents at launch
-for f in jsc.env extdebug; do rm -f "$APP/Contents/Resources/$f"; if [ -f "$DIR/$f" ]; then cp -f "$DIR/$f" "$APP/Contents/Resources/$f"; fi; done
-rm -rf "$APP/Contents/Frameworks" 2>/dev/null || true
-done_line "Bundle" "Iris.app · extension layer"
+  for f in Iris.icns IrisDev.icns; do [ -f "$DIR/$f" ] && cp -f "$DIR/$f" "$A/Contents/Resources/$f"; done
+  cp -f "$DIR/ext-shim.js" "$A/Contents/Resources/ext-shim.js"
+  if [ -d "$DIR/pages" ]; then rm -rf "$A/Contents/Resources/pages"; cp -R "$DIR/pages" "$A/Contents/Resources/pages"; fi
+  # developer switches travel inside the app, so Iris never has to reach into Documents at launch
+  for f in jsc.env extdebug; do rm -f "$A/Contents/Resources/$f"; if [ -f "$DIR/$f" ]; then cp -f "$DIR/$f" "$A/Contents/Resources/$f"; fi; done
+  rm -rf "$A/Contents/Frameworks" 2>/dev/null || true
+}
+sign_app() {   # a stable local identity (if present) keeps macOS permissions across rebuilds; ad-hoc otherwise
+  local A="$1" ID="$2"
+  SIGNID="Iris Local Signing"; security find-certificate -c "$SIGNID" >/dev/null 2>&1 || SIGNID="Flint Local Signing"; SIGNED="ad-hoc"   # the local certificate made before the rename keeps working
+  if security find-certificate -c "$SIGNID" >/dev/null 2>&1 && codesign -s "$SIGNID" -f --identifier "$ID" "$A" >"$DIR/.sign.log" 2>&1; then SIGNED="$SIGNID"
+  else codesign -s - -f --identifier "$ID" "$A" >/dev/null 2>&1 || true; fi
+  echo "$SIGNED" > "$DIR/.signed-with"
+}
 
-if [ "$1" = "build" ] || [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+if [ "$1" = "ship" ]; then   # the build in Iris Dev goes to Iris
+  if [ ! -x "$DEVAPP/Contents/MacOS/IrisDev" ]; then fail_line "Ship" "there's no Iris Dev build to ship yet"; exit 1; fi
+  write_bundle "$APP" "Iris" "com.y.iris" "Iris" "Iris.icns"
+  cp -f "$DEVAPP/Contents/MacOS/IrisDev" "$BIN"
+  sign_app "$APP" "com.y.iris"
+  done_line "Bundle" "Iris.app · the build tested in Iris Dev"
+  rm -f "$STAGE/install"
+  RUNNING="$(pgrep -x Iris; pgrep -f '/Iris.app/Contents/MacOS/Iris$'; ps -axo pid=,comm= | awk '$2 ~ /\/Iris\.app\/Contents\/MacOS\/Iris$/ {print $1}')"
+  echo "ship: Iris running as [$(echo $RUNNING)]" >> "$LOG"
+  if [ -z "$(echo $RUNNING)" ]; then   # never restart an Iris that's open: it gets the Update pill instead
+    install_staged; done_line "Launched" "total $(since $T0)"
+  else
+    [ -s "$DIR/update-notes.txt" ] && cp -f "$DIR/update-notes.txt" "$STAGE/notes"
+    date +%s > "$STAGE/ready"
+    done_line "Shipped" "Iris shows Update when you're ready · $(since $T0)"
+  fi
+  exit 0
+fi
+
+write_bundle "$DEVAPP" "Iris Dev" "com.y.iris.dev" "IrisDev" "IrisDev.icns"
+done_line "Bundle" "Iris Dev.app · extension layer"
+if [ "$1" = "build" ] || [ ! -x "$OUT/Iris" ] || [ "$SRC" -nt "$OUT/Iris" ]; then
   T=$(date +%s)
-  clang -fobjc-arc -O2 -Wall -Wno-deprecated-declarations -Wno-nonnull -Wno-unused-function -mmacosx-version-min=12.3 "$SRC" -o "$BIN" \
+  clang -fobjc-arc -O2 -Wall -Wno-deprecated-declarations -Wno-nonnull -Wno-unused-function -mmacosx-version-min=12.3 "$SRC" -o "$OUT/Iris.new" \
     -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers -framework QuartzCore -framework Security -framework CoreServices -framework CoreLocation -lsqlite3 >>"$LOG" 2>&1 & WP=$!
   while kill -0 $WP 2>/dev/null; do P=$(( 10 + ($(date +%s) - T) * 6 )); [ $P -gt 95 ] && P=95; live "Window" "$P" "compiling Iris.m · $(since $T)"; K=$((K+1)); sleep 0.25; done
   if ! wait $WP; then fail_line "Window" "build failed"; grep -m10 "error" "$LOG" | sed "s/^/   ${D}│${R} /"; exit 1; fi
+  mv -f "$OUT/Iris.new" "$OUT/Iris"
   done_line "Window" "$(wc -l < "$SRC" | tr -d ' ') lines · $(grep -c warning: "$LOG" || true) warnings · $(since $T)"
 else done_line "Window" "unchanged"; fi
-# a stable local identity (if present) keeps macOS permissions across rebuilds; ad-hoc otherwise
-SIGNID="Iris Local Signing"; security find-certificate -c "$SIGNID" >/dev/null 2>&1 || SIGNID="Flint Local Signing"; SIGNED="ad-hoc"   # the local certificate made before the rename keeps working
-if security find-certificate -c "$SIGNID" >/dev/null 2>&1 && codesign -s "$SIGNID" -f --identifier com.y.iris "$APP" >"$DIR/.sign.log" 2>&1; then SIGNED="$SIGNID"
-else codesign -s - -f --identifier com.y.iris "$APP" >/dev/null 2>&1 || true; fi
-echo "$SIGNED" > "$DIR/.signed-with"
-rm -f "$STAGE/install"
-if [ "$1" = "now" ] || [ $FIRST_STAGE = 1 ] || ! pgrep -a -x Iris >/dev/null; then
-  install_staged; done_line "Launched" "total $(since $T0)"
-else
-  [ -s "$DIR/update-notes.txt" ] && cp -f "$DIR/update-notes.txt" "$STAGE/notes"
-  date +%s > "$STAGE/ready"
-  done_line "Staged" "Iris shows Update when you're ready · $(since $T0)"
-fi
+cp -f "$OUT/Iris" "$DEVAPP/Contents/MacOS/IrisDev"
+sign_app "$DEVAPP" "com.y.iris.dev"
+# Iris Dev restarts into the build (its tabs come back); Iris itself is left alone
+# -a: Iris Dev itself often runs this script, and pkill leaves its own ancestors alone unless told to
+pkill -a -x IrisDev 2>/dev/null || true
+for i in $(seq 1 50); do pgrep -a -x IrisDev >/dev/null || break; sleep 0.1; done
+pkill -9 -a -x IrisDev 2>/dev/null || true
+LSR=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSR" -f "$DEVAPP" >/dev/null 2>&1 || true
+open -g "$DEVAPP" || { sleep 1; open -g "$DEVAPP"; }
+done_line "Dev" "Iris Dev restarted with this build · $(since $T0)"

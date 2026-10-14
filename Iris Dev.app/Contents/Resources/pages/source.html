@@ -1,0 +1,889 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Source</title>
+<style>
+/*THEME*/
+:root{--lh:19px;--gw:4ch;--k-tag:#8fb0f7;--k-attr:#b9a2f4;--k-str:#93dccf;--k-num:#a9d9a0;--k-fn:#86ccf2}
+@media (prefers-color-scheme: light){:root{--k-tag:#2b57c4;--k-attr:#7044cc;--k-str:#0d766a;--k-num:#3b7631;--k-fn:#1a6aa0}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+html{background:var(--bg);color:var(--text);font:13px/1.35 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+body{display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;color:inherit}
+header{flex:none;display:flex;align-items:center;gap:8px;padding:12px 16px 11px 18px;border-bottom:1px solid var(--line)}
+.who{min-width:0;flex:1 1 auto;display:flex;flex-direction:column;gap:4px;margin-right:6px}
+.who b{font-weight:600;font-size:14px;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.who b span{color:var(--faint);font-weight:400}
+.meta{font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.01em}
+.meta em{font-style:normal;color:var(--dim)}
+.seg{display:flex;background:var(--pill);border:1px solid var(--border);border-radius:999px;padding:2px;flex:none}
+.seg button{border:0;background:none;height:24px;padding:0 12px;border-radius:999px;color:var(--dim);cursor:pointer;font-size:12.5px}
+.seg button.on{background:var(--active);color:var(--text);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.seg button:disabled{opacity:.35;cursor:default}
+.tg{height:30px;min-width:30px;padding:0 10px;display:flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--border);background:var(--pill);border-radius:999px;color:var(--dim);cursor:pointer;flex:none;font-size:12.5px;transition:background .15s,color .15s,border-color .15s}
+.tg.ic{padding:0;width:30px}
+.tg:hover{background:var(--hover);color:var(--text)}
+.tg.on{color:var(--text);border-color:color-mix(in srgb,var(--pick) 60%,transparent);background:color-mix(in srgb,var(--pick) 12%,var(--pill))}
+.tg:disabled{opacity:.35;cursor:default}
+.tg svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.find{position:relative;flex:0 1 230px;min-width:120px;display:block}
+.find input{width:100%;height:30px;border-radius:999px;border:1px solid var(--border);background:var(--pill);color:var(--text);padding:0 58px 0 30px;font:inherit;font-size:12.5px;outline:none}
+.find input:focus{border-color:color-mix(in srgb,var(--pick) 60%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--pick) 18%,transparent)}
+.find svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:13px;height:13px;stroke:var(--faint);fill:none;stroke-width:2;stroke-linecap:round}
+.find .n{position:absolute;right:12px;top:50%;transform:translateY(-50%);font:10.5px ui-monospace,Menlo,monospace;color:var(--faint);pointer-events:none}
+main{position:relative;flex:1;min-height:0;display:flex}
+#code{position:relative;flex:1;overflow:auto;font:12px/var(--lh) ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2;-moz-tab-size:2;padding:8px 0 48px;outline:none;font-variant-ligatures:none;scrollbar-gutter:stable}
+#in{display:inline-block;min-width:100%}
+body.wrap #in{display:block}
+.l{display:flex;min-height:var(--lh)}
+.l>i{flex:none;width:calc(var(--gw) + 30px);padding:0 16px 0 12px;text-align:right;color:var(--faint);opacity:.6;font-style:normal;user-select:none;-webkit-user-select:none;position:sticky;left:0;background:var(--bg);cursor:pointer;z-index:1}
+.l>i::before{content:attr(data-n)}
+.l:hover>i{opacity:1}
+.l .c{white-space:pre;padding-right:32px;min-width:0}
+body.wrap .l .c{white-space:pre-wrap;overflow-wrap:anywhere;flex:1}
+.l.sel{background:color-mix(in srgb,var(--pick) 13%,transparent)}
+.l.sel>i{background:color-mix(in srgb,var(--pick) 13%,var(--bg));color:var(--text);opacity:1}
+.ktg,.ksl{color:var(--k-tag)}
+.kan{color:var(--k-attr)}
+.kst,.kre{color:var(--k-str)}
+.kkw{color:var(--text);font-weight:600}
+.kli,.knu{color:var(--k-num)}
+.kfn{color:var(--k-fn)}
+.kcm{color:var(--faint);font-style:italic}
+.kpu{color:var(--dim)}
+.kdt{color:var(--faint)}
+a.lk{text-decoration:underline;text-decoration-color:color-mix(in srgb,currentColor 30%,transparent);text-underline-offset:2px;cursor:pointer}
+a.lk:hover{text-decoration-color:currentColor}
+::highlight(hit){background-color:color-mix(in srgb,var(--pick) 30%,transparent)}
+::highlight(cur){background-color:var(--pick);color:var(--onpick)}
+.state{position:absolute;inset:0;display:none;place-items:center;color:var(--dim);background:var(--bg);z-index:3}
+.state.show{display:grid}
+.state .box{display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;max-width:420px;padding:20px}
+.state .sp{width:20px;height:20px;border:2px solid var(--line);border-top-color:var(--pick);border-radius:50%;animation:spin .8s linear infinite}
+.state p{margin:0;line-height:1.5}
+.state small{color:var(--faint)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (max-width:760px){.tg .lb{display:none}.tg:not(.ic){padding:0;width:30px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="who"><b id="ttl">Source</b><div class="meta" id="meta">&nbsp;</div></div>
+  <div class="seg" id="seg">
+    <button data-m="sent" title="What the server sent">Sent</button>
+    <button data-m="live" title="The page as it stands now, after its scripts ran">Live</button>
+  </div>
+  <button class="tg" id="fmt" title="Format — lay minified code out to read (⌥⌘F)"><svg viewBox="0 0 24 24"><path d="M8 4C6 4 6 5.5 6 7v2.2c0 1-.8 2-2 2.3 1.2.3 2 1.3 2 2.3V17c0 1.5 0 3 2 3M16 4c2 0 2 1.5 2 3v2.2c0 1 .8 2 2 2.3-1.2.3-2 1.3-2 2.3V17c0 1.5 0 3-2 3"/></svg><span class="lb">Format</span></button>
+  <button class="tg" id="wrp" title="Wrap long lines (⌥Z)"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h12.5a3.5 3.5 0 0 1 0 7H12m2.5-2.5L12 19l2.5 2.5M4 18h4"/></svg><span class="lb">Wrap</span></button>
+  <label class="find"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="q" placeholder="Find  ·  :line" spellcheck="false" autocomplete="off"><span class="n" id="qn"></span></label>
+  <button class="tg ic" id="cpy" title="Copy all"><svg viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5"/><path d="M15.5 8.5V6.5a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></svg></button>
+  <button class="tg ic" id="sav" title="Save as a file"><svg viewBox="0 0 24 24"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 19.5h14"/></svg></button>
+</header>
+<main>
+  <div id="code" tabindex="0"><div id="in"></div></div>
+  <div class="state show" id="st"><div class="box"><div class="sp"></div></div></div>
+</main>
+<script nonce="{{NONCE}}" id="core">
+// Iris code viewer core: tokenizers, formatters and the highlighter. Runs in a worker (and on the page as a fallback),
+// so it never touches the document.
+const isWS = c => c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 11 || c === 160 || c === 0xFEFF || c === 0x2028 || c === 0x2029;
+const isIdStart = c => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 36 || c === 95 || (c > 127 && !isWS(c));
+const isId = c => isIdStart(c) || (c >= 48 && c <= 57);
+const isDigit = c => c >= 48 && c <= 57;
+const KW = new Set('break case catch class const continue debugger default delete do else export extends finally for function if import in instanceof let new return super switch throw try typeof var void while with yield async await of static get set'.split(' '));
+const LIT = new Set(['true', 'false', 'null', 'undefined', 'this', 'NaN', 'Infinity']);
+const RE_AFTER = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+const OPS = ['>>>=', '...', '===', '!==', '**=', '<<=', '>>=', '>>>', '??=', '&&=', '||=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '**', '<<', '>>'];
+const OPSTART = new Set('>.=!*<?&|+-/%^'.split(''));
+const VOID = new Set('area base br col embed hr img input link meta param source track wbr keygen command basefont frame isindex'.split(' '));
+const URLATTR = new Set(['href', 'src', 'action', 'poster', 'data-src', 'formaction', 'cite', 'background', 'manifest', 'longdesc', 'icon', 'xlink:href']);
+
+function pushAll(out, a) { for (let k = 0; k < a.length; k++) out.push(a[k]); }
+
+// strings and template literals (with ${…} that may hold more strings)
+function skipStr(s, i, q) {
+  const n = s.length; let j = i + 1;
+  while (j < n) {
+    const e = s.charCodeAt(j);
+    if (e === 92) { j += 2; continue; }
+    if (e === q) return j + 1;
+    if (q !== 96 && e === 10) return j;
+    if (q === 96 && e === 36 && s.charCodeAt(j + 1) === 123) { j = skipExpr(s, j + 2); continue; }
+    j++;
+  }
+  return n;
+}
+function skipExpr(s, j) {
+  const n = s.length; let depth = 1;
+  while (j < n) {
+    const e = s.charCodeAt(j);
+    if (e === 34 || e === 39 || e === 96) { j = skipStr(s, j, e); continue; }
+    if (e === 47 && s.charCodeAt(j + 1) === 42) { const k = s.indexOf('*/', j + 2); j = k < 0 ? n : k + 2; continue; }
+    if (e === 123) depth++;
+    else if (e === 125 && --depth === 0) return j + 1;
+    j++;
+  }
+  return n;
+}
+
+function regexOK(p) {
+  if (!p) return true;
+  if (p[0] === 'pu') return !(p[1] === ')' || p[1] === ']' || p[1] === '}' || p[1] === '++' || p[1] === '--');
+  return p[0] === 'kw' && RE_AFTER.has(p[1]);
+}
+
+// JavaScript / JSON → [class, text] tokens that together are exactly the input
+function jsTok(s, json) {
+  const out = []; const n = s.length; let i = 0, prev = null;
+  while (i < n) {
+    const c = s.charCodeAt(i);
+    if (isWS(c)) { let j = i + 1; while (j < n && isWS(s.charCodeAt(j))) j++; out.push(['ws', s.slice(i, j)]); i = j; continue; }
+    if (c === 47) {
+      const d = s.charCodeAt(i + 1);
+      if (d === 47) { let j = s.indexOf('\n', i); if (j < 0) j = n; out.push(['cm', s.slice(i, j)]); i = j; continue; }
+      if (d === 42) { let j = s.indexOf('*/', i + 2); j = j < 0 ? n : j + 2; out.push(['cm', s.slice(i, j)]); i = j; continue; }
+      if (!json && regexOK(prev)) {
+        let j = i + 1, cls = false;
+        while (j < n) { const e = s.charCodeAt(j); if (e === 92) { j += 2; continue; } if (e === 10) break; if (e === 91) cls = true; else if (e === 93) cls = false; else if (e === 47 && !cls) break; j++; }
+        if (j < n && s.charCodeAt(j) === 47) {
+          j++; while (j < n && isId(s.charCodeAt(j))) j++;
+          const tk = ['re', s.slice(i, j)]; out.push(tk); prev = tk; i = j; continue;
+        }
+      }
+    }
+    if (c === 34 || c === 39 || c === 96) {
+      const j = Math.min(n, skipStr(s, i, c)); const t = s.slice(i, j);
+      let k = j; while (k < n && isWS(s.charCodeAt(k)) && s.charCodeAt(k) !== 10) k++;
+      const key = c !== 96 && s.charCodeAt(k) === 58 && (json || (prev && (prev[1] === '{' || prev[1] === ',')));
+      const tk = [key ? 'an' : 'st', t]; out.push(tk); prev = tk; i = j; continue;
+    }
+    if (isDigit(c) || (c === 46 && isDigit(s.charCodeAt(i + 1)))) {
+      let j = i + 1; const hex = c === 48 && /[xXbBoO]/.test(s[i + 1] || '');
+      while (j < n) { const e = s.charCodeAt(j); if (isId(e) || e === 46 || (!hex && (e === 43 || e === 45) && (s[j - 1] === 'e' || s[j - 1] === 'E'))) j++; else break; }
+      const tk = ['nu', s.slice(i, j)]; out.push(tk); prev = tk; i = j; continue;
+    }
+    if (isIdStart(c) || c === 92) {
+      let j = i + 1; while (j < n && (isId(s.charCodeAt(j)) || s.charCodeAt(j) === 92)) j++;
+      const w = s.slice(i, j);
+      let k = j; while (k < n && isWS(s.charCodeAt(k))) k++;
+      const nx = s.charCodeAt(k);
+      const afterDot = prev && (prev[1] === '.' || prev[1] === '?.');
+      let cls = 'id';
+      if (json) cls = LIT.has(w) ? 'li' : 'id';
+      else if (afterDot) cls = nx === 40 ? 'fn' : 'pp';
+      else if (LIT.has(w)) cls = 'li';
+      else if (KW.has(w)) cls = 'kw';
+      else if (nx === 40) cls = 'fn';
+      else if (nx === 58 && prev && (prev[1] === '{' || prev[1] === ',')) cls = 'an';
+      const tk = [cls, w]; out.push(tk); prev = tk; i = j; continue;
+    }
+    let op = s[i];
+    if (OPSTART.has(op)) for (const o of OPS) if (s.startsWith(o, i)) { op = o; break; }
+    if (c >= 0xD800 && c <= 0xDBFF) op = s.slice(i, i + 2);
+    const tk = ['pu', op]; out.push(tk); prev = tk; i += op.length;
+  }
+  return out;
+}
+
+// CSS
+function cssVal(t, out) {
+  const re = /(#[0-9a-fA-F]{3,8}\b)|(-?(?:\d+\.?\d*|\.\d+)(?:%|[a-zA-Z]+)?)|(!important)|([a-zA-Z_-][\w-]*(?=\())|([a-zA-Z_-][\w-]*)|([^#\d.a-zA-Z_!-]+|[\s\S])/g;
+  let m;
+  while ((m = re.exec(t))) out.push([m[1] || m[2] ? 'nu' : m[3] ? 'kw' : m[4] ? 'fn' : m[5] ? 'vl' : 'pu', m[0]]);
+}
+function cssTok(s) {
+  const out = []; const n = s.length; let i = 0; const stack = []; let inVal = false, prelude = '';
+  while (i < n) {
+    const c = s.charCodeAt(i);
+    if (isWS(c)) { let j = i + 1; while (j < n && isWS(s.charCodeAt(j))) j++; out.push(['ws', s.slice(i, j)]); if (!inVal) prelude += ' '; i = j; continue; }
+    if (c === 47 && s.charCodeAt(i + 1) === 42) { let j = s.indexOf('*/', i + 2); j = j < 0 ? n : j + 2; out.push(['cm', s.slice(i, j)]); i = j; continue; }
+    if (c === 34 || c === 39) { const j = Math.min(n, skipStr(s, i, c)); const t = s.slice(i, j); out.push(['st', t]); if (!inVal) prelude += t; i = j; continue; }
+    if (c === 123) { const p = prelude.trim(); stack.push(/^@(media|supports|container|layer|document|scope|starting-style|-moz-document)\b/i.test(p) ? 'r' : 'd'); prelude = ''; inVal = false; out.push(['pu', '{']); i++; continue; }
+    if (c === 125) { stack.pop(); prelude = ''; inVal = false; out.push(['pu', '}']); i++; continue; }
+    if (c === 59) { out.push(['pu', ';']); inVal = false; prelude = ''; i++; continue; }
+    const mode = stack.length ? stack[stack.length - 1] : 'r';
+    if (mode === 'd') {
+      if (c === 58 && !inVal) {
+        // "a:hover {" nested inside a block is a selector, not a property
+        let k = i + 1; while (k < n) { const e = s.charCodeAt(k); if (e === 59 || e === 123 || e === 125) break; k++; }
+        if (s.charCodeAt(k) !== 123) { out.push(['pu', ':']); inVal = true; i++; continue; }
+      }
+      let j = i;
+      while (j < n) { const e = s.charCodeAt(j); if (isWS(e) || e === 59 || e === 123 || e === 125 || e === 34 || e === 39 || (e === 58 && !inVal && j > i) || (e === 47 && s.charCodeAt(j + 1) === 42)) break; j++; }
+      if (j === i) j = i + 1;
+      const t = s.slice(i, j);
+      if (!inVal) { out.push(['an', t]); prelude += t; } else cssVal(t, out);
+      i = j; continue;
+    }
+    let j = i;
+    while (j < n) { const e = s.charCodeAt(j); if (e === 123 || e === 125 || e === 59 || e === 34 || e === 39 || isWS(e) || (e === 47 && s.charCodeAt(j + 1) === 42)) break; j++; }
+    if (j === i) j = i + 1;
+    const t = s.slice(i, j); prelude += t;
+    const m = /^@[\w-]+/.exec(t);
+    if (m) { out.push(['kw', m[0]]); if (t.length > m[0].length) out.push(['sl', t.slice(m[0].length)]); }
+    else out.push(['sl', t]);
+    i = j;
+  }
+  return out;
+}
+
+// HTML / XML, with script and style bodies handed to their own tokenizers
+function tagEnd(s, i) {
+  const n = s.length; let q = 0, j = i + 1;
+  while (j < n) {
+    const e = s.charCodeAt(j);
+    if (q) { if (e === q) q = 0; }
+    else if (e === 34 || e === 39) { const p = s.charCodeAt(j - 1); if (p === 61 || isWS(p)) q = e; }
+    else if (e === 62) return j + 1;
+    else if (e === 60 && j > i + 1) return j;   // a stray '<': the tag was never closed
+    j++;
+  }
+  return n;
+}
+function scriptKind(type) {
+  if (!type || /(java|ecma)script|module|jsx|babel/.test(type)) return 'js';
+  if (/json|importmap|speculationrules/.test(type)) return 'json';
+  return 'text';
+}
+function htmlTok(s, base, xml) {
+  const out = []; const n = s.length; let i = 0;
+  while (i < n) {
+    const lt = s.indexOf('<', i);
+    if (lt < 0) { out.push(['tx', s.slice(i)]); break; }
+    if (lt > i) out.push(['tx', s.slice(i, lt)]);
+    i = lt;
+    if (s.startsWith('\x3C!--', i)) { let j = s.indexOf('-->', i + 4); j = j < 0 ? n : j + 3; out.push(['cm', s.slice(i, j)]); i = j; continue; }
+    if (s.startsWith('\x3C![CDATA[', i)) { let j = s.indexOf(']]>', i); j = j < 0 ? n : j + 3; out.push(['tx', s.slice(i, j)]); i = j; continue; }
+    const c1 = s.charCodeAt(i + 1);
+    if (c1 === 33 || c1 === 63) { let j = s.indexOf('>', i); j = j < 0 ? n : j + 1; out.push(['dt', s.slice(i, j)]); i = j; continue; }
+    const close = c1 === 47; let j = i + (close ? 2 : 1); const st = j;
+    while (j < n) { const e = s.charCodeAt(j); if (isWS(e) || e === 62 || e === 60 || (e === 47 && j > st)) break; j++; }
+    const name = s.slice(st, j);
+    if (!/^[A-Za-z]/.test(name)) { out.push(['tx', '<']); i++; continue; }
+    out.push(['pu', close ? '</' : '<']); out.push(['tg', name]); i = j;
+    let type = '', selfClosed = false;
+    while (i < n) {
+      const e = s.charCodeAt(i);
+      if (e === 62) { out.push(['pu', '>']); i++; break; }
+      if (e === 47 && s.charCodeAt(i + 1) === 62) { out.push(['pu', '/>']); i += 2; selfClosed = true; break; }
+      if (e === 60) break;
+      if (isWS(e)) { let k = i + 1; while (k < n && isWS(s.charCodeAt(k))) k++; out.push(['ws', s.slice(i, k)]); i = k; continue; }
+      let k = i;
+      while (k < n) { const f = s.charCodeAt(k); if (isWS(f) || f === 61 || f === 62 || f === 60 || (f === 47 && s.charCodeAt(k + 1) === 62)) break; k++; }
+      if (k === i) { out.push(['pu', s[i]]); i++; continue; }
+      const an = s.slice(i, k); out.push(['an', an]); i = k;
+      let q = i; while (q < n && isWS(s.charCodeAt(q))) q++;
+      if (s.charCodeAt(q) !== 61) continue;
+      if (q > i) out.push(['ws', s.slice(i, q)]);
+      out.push(['pu', '=']); i = q + 1;
+      let r = i; while (r < n && isWS(s.charCodeAt(r))) r++;
+      if (r > i) { out.push(['ws', s.slice(i, r)]); i = r; }
+      const f = s.charCodeAt(i); let v;
+      if (f === 34 || f === 39) { let e2 = s.indexOf(s[i], i + 1); e2 = e2 < 0 ? n : e2 + 1; v = s.slice(i, e2); }
+      else { let e2 = i; while (e2 < n) { const g = s.charCodeAt(e2); if (isWS(g) || g === 62) break; e2++; } v = s.slice(i, e2); }
+      if (!v.length) continue;
+      i += v.length;
+      const quoted = f === 34 || f === 39;
+      const raw = quoted ? v.slice(1, v.length > 1 && v[v.length - 1] === v[0] ? -1 : undefined) : v;
+      const lan = an.toLowerCase();
+      if (lan === 'type') type = raw.toLowerCase();
+      let link = null;
+      if (base && URLATTR.has(lan) && raw.trim() && !/^\s*(javascript|data|mailto|tel|about|blob):|^\s*#/i.test(raw)) {
+        try { const u = new URL(raw.trim().replace(/&amp;/g, '&'), base); if (u.protocol === 'http:' || u.protocol === 'https:') link = u.href; } catch (x) {}
+      }
+      out.push(link ? ['st', v, link] : ['st', v]);
+    }
+    const lname = name.toLowerCase();
+    if (!close && !selfClosed && !xml && (lname === 'script' || lname === 'style')) {
+      const re = lname === 'script' ? /<\/script/ig : /<\/style/ig; re.lastIndex = i;
+      const m = re.exec(s); const e = m ? m.index : n;
+      const body = s.slice(i, e);
+      if (body) {
+        const kind = lname === 'style' ? 'css' : scriptKind(type);
+        if (kind === 'css') pushAll(out, cssTok(body));
+        else if (kind === 'js') pushAll(out, jsTok(body, false));
+        else if (kind === 'json') pushAll(out, jsTok(body, true));
+        else out.push(['tx', body]);
+      }
+      i = e;
+    }
+  }
+  return out;
+}
+
+// ——— formatting ———
+const IND = '  ';
+const VALUEISH = p => p && ((p[0] === 'id' || p[0] === 'li' || p[0] === 'nu' || p[0] === 'st' || p[0] === 're' || p[0] === 'fn' || p[0] === 'pp' || p[0] === 'an') || (p[0] === 'pu' && (p[1] === ')' || p[1] === ']' || p[1] === '}')) || (p[0] === 'kw' && (p[1] === 'this' || p[1] === 'super')));
+const WORD = p => p && (p[0] === 'id' || p[0] === 'li' || p[0] === 'nu' || p[0] === 'kw' || p[0] === 'fn' || p[0] === 'pp' || p[0] === 'an' || p[0] === 're' || p[0] === 'st');
+const BIN = new Set(['=', '==', '===', '!=', '!==', '<', '>', '<=', '>=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '**=', '<<=', '>>=', '>>>=', '&&=', '||=', '??=', '&&', '||', '??', '=>', '*', '/', '%', '&', '|', '^', '**', '<<', '>>', '>>>']);
+const PAREN_KW = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'typeof', 'await', 'yield', 'in', 'of', 'new', 'else', 'do', 'case', 'throw', 'delete', 'void', 'instanceof', 'with']);
+const GLUE_AFTER_CLOSE = new Set([')', ';', ',', '.', '?.', ']', '(', ':', '?', '&&', '||', '??', '+', '-', '*', '/', '=', '==', '===', '!=', '!==', '=>', '`']);
+
+function fmtJS(s, json, base0) {
+  const toks = jsTok(s, json);
+  const lines = []; let line = '', lineInd = 0, ind = 0, pend = false;
+  const stack = []; const tern = [0];
+  let prev = null;
+  const nl = () => { if (line.length) { lines.push(base0 + IND.repeat(lineInd) + line); line = ''; } };
+  const emit = (t, space) => { if (!line.length) lineInd = Math.max(0, ind); else if (space) line += ' '; line += t; };
+  const nextSig = k => { for (let j = k; j < toks.length; j++) { const c = toks[j][0]; if (c !== 'ws' && c !== 'cm') return toks[j]; } return null; };
+  const top = () => stack.length ? stack[stack.length - 1] : '';
+  for (let k = 0; k < toks.length; k++) {
+    const tk = toks[k]; const c = tk[0], t = tk[1];
+    if (c === 'ws') {
+      const nls = t.split('\n').length - 1;
+      if (nls && (!stack.length || top() === '{')) {
+        nl();
+        if (nls > 1 && lines.length && lines[lines.length - 1].trim() !== '') lines.push('');
+      } else if (line.length) pend = true;
+      continue;
+    }
+    if (c === 'cm') {
+      emit(t, line.length > 0);
+      if (t.startsWith('//')) nl(); else pend = true;
+      continue;
+    }
+    if (c !== 'pu') {
+      const space = pend || (WORD(prev) && true) || (prev && prev[1] === ')') || (prev && prev[0] === 'kw');
+      emit(t, space && !(prev && (prev[1] === '.' || prev[1] === '?.' || prev[1] === '(' || prev[1] === '[' || prev[1] === '!' || prev[1] === '~' || prev[1] === '...' || prev[1] === '#' || prev[1] === '@' || ((prev[1] === '++' || prev[1] === '--' || prev[1] === '+' || prev[1] === '-') && prev.unary))));
+      pend = false; prev = tk; continue;
+    }
+    const sp = pend; pend = false;
+    if (t === '{') {
+      emit('{', line.length > 0 && !(prev && (prev[1] === '(' || prev[1] === '[' || prev[1] === '${' || prev[1] === '...')));
+      stack.push('{'); tern.push(0); ind++;
+      const nx = nextSig(k + 1);
+      if (nx && nx[0] === 'pu' && nx[1] === '}') {
+        // "{}" stays together
+        let j = k + 1; while (toks[j] !== nx) j++;
+        line += '}'; stack.pop(); tern.pop(); ind--; k = j; prev = nx;
+        const after = nextSig(k + 1);
+        if (!after || !(after[0] === 'pu' && GLUE_AFTER_CLOSE.has(after[1]))) { if (!stack.length || top() === '{') nl(); }
+        continue;
+      }
+      nl(); prev = tk; continue;
+    }
+    if (t === '}') {
+      if (stack.length && top() === '{') { stack.pop(); tern.pop(); }
+      ind = Math.max(0, ind - 1); nl(); emit('}', false);
+      const nx = nextSig(k + 1);
+      if (nx && (nx[1] === 'else' || nx[1] === 'catch' || nx[1] === 'finally')) pend = true;
+      else if (!nx || !(nx[0] === 'pu' && GLUE_AFTER_CLOSE.has(nx[1]))) { if (!stack.length || top() === '{') nl(); }
+      prev = tk; continue;
+    }
+    if (t === '(' || t === '[') {
+      let space;
+      if (t === '(') space = line.length > 0 && !(prev && (prev[0] === 'fn' || prev[0] === 'id' || prev[0] === 'pp' || prev[1] === ')' || prev[1] === ']' || prev[1] === '(' || prev[1] === '[' || prev[1] === '.' || prev[1] === '?.' || prev[1] === '!' || prev[1] === '...' || (prev[0] === 'kw' && (prev[1] === 'function' || prev[1] === 'super' || prev[1] === 'import')))) && (sp || (prev && (prev[0] === 'kw' && PAREN_KW.has(prev[1]) || BIN.has(prev[1]) || prev[1] === ',' || prev[1] === '?' || prev[1] === ':' || prev[1] === '=>')));
+      else space = line.length > 0 && !VALUEISH(prev) && !(prev && (prev[1] === '(' || prev[1] === '[' || prev[1] === '.' || prev[1] === '!' || prev[1] === '...')) && (sp || (prev && (prev[0] === 'kw' || BIN.has(prev[1]) || prev[1] === ',' || prev[1] === '?' || prev[1] === ':')));
+      emit(t, space); stack.push(t); tern.push(0); prev = tk; continue;
+    }
+    if (t === ')' || t === ']') {
+      if (stack.length && top() !== '{') { stack.pop(); tern.pop(); }
+      emit(t, false); prev = tk; continue;
+    }
+    if (t === ',') { emit(',', false); if (!stack.length || top() === '{') nl(); else pend = true; prev = tk; continue; }
+    if (t === ';') { emit(';', false); if (top() === '(') pend = true; else nl(); prev = tk; continue; }
+    if (t === '.' || t === '?.') { emit(t, false); prev = tk; continue; }
+    if (t === '?') { tern[tern.length - 1]++; emit('?', true); pend = true; prev = tk; continue; }
+    if (t === ':') {
+      if (tern[tern.length - 1] > 0) { tern[tern.length - 1]--; emit(':', true); }
+      else emit(':', false);
+      pend = true; prev = tk; continue;
+    }
+    if (t === '+' || t === '-' || t === '++' || t === '--') {
+      const binary = (t === '+' || t === '-') && VALUEISH(prev);
+      const postfix = (t === '++' || t === '--') && VALUEISH(prev) && !(prev[1] === '}');
+      const tk2 = [c, t]; tk2.unary = !binary && !postfix;
+      if (binary) { emit(t, true); pend = true; }
+      else if (postfix) emit(t, false);
+      else emit(t, sp || (prev && (prev[0] === 'kw' || BIN.has(prev[1]) || prev[1] === ',' || prev[1] === '?' || prev[1] === ':' || ((prev[1] === '+' || prev[1] === '-') && !prev.unary))));
+      prev = tk2; continue;
+    }
+    if (t === '!' || t === '~' || t === '...' || t === '#' || t === '@') {
+      emit(t, line.length > 0 && (sp || (prev && (prev[0] === 'kw' || BIN.has(prev[1]) || prev[1] === ',' || prev[1] === '?' || prev[1] === ':' || prev[1] === '}' || WORD(prev)))) && !(prev && (prev[1] === '(' || prev[1] === '[' || prev[1] === '!' || prev[1] === '.')));
+      prev = tk; continue;
+    }
+    if (BIN.has(t)) { emit(t, true); pend = true; prev = tk; continue; }
+    emit(t, sp); prev = tk;
+  }
+  nl();
+  return lines;
+}
+
+function fmtCSS(s, base0) {
+  const toks = cssTok(s);
+  const lines = []; let line = '', lineInd = 0, ind = 0, sp = false;
+  const nl = () => { if (line.trim().length) lines.push(base0 + IND.repeat(lineInd) + line.trimEnd()); line = ''; };
+  const emit = t => { if (!line.length) { lineInd = Math.max(0, ind); t = t.replace(/^\s+/, ''); if (!t) return; } else if (sp) line += ' '; sp = false; line += t; };
+  for (const [c, t] of toks) {
+    if (c === 'ws') { if (line.length) sp = true; continue; }
+    if (c === 'cm') { if (line.trim()) { emit(t); } else { emit(t); } nl(); continue; }
+    if (c === 'pu' && t === '{') { sp = line.length > 0; emit('{'); nl(); ind++; continue; }
+    if (c === 'pu' && t === '}') { nl(); ind = Math.max(0, ind - 1); emit('}'); nl(); if (ind === 0) lines.push(''); continue; }
+    if (c === 'pu' && t === ';') { sp = false; emit(';'); nl(); continue; }
+    if (c === 'pu' && t === ':') { sp = false; emit(':'); sp = true; continue; }
+    if (c === 'sl') {
+      const parts = t.replace(/\s+/g, ' ');
+      if (!parts.trim()) { if (line.length) sp = true; continue; }
+      if (line.length && /^\s/.test(t)) sp = true;
+      emit(parts.trim().replace(/,(?=[^\s,])/g, ', ')); if (/\s$/.test(t)) sp = true; continue;
+    }
+    if (c === 'pu' && /^[),]/.test(t)) { sp = false; emit(t); if (/,$/.test(t)) sp = true; continue; }
+    if (c === 'pu' && t === '(') { sp = false; emit(t); continue; }
+    emit(t);
+    if (c === 'fn') sp = false;
+  }
+  nl();
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  return lines;
+}
+
+function fmtJSON(s, base0) {
+  try { return JSON.stringify(JSON.parse(s), null, 2).split('\n').map(l => base0 + l); }
+  catch (e) { return fmtJS(s, true, base0); }
+}
+
+function normTag(raw) {
+  let out = '', q = 0, space = false;
+  for (let j = 0; j < raw.length; j++) {
+    const ch = raw[j], e = raw.charCodeAt(j);
+    if (q) { out += ch; if (e === q) q = 0; continue; }
+    if (isWS(e)) { space = true; continue; }
+    if (space) { if (!(ch === '>' || (ch === '/' && raw[j + 1] === '>')) && !(ch === '=' ) && !(out.endsWith('='))) out += ' '; space = false; }
+    if ((e === 34 || e === 39) && out.endsWith('=')) q = e;
+    out += ch;
+  }
+  return out;
+}
+
+function fmtHTML(s, xml) {
+  const lines = []; const n = s.length; const stack = [];
+  const put = (t, d) => lines.push(IND.repeat(Math.max(0, d)) + t);
+  const closesAt = (k, name) => {
+    if (s.charCodeAt(k) !== 60 || s.charCodeAt(k + 1) !== 47) return 0;
+    const cand = s.slice(k + 2, k + 2 + name.length);
+    if (cand.toLowerCase() !== name) return 0;
+    let e = k + 2 + name.length; while (e < n && isWS(s.charCodeAt(e))) e++;
+    return s.charCodeAt(e) === 62 ? e + 1 : 0;
+  };
+  let i = 0;
+  while (i < n) {
+    const lt = s.indexOf('<', i);
+    const textEnd = lt < 0 ? n : lt;
+    if (textEnd > i) { const tt = s.slice(i, textEnd).replace(/\s+/g, ' ').trim(); if (tt) put(tt, stack.length); }
+    if (lt < 0) break;
+    i = lt;
+    if (s.startsWith('\x3C!--', i)) {
+      let j = s.indexOf('-->', i + 4); j = j < 0 ? n : j + 3;
+      for (const l of s.slice(i, j).split('\n')) { const lt2 = l.trim(); if (lt2) put(lt2, stack.length); }
+      i = j; continue;
+    }
+    if (s.startsWith('\x3C![CDATA[', i)) { let j = s.indexOf(']]>', i); j = j < 0 ? n : j + 3; for (const l of s.slice(i, j).split('\n')) put(l, stack.length); i = j; continue; }
+    if (s[i + 1] === '!' || s[i + 1] === '?') { let j = s.indexOf('>', i); j = j < 0 ? n : j + 1; put(s.slice(i, j).replace(/\s+/g, ' '), stack.length); i = j; continue; }
+    const m = /^<(\/?)([A-Za-z][^\s\/>]*)/.exec(s.slice(i, i + 200));
+    if (!m) { let j = s.indexOf('<', i + 1); if (j < 0) j = n; const tt = s.slice(i, j).replace(/\s+/g, ' ').trim(); if (tt) put(tt, stack.length); i = j; continue; }
+    const j = tagEnd(s, i); const raw = s.slice(i, j);
+    const tag = normTag(raw);
+    const close = !!m[1], name = m[2].toLowerCase();
+    if (close) { const at = stack.lastIndexOf(name); if (at >= 0) stack.length = at; put(tag, stack.length); i = j; continue; }
+    const selfc = /\/\s*>$/.test(raw) || (!xml && VOID.has(name));
+    if (!xml && (name === 'script' || name === 'style' || name === 'textarea' || name === 'pre' || name === 'title') && !selfc) {
+      let e = n, end = n;
+      if (name === 'script' || name === 'style') { const re = name === 'script' ? /<\/script\s*>/ig : /<\/style\s*>/ig; re.lastIndex = j; const mm = re.exec(s); if (mm) { e = mm.index; end = e + mm[0].length; } }
+      else { let k = s.indexOf('<', j); while (k >= 0) { const c2 = closesAt(k, name); if (c2) { e = k; end = c2; break; } k = s.indexOf('<', k + 1); } }
+      const body = s.slice(j, e); const closeTag = end > e ? '</' + m[2] + '>' : '';
+      if (name === 'script' || name === 'style') {
+        const tm = /\stype\s*=\s*["']?([^"'\s>]+)/i.exec(raw); const type = tm ? tm[1].toLowerCase() : '';
+        if (!body.trim()) put(tag + closeTag, stack.length);
+        else {
+          put(tag, stack.length);
+          const b0 = IND.repeat(stack.length + 1);
+          const kind = name === 'style' ? 'css' : scriptKind(type);
+          const f = kind === 'css' ? fmtCSS(body, b0) : kind === 'js' ? fmtJS(body, false, b0) : kind === 'json' ? fmtJSON(body, b0) : body.split('\n').map(l => l.trim() ? b0 + l.trim() : '').filter((l, q, a) => l || (q > 0 && a[q - 1]));
+          pushAll(lines, f);
+          if (closeTag) put(closeTag, stack.length);
+        }
+      } else if (name === 'title') put(tag + body.replace(/\s+/g, ' ').trim() + closeTag, stack.length);
+      else { const b = (tag + body + closeTag).split('\n'); put(b[0], stack.length); for (let q = 1; q < b.length; q++) lines.push(b[q]); }
+      i = end; continue;
+    }
+    if (selfc) { put(tag, stack.length); i = j; continue; }
+    // a short element holding only text stays on one line: <a href="…">Home</a>
+    const k = s.indexOf('<', j);
+    if (k >= 0 && k - j < 160) {
+      const c2 = closesAt(k, name);
+      if (c2) { const tt = s.slice(j, k).replace(/\s+/g, ' ').trim(); if (tag.length + tt.length < 160) { put(tag + tt + '</' + m[2] + '>', stack.length); i = c2; continue; } }
+    }
+    put(tag, stack.length); stack.push(name); i = j;
+  }
+  return lines;
+}
+
+function format(text, lang) {
+  if (lang === 'html' || lang === 'xml') return fmtHTML(text, lang === 'xml').join('\n');
+  if (lang === 'js') return fmtJS(text, false, '').join('\n');
+  if (lang === 'css') return fmtCSS(text, '').join('\n');
+  if (lang === 'json') return fmtJSON(text, '').join('\n');
+  return text;
+}
+
+const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+const esc = t => t.replace(/[&<>"]/g, ch => ESC[ch]);
+
+// tokens → one HTML string per line (spans never cross a line break)
+function toLines(toks) {
+  const lines = []; let cur = '';
+  for (let k = 0; k < toks.length; k++) {
+    const tk = toks[k]; const c = tk[0], link = tk[2];
+    const parts = tk[1].split('\n');
+    for (let p = 0; p < parts.length; p++) {
+      if (p > 0) { lines.push(cur); cur = ''; }
+      const piece = parts[p]; if (!piece) continue;
+      const e = esc(piece);
+      if (link) cur += '<a class="k' + c + ' lk" data-u="' + esc(link) + '">' + e + '</a>';
+      else if (c === 'ws' || c === 'tx' || c === 'id') cur += e;
+      else cur += '<span class="k' + c + '">' + e + '</span>';
+    }
+  }
+  lines.push(cur);
+  return lines;
+}
+
+function tokensFor(text, lang, base) {
+  if (lang === 'html') return htmlTok(text, base, false);
+  if (lang === 'xml') return htmlTok(text, base, true);
+  if (lang === 'js') return jsTok(text, false);
+  if (lang === 'json') return jsTok(text, true);
+  if (lang === 'css') return cssTok(text);
+  return [['tx', text]];
+}
+
+function job(d) {
+  let text = d.text.replace(/\r\n?/g, '\n');
+  let formatted = false;
+  if (d.pretty) { try { text = format(text, d.lang); formatted = true; } catch (e) {} }
+  const plain = text.split('\n');
+  let lines;
+  try { lines = toLines(tokensFor(text, d.lang, d.base)); if (lines.length !== plain.length) throw new Error('lines'); }
+  catch (e) { lines = plain.map(esc); }
+  return { key: d.key, lines, plain, formatted };
+}
+
+</script>
+<script nonce="{{NONCE}}">
+// Iris code viewer: iris://source?u=<address>[&id=<live snapshot>]
+const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
+const $ = id => document.getElementById(id);
+const PARAMS = new URLSearchParams(location.search);
+const TARGET = PARAMS.get('u') || '';
+const SNAP = PARAMS.get('id') || '';
+const LH = 19, CH = 200;
+const getPref = (k, d) => { try { const v = localStorage.getItem('src.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } };
+const setPref = (k, v) => { try { localStorage.setItem('src.' + k, JSON.stringify(v)); } catch (e) {} };
+
+let mode = SNAP ? getPref('mode', 'sent') : 'sent';
+let wrap = getPref('wrap', false);
+const loaded = {};          // mode → {text, lang, base, meta} | {error} | {binary}
+const pretty = {};          // mode → formatted or not
+const results = new Map();  // mode|pretty → {lines, plain}
+let view = null, viewKey = '', lowered = null;
+let chunks = [], filled = new Set(), watcher = null, charW = 7.2;
+let hits = [], current = -1, selLine = -1;
+
+// ——— title ———
+let host = '', path = '';
+try { const u = new URL(TARGET); host = u.host; path = u.pathname + u.search; } catch (e) { host = TARGET; }
+(() => {
+  const t = $('ttl'); t.textContent = host;
+  if (path && path !== '/') { const s = document.createElement('span'); s.textContent = path; t.appendChild(s); }
+  document.title = 'Source · ' + (host || 'page');
+  t.title = TARGET;
+})();
+document.body.classList.toggle('wrap', wrap);
+$('wrp').classList.toggle('on', wrap);
+
+function kb(n) { return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+function langOf(type, url) {
+  type = (type || '').toLowerCase();
+  if (/html/.test(type)) return 'html';
+  if (/svg|xml/.test(type)) return 'xml';
+  if (/json/.test(type)) return 'json';
+  if (/javascript|ecmascript/.test(type)) return 'js';
+  if (/css/.test(type)) return 'css';
+  let ext = ''; try { ext = (new URL(url).pathname.split('.').pop() || '').toLowerCase(); } catch (e) {}
+  return {js: 'js', mjs: 'js', cjs: 'js', css: 'css', json: 'json', map: 'json', webmanifest: 'json', svg: 'xml', xml: 'xml', html: 'html', htm: 'html'}[ext] || 'text';
+}
+function looksMinified(t) {
+  if (t.length < 400) return false;
+  let nl = 0; for (let i = 0; i < t.length; i++) if (t.charCodeAt(i) === 10) nl++;
+  return t.length / (nl + 1) > 220 || /[^\n]{1600}/.test(t);
+}
+
+// ——— status overlay ———
+function status(kind, msg, sub, action) {
+  const st = $('st'); const box = st.firstElementChild; box.textContent = '';
+  if (!kind) { st.classList.remove('show'); return; }
+  st.classList.add('show');
+  if (kind === 'busy') { const s = document.createElement('div'); s.className = 'sp'; box.appendChild(s); }
+  if (msg) { const p = document.createElement('p'); p.textContent = msg; box.appendChild(p); }
+  if (sub) { const p = document.createElement('small'); p.textContent = sub; box.appendChild(p); }
+  if (action) { const b = document.createElement('button'); b.className = 'tg'; b.textContent = action[0]; b.onclick = action[1]; box.appendChild(b); }
+}
+function setMeta(parts) {
+  const m = $('meta'); m.textContent = '';
+  parts.filter(Boolean).forEach((p, i) => {
+    if (i) m.appendChild(document.createTextNode('  ·  '));
+    if (i === 0) { const e = document.createElement('em'); e.textContent = p; m.appendChild(e); } else m.appendChild(document.createTextNode(p));
+  });
+}
+
+// ——— the work happens in a worker, so a 3 MB script formats without freezing the page ———
+let worker = null, workerURL = null, jobN = 0;
+function runJob(d) {
+  return new Promise(done => {
+    const n = ++jobN; d.key = n;
+    const inline = () => setTimeout(() => { if (n === jobN) done(job(d)); }, 0);
+    try {
+      if (!workerURL) workerURL = URL.createObjectURL(new Blob([$('core').textContent + '\nself.onmessage = e => self.postMessage(job(e.data));'], {type: 'text/javascript'}));
+      if (worker) worker.terminate();
+      worker = new Worker(workerURL);
+      worker.onmessage = e => { if (e.data.key === jobN) done(e.data); };
+      worker.onerror = ev => { ev.preventDefault && ev.preventDefault(); worker = null; inline(); };
+      worker.postMessage(d);
+    } catch (x) { inline(); }
+  });
+}
+
+async function fetchMode(m) {
+  if (loaded[m]) return loaded[m];
+  if (m === 'live') {
+    const r = await call('source.get', {id: SNAP}).catch(() => null);
+    if (!r || typeof r.dom !== 'string' || !r.dom) return loaded[m] = {error: 'The live page isn’t available any more.', sub: 'Choose View Source on the page again to capture it.'};
+    return loaded[m] = {text: r.dom, lang: 'html', base: r.url || TARGET, meta: ['Live DOM', 'as the page stood when you opened this', kb(r.dom.length)]};
+  }
+  const r = await call('source.fetch', {url: TARGET}).catch(e => ({error: String(e)}));
+  if (!r || (r.error && typeof r.text !== 'string')) return loaded[m] = {error: 'Couldn’t load the source.', sub: (r && r.error) || ''};
+  if (r.binary) return loaded[m] = {binary: true, type: r.type, url: r.url || TARGET};
+  return loaded[m] = {text: r.text || '', lang: langOf(r.type, r.url || TARGET), base: r.url || TARGET,
+    meta: [String(r.status || 'Sent'), (r.type || '').split(';')[0], kb(r.bytes || 0) + (r.truncated ? ' (first 12 MB)' : ''), r.ms != null ? r.ms + ' ms' : '']};
+}
+
+async function show() {
+  for (const b of $('seg').children) { b.classList.toggle('on', b.dataset.m === mode); b.disabled = b.dataset.m === 'live' && !SNAP; }
+  const m = mode;
+  if (!loaded[m]) status('busy');
+  const d = await fetchMode(m);
+  if (m !== mode) return;
+  if (d.error) { status('msg', d.error, d.sub); setMeta([]); clearView(); return; }
+  if (d.binary) { status('msg', 'This is a ' + (d.type || 'binary') + ' file, not text.', '', ['Open it', () => call('open', {url: d.url, how: 'tab'})]); setMeta([d.type]); clearView(); return; }
+  if (pretty[m] === undefined) pretty[m] = d.lang !== 'text' && looksMinified(d.text);
+  $('fmt').classList.toggle('on', !!pretty[m]); $('fmt').disabled = d.lang === 'text';
+  const key = m + '|' + !!pretty[m];
+  let r = results.get(key);
+  if (!r) {
+    status('busy', pretty[m] && d.text.length > 400000 ? 'Formatting ' + kb(d.text.length) + '…' : '');
+    r = await runJob({text: d.text, lang: d.lang, pretty: !!pretty[m], base: d.base});
+    results.set(key, r);
+  }
+  if (key !== mode + '|' + !!pretty[mode]) return;   // you switched while it worked
+  const keep = null;
+  view = r; viewKey = key; lowered = null;
+  setMeta([...d.meta, r.plain.length.toLocaleString() + (r.plain.length === 1 ? ' line' : ' lines')]);
+  status('');
+  render(keep);
+  const q = $('q').value; if (q) search(q, true);
+}
+
+function clearView() { if (watcher) watcher.disconnect(); $('in').textContent = ''; chunks = []; filled = new Set(); view = null; viewKey = ''; hits = []; current = -1; counter(); paint(); }
+
+// ——— rendering: lines arrive in blocks of 200 as they come near the screen ———
+function measure() {
+  const s = document.createElement('span'); s.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:12px ui-monospace,SFMono-Regular,Menlo,monospace';
+  s.textContent = 'x'.repeat(100); $('code').appendChild(s); charW = s.getBoundingClientRect().width / 100 || 7.2; s.remove();
+}
+function estimate(c) {
+  const a = c * CH, b = Math.min(view.plain.length, a + CH);
+  if (!wrap) return (b - a) * LH;
+  const gutter = (String(view.plain.length).length) * charW + 30;
+  const per = Math.max(20, Math.floor(($('code').clientWidth - gutter - 34) / charW));
+  let rows = 0; for (let i = a; i < b; i++) rows += Math.max(1, Math.ceil(view.plain[i].length / per));
+  return rows * LH;
+}
+function render(keep) {
+  if (watcher) watcher.disconnect();
+  const box = $('in'); box.textContent = '';
+  chunks = []; filled = new Set();
+  if (!view) return;
+  document.documentElement.style.setProperty('--gw', String(view.plain.length).length + 'ch');
+  measure();
+  const frag = document.createDocumentFragment();
+  for (let c = 0; c * CH < view.plain.length; c++) {
+    const d = document.createElement('div'); d.dataset.c = c; d.style.height = estimate(c) + 'px';
+    chunks.push(d); frag.appendChild(d);
+  }
+  box.appendChild(frag);
+  watcher = new IntersectionObserver(es => {
+    for (const e of es) { const c = +e.target.dataset.c; if (e.isIntersecting) fill(c); else empty(c); }
+    paint();
+  }, {root: $('code'), rootMargin: '1600px 0px'});
+  chunks.forEach(d => watcher.observe(d));
+  const hash = /^#L(\d+)$/.exec(location.hash);
+  if (keep == null && hash) { selLine = Math.min(view.plain.length, +hash[1]) - 1; reveal(selLine, 'center'); }
+  else if (keep > 0) reveal(keep, 'start');
+  else $('code').scrollTop = 0;
+}
+function fill(c) {
+  if (filled.has(c) || !view) return;
+  const a = c * CH, b = Math.min(view.plain.length, a + CH);
+  let h = '';
+  for (let i = a; i < b; i++) h += '<div class="l' + (i === selLine ? ' sel' : '') + '" id="L' + (i + 1) + '"><i data-n="' + (i + 1) + '"></i><span class="c">' + view.lines[i] + '</span></div>';
+  const d = chunks[c]; d.innerHTML = h; d.style.height = ''; filled.add(c);
+}
+function empty(c) {
+  if (!filled.has(c)) return;
+  const d = chunks[c]; d.style.height = d.offsetHeight + 'px'; d.textContent = ''; filled.delete(c);
+}
+function reveal(i, block) {
+  if (!view || i < 0) return;
+  fill(Math.floor(i / CH));
+  const el = document.getElementById('L' + (i + 1)); if (!el) return;
+  const code = $('code');
+  const y = el.offsetTop - (block === 'start' ? 8 : code.clientHeight / 2 - LH / 2);
+  code.scrollTop = Math.max(0, y);
+  // the blocks around it fill as the observer catches up; make sure the line's own block is painted now
+  paint();
+}
+function topLine() {
+  if (!view || !chunks.length) return 0;
+  const y = $('code').scrollTop;
+  let lo = 0, hi = chunks.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (chunks[mid].offsetTop <= y) lo = mid; else hi = mid - 1; }
+  const d = chunks[lo]; const a = lo * CH;
+  if (!filled.has(lo)) return a + Math.max(0, Math.floor((y - d.offsetTop) / LH));
+  for (const el of d.children) if (el.offsetTop + el.offsetHeight > y) return +el.id.slice(1) - 1;
+  return a;
+}
+
+// ——— find: every match in the whole file, painted with highlights so the colours stay ———
+function search(q, keepPlace) {
+  hits = []; current = -1;
+  if (!view || !q) { counter(); paint(); return; }
+  const jump = /^:(\d+)$/.exec(q.trim());
+  if (jump) { const ln = Math.min(view.plain.length, Math.max(1, +jump[1])) - 1; select(ln); reveal(ln, 'center'); counter(); paint(); return; }
+  if (!lowered) lowered = view.plain.map(s => { const l = s.toLowerCase(); return l.length === s.length ? l : s; });
+  const ql = q.toLowerCase(); const L = ql.length;
+  for (let i = 0; i < lowered.length && hits.length < 200000; i++) {
+    const s = lowered[i]; let p = s.indexOf(ql);
+    while (p >= 0) { hits.push(i, p); p = s.indexOf(ql, p + L); }
+  }
+  const n = hits.length / 2;
+  if (n) {
+    const from = topLine(); current = 0;
+    for (let k = 0; k < n; k++) if (hits[2 * k] >= from) { current = k; break; }
+    if (!keepPlace || !lineVisible(hits[2 * current])) reveal(hits[2 * current], 'center');
+  }
+  counter(); paint();
+}
+function lineVisible(i) {
+  const el = document.getElementById('L' + (i + 1)); if (!el) return false;
+  const code = $('code'); return el.offsetTop >= code.scrollTop && el.offsetTop + LH <= code.scrollTop + code.clientHeight;
+}
+function step(d) {
+  const n = hits.length / 2; if (!n) return;
+  current = (current + d + n) % n; reveal(hits[2 * current], 'center'); counter(); paint();
+}
+function counter() {
+  const n = hits.length / 2, q = $('q').value;
+  $('qn').textContent = !q || /^:\d+$/.test(q.trim()) ? '' : n ? (current + 1).toLocaleString() + '/' + n.toLocaleString() + (n >= 200000 ? '+' : '') : '0';
+}
+function rangeAt(i, col, len) {
+  const el = document.getElementById('L' + (i + 1)); if (!el) return null;
+  const w = document.createTreeWalker(el.lastChild, NodeFilter.SHOW_TEXT);
+  let pos = 0, sN = null, sO = 0, node;
+  while ((node = w.nextNode())) {
+    const l = node.data.length;
+    if (!sN && col < pos + l) { sN = node; sO = col - pos; }
+    if (sN && col + len <= pos + l) { const r = new Range(); r.setStart(sN, sO); r.setEnd(node, col + len - pos); return r; }
+    pos += l;
+  }
+  return null;
+}
+function paint() {
+  if (!window.CSS || !CSS.highlights || typeof Highlight === 'undefined') return;
+  const L = $('q').value.length, n = hits.length / 2;
+  const all = [], cur = [];
+  if (n && L) for (const c of filled) {
+    const a = c * CH, b = a + CH;
+    let lo = 0, hi = n; while (lo < hi) { const mid = (lo + hi) >> 1; if (hits[2 * mid] < a) lo = mid + 1; else hi = mid; }
+    for (let k = lo; k < n && hits[2 * k] < b && all.length < 8000; k++) { const r = rangeAt(hits[2 * k], hits[2 * k + 1], L); if (r) (k === current ? cur : all).push(r); }
+  }
+  CSS.highlights.set('hit', new Highlight(...all));
+  CSS.highlights.set('cur', new Highlight(...cur));
+}
+
+function select(i) {
+  const old = document.querySelector('.l.sel'); if (old) old.classList.remove('sel');
+  selLine = i;
+  const el = document.getElementById('L' + (i + 1)); if (el) el.classList.add('sel');
+  try { history.replaceState(null, '', '#L' + (i + 1)); } catch (e) {}
+}
+
+// ——— controls ———
+$('seg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b || b.disabled || b.dataset.m === mode) return;
+  mode = b.dataset.m; setPref('mode', mode); show();
+});
+function toggleFormat() { if ($('fmt').disabled || !loaded[mode] || loaded[mode].error || loaded[mode].binary) return; pretty[mode] = !pretty[mode]; show(); }
+function toggleWrap() {
+  const keep = topLine();
+  wrap = !wrap; setPref('wrap', wrap);
+  document.body.classList.toggle('wrap', wrap); $('wrp').classList.toggle('on', wrap);
+  if (view) { render(keep); paint(); }
+}
+$('fmt').onclick = toggleFormat;
+$('wrp').onclick = toggleWrap;
+$('cpy').onclick = () => { if (view) call('copy', {text: view.plain.join('\n')}).then(() => call('toast', {text: 'Copied ' + view.plain.length.toLocaleString() + ' lines'})); };
+$('sav').onclick = () => {
+  if (!view) return;
+  const d = loaded[mode] || {};
+  let name = (path.split('?')[0].split('/').pop() || host || 'source').replace(/[^\w.\-]+/g, '-');
+  const ext = {html: 'html', xml: 'xml', js: 'js', css: 'css', json: 'json'}[d.lang] || 'txt';
+  if (!/\.\w{1,6}$/.test(name)) name += '.' + ext;
+  if (mode === 'live') name = name.replace(/(\.\w+)$/, '-live$1');
+  call('source.save', {text: view.plain.join('\n'), name});
+};
+let typing = null;
+$('q').addEventListener('input', () => { clearTimeout(typing); typing = setTimeout(() => search($('q').value, false), 140); });
+$('q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); clearTimeout(typing); if (!hits.length) search($('q').value, false); else step(e.shiftKey ? -1 : 1); }
+  else if (e.key === 'Escape') { e.preventDefault(); $('q').value = ''; search('', false); $('code').focus(); }
+});
+window.irisFind = () => { $('q').focus(); $('q').select(); };
+addEventListener('keydown', e => {
+  const inField = document.activeElement === $('q');
+  if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); window.irisFind(); }
+  else if (e.metaKey && e.key.toLowerCase() === 'g') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+  else if (e.metaKey && e.altKey && e.code === 'KeyF') { e.preventDefault(); toggleFormat(); }
+  else if (e.altKey && !e.metaKey && e.code === 'KeyZ') { e.preventDefault(); toggleWrap(); }
+  else if (!inField && e.key === '/' && !e.metaKey) { e.preventDefault(); window.irisFind(); }
+});
+$('code').addEventListener('click', e => {
+  const num = e.target.closest('.l>i');
+  if (num) { select(+num.dataset.n - 1); return; }
+  const a = e.target.closest('a.lk'); if (!a) return;
+  e.preventDefault();
+  const u = 'iris://source?u=' + encodeURIComponent(a.dataset.u);
+  if (e.metaKey) call('open', {url: u, how: 'tab'}); else location.href = u;
+});
+let resizeT = null;
+addEventListener('resize', () => { if (!wrap || !view) return; clearTimeout(resizeT); resizeT = setTimeout(() => { const k = topLine(); render(k); paint(); }, 200); });
+
+if (!TARGET) status('msg', 'Nothing to show.', 'Open View Source from a web page.');
+else show();
+
+</script>
+</body>
+</html>

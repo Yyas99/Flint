@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>Iris Dev</string>
+  <key>CFBundleDisplayName</key><string>Iris Dev</string>
+  <key>CFBundleIdentifier</key><string>com.y.iris.dev</string>
+  <key>CFBundleExecutable</key><string>IrisDev</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleShortVersionString</key><string>0.4</string>
+  <key>CFBundleIconFile</key><string>IrisDev</string>
+  <key>LSMinimumSystemVersion</key><string>12.3</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUsageDescription</key><string>A website wants to use your camera.</string>
+  <key>NSMicrophoneUsageDescription</key><string>A website wants to use your microphone.</string>
+  <key>NSLocationUsageDescription</key><string>A website wants to know your location.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>A website wants to know your location.</string>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
+  <key>NSHumanReadableCopyright</key><string>MIT licence · WebKit</string>
+  
+</dict></plist>

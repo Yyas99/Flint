@@ -177,11 +177,12 @@ static dispatch_queue_t DevQueue(void) {
     dispatch_once(&once, ^{ q = dispatch_queue_create("iris.dev", DISPATCH_QUEUE_SERIAL); });
     return q;
 }
+static NSString *gWebAppTag = @"";   // "[App name] " in the log lines of an installed app
 static void DLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-    NSString *line = [NSString stringWithFormat:@"%@  %@\n", [NSDate.date descriptionWithLocale:nil], s];
+    NSString *line = [NSString stringWithFormat:@"%@  %@%@\n", [NSDate.date descriptionWithLocale:nil], [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.y.iris.dev"] ? @"[dev] " : gWebAppTag, s];
     dispatch_async(DevQueue(), ^{
         NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Iris/iris.log"];
         if (![NSFileManager.defaultManager fileExistsAtPath:path.stringByDeletingLastPathComponent]) return;
@@ -374,9 +375,18 @@ static NSString *HostOf(NSURL *u) {
     NSString *h = u.host.lowercaseString ?: @"";
     return [h hasPrefix:@"www."] ? [h substringFromIndex:4] : h;
 }
+static NSDictionary *gWebApp;       // running as an installed web app (see the web-app code)
+static NSDictionary *gProfileApp;   // running as a profile's own app, a separate user: {id, name, color, mainApp}
+// Iris Dev: the copy new builds go to first (com.y.iris.dev). It keeps its own data, so testing never touches yours.
+static BOOL IrisIsDev(void) { static int dev = -1; if (dev < 0) dev = [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.y.iris.dev"]; return dev == 1; }
+// Where this Iris keeps its data. Iris: Application Support/Iris. Iris Dev: Iris Dev. A profile's app: Iris/Profiles/<id>,
+// a person of its own. An installed site: the folder of the Iris (or profile) that installed it, for its extensions and lists.
 static NSString *SupportDir(void) {
-    NSString *d = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
-                   stringByAppendingPathComponent:@"Iris"];
+    NSString *base = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject, *d;
+    NSString *root = [gWebApp[@"root"] isKindOfClass:NSString.class] ? gWebApp[@"root"] : nil;
+    if (root.length) d = root;
+    else if ([gProfileApp[@"id"] length]) d = [[[base stringByAppendingPathComponent:@"Iris"] stringByAppendingPathComponent:@"Profiles"] stringByAppendingPathComponent:gProfileApp[@"id"]];
+    else d = [base stringByAppendingPathComponent:IrisIsDev() ? @"Iris Dev" : @"Iris"];
     [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     return d;
 }
@@ -600,7 +610,7 @@ static NSURL *StripTracking(NSURL *u) {
 @property (strong) id splitMonitor;
 @property (strong) VSuggest *suggest;
 @property (strong) NSMutableArray *closed;
-@property (strong) NSTextField *toast;
+@property (strong) NSView *toast;   // VToast
 - (void)newTab:(NSURL *)u select:(BOOL)sel;
 - (void)selectTab:(VTab *)t;
 - (void)closeTab:(VTab *)t;
@@ -736,12 +746,43 @@ static NSURL *StripTracking(NSURL *u) {
 @end
 
 static VWindow *gWin;                       // the browser window you're using (the last one that was key)
+static void ProfileAppOpen(NSString *pid, NSArray<NSURL *> *urls);   // a profile's own app (v5h_profiles)
 
 // Profiles: every profile has its own website data (cookies, sign-ins, site storage), history and open tabs.
 // The first profile is the one Iris always had (WebKit's default data); others get their own data store.
+// The list of profiles lives with Iris itself (the com.y.iris settings); a profile's app reads and writes it there.
+static id IrisPref(NSString *k) {
+    if (!gProfileApp) return [Defaults() objectForKey:k];
+    CFPreferencesAppSynchronize(CFSTR("com.y.iris"));
+    return CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)k, CFSTR("com.y.iris")));
+}
+static void IrisSetPref(NSString *k, id v) {
+    if (!gProfileApp) { [Defaults() setObject:v forKey:k]; return; }
+    CFPreferencesSetAppValue((__bridge CFStringRef)k, (__bridge CFPropertyListRef)v, CFSTR("com.y.iris"));
+    CFPreferencesAppSynchronize(CFSTR("com.y.iris"));
+}
+static NSArray<NSDictionary *> *ProfilesStored(void) {   // the profiles besides the first, each its own app
+    NSMutableArray *out = [NSMutableArray array];
+    id a = IrisPref(kProfiles);
+    for (NSDictionary *p in [a isKindOfClass:NSArray.class] ? a : @[]) if ([p isKindOfClass:NSDictionary.class] && [p[@"id"] isKindOfClass:NSString.class] && [p[@"id"] length]) [out addObject:p];
+    return out;
+}
+static void ProfilesStore(NSArray *a) { IrisSetPref(kProfiles, a ?: @[]); }
+// Every profile, the one this app is first (id ""). In Iris the rest are profile apps; in a profile's app the rest are
+// Iris itself ("@main") and the other profiles. Iris Dev is a profile of its own, named Dev, and sees no others.
 static NSArray<NSDictionary *> *Profiles(void) {
+    if (IrisIsDev()) return @[@{@"id": @"", @"name": @"Dev"}];
+    NSArray *stored = ProfilesStored();
+    if (gProfileApp) {
+        NSMutableDictionary *me = [@{@"id": @"", @"name": gProfileApp[@"name"] ?: @"Profile", @"color": gProfileApp[@"color"] ?: @0} mutableCopy];
+        for (NSDictionary *p in stored) if ([p[@"id"] isEqualToString:gProfileApp[@"id"]]) { if (p[@"name"]) me[@"name"] = p[@"name"]; if (p[@"color"]) me[@"color"] = p[@"color"]; }
+        NSMutableArray *a = [NSMutableArray arrayWithObject:me];
+        [a addObject:@{@"id": @"@main", @"name": IrisPref(kMainProfileName) ?: @"Personal", @"color": IrisPref(kMainProfileColor) ?: @0}];
+        for (NSDictionary *p in stored) if (![p[@"id"] isEqualToString:gProfileApp[@"id"]]) [a addObject:p];
+        return a;
+    }
     NSMutableArray *a = [NSMutableArray arrayWithObject:@{@"id": @"", @"name": [Defaults() stringForKey:kMainProfileName] ?: @"Personal"}];
-    for (NSDictionary *p in [Defaults() arrayForKey:kProfiles] ?: @[]) if ([p isKindOfClass:NSDictionary.class] && [p[@"id"] length]) [a addObject:p];
+    if (!gWebApp) [a addObjectsFromArray:stored];
     return a;
 }
 // Calm, distinct colours (no reds or yellows): a profile is recognised at a glance by its dot and its window's tint.
@@ -749,6 +790,7 @@ static NSArray<NSArray *> *ProfileColors(void) {
     return @[@[@"Graphite", @0x8E8E93], @[@"Ocean", @0x5B8DEF], @[@"Teal", @0x3BA99C], @[@"Violet", @0x8B7CF6], @[@"Sage", @0x7FA36B], @[@"Slate", @0x64748B]];
 }
 static NSInteger ProfileColorIndex(NSString *pid) {
+    if (!pid.length && gProfileApp) return [Profiles().firstObject[@"color"] integerValue];
     if (!pid.length) return [Defaults() objectForKey:kMainProfileColor] ? [Defaults() integerForKey:kMainProfileColor] : 0;
     NSArray *all = Profiles();
     for (NSUInteger i = 0; i < all.count; i++) if ([all[i][@"id"] isEqualToString:pid]) return all[i][@"color"] ? [all[i][@"color"] integerValue] : (NSInteger)(i % ProfileColors().count);
@@ -773,7 +815,7 @@ static NSImage *ProfileAvatar(NSString *pid, NSString *name, CGFloat size) {
 }
 static NSString *ProfileName(NSString *pid) {
     for (NSDictionary *p in Profiles()) if ([p[@"id"] isEqualToString:pid ?: @""]) return p[@"name"];
-    return @"Personal";
+    return Profiles().firstObject[@"name"];
 }
 static NSMutableDictionary<NSString *, WKWebsiteDataStore *> *gProfileStores;
 static NSMutableDictionary<NSString *, NSArray<WKContentRuleList *> *> *gExtRuleLists;   // extension id → its compiled blocking rules
@@ -791,7 +833,9 @@ static WKWebsiteDataStore *ProfileStore(NSString *pid) {
 @class VWindow;
 // Installed web apps (PWAs). Each has a small .app of its own in ~/Applications/Iris Apps that runs this same code;
 // in that process gWebApp holds the app's description (from its Info.plist) and Iris shows the app instead of the browser.
-static NSDictionary *gWebApp;
+
+static NSImage *Symbol(NSString *name, CGFloat pt, NSFontWeight w);
+static NSString *FirstSymbol(NSArray<NSString *> *names) { for (NSString *n in names) if (Symbol(n, 13, NSFontWeightMedium)) return n; return names.lastObject; }
 static NSURL *WebAppScopeURL(void) { return [NSURL URLWithString:gWebApp[@"scope"] ?: gWebApp[@"start"] ?: @""]; }
 // In the app: the same site (scheme, host and port) as its scope. Anything else opens in Iris.
 static BOOL WebAppInScope(NSURL *u) {
@@ -1028,8 +1072,10 @@ static NSMutableDictionary *ConvertChromeNode(NSDictionary *n) {
     NSData *d = [NSData dataWithContentsOfFile:SupportFile(@"bookmarks.json")];
     id a = d ? [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingMutableContainers error:nil] : nil;
     if ([a isKindOfClass:NSMutableArray.class]) { self.bar = a; return; }
-    // First run: bring over Helium's bookmarks bar (Helium itself is untouched).
+    // First run: bring over Helium's bookmarks bar (Helium itself is untouched). Only Iris itself does this:
+    // Iris Dev, a profile's own app and installed apps never read anything of yours from another browser.
     self.bar = [NSMutableArray array];
+    if (IrisIsDev() || gWebApp || gProfileApp) return;
     NSString *prof = HeliumProfile();
     NSData *hd = prof ? [NSData dataWithContentsOfFile:[prof stringByAppendingPathComponent:@"Bookmarks"]] : nil;
     NSDictionary *root = hd ? [NSJSONSerialization JSONObjectWithData:hd options:0 error:nil] : nil;
@@ -1220,6 +1266,7 @@ static BOOL IsWhiteTile(NSBitmapImageRep *r) {
 
 // Helium keeps favicons in an SQLite file; copy the ones for bookmarked pages once.
 - (void)importHelium {
+    if (IrisIsDev() || gWebApp || gProfileApp) return;
     if ([Defaults() boolForKey:@"iconsImported"]) return;
     [Defaults() setBool:YES forKey:@"iconsImported"];
     NSString *prof = HeliumProfile(); if (!prof) return;
@@ -1288,14 +1335,18 @@ static NSSet<NSString *> *ListsOn(void) {
     return b;
 }
 
+// The filter lists are public, not anyone's data: Iris downloads them, and Iris Dev, the profiles' apps and installed
+// sites read Iris's copy. Same lists, so they also use the rules Iris already compiled instead of compiling their own.
+static BOOL ListsAreIris(void) { return IrisIsDev() || gProfileApp || gWebApp; }
 static NSString *ListDir(void) {
-    NSString *d = SupportFile(@"lists");
+    NSString *d = ListsAreIris() ? [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"Iris"] stringByAppendingPathComponent:@"lists"]
+                                 : SupportFile(@"lists");
     [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     return d;
 }
 
 - (NSString *)updatedText {
-    double t = [Defaults() doubleForKey:kListsUpdated];
+    double t = ListsAreIris() ? [[Defaults() persistentDomainForName:@"com.y.iris"][kListsUpdated] doubleValue] : [Defaults() doubleForKey:kListsUpdated];
     if (t <= 0) return @"never";
     NSDateFormatter *f = [NSDateFormatter new]; f.dateStyle = NSDateFormatterMediumStyle; f.timeStyle = NSDateFormatterNoStyle;
     return [f stringFromDate:[NSDate dateWithTimeIntervalSince1970:t]];
@@ -1311,7 +1362,7 @@ static NSString *ListDir(void) {
 }
 
 - (void)updateLists:(BOOL)force done:(void (^)(void))done {
-    if (gWebApp) { if (done) done(); return; }   // Iris keeps the lists fresh; an installed app uses what's there
+    if (ListsAreIris()) { self.status = [NSString stringWithFormat:@"Ready · Iris's lists, updated %@", [self updatedText]]; if (done) done(); return; }   // Iris keeps them fresh
     if (done) [self.waiters addObject:[done copy]];
     if (self.busy) return;
     self.busy = YES;
@@ -2618,7 +2669,7 @@ static NSString *gUpdateNotes;
     VButton *bms = [VButton symbol:@"book" size:13 tip:@"Bookmarks" target:w action:@selector(showBookmarks:)];
     VButton *priv = [VButton symbol:@"eye.slash" size:13 tip:@"New Private Window (⇧⌘N)" target:nil action:@selector(newPrivateWindow:)];
     VButton *find = [VButton symbol:@"magnifyingglass" size:13 tip:@"Find on Page (⌘F)" target:w action:@selector(showFind:)];
-    VButton *inst = [VButton symbol:@"arrow.down.app" size:13 tip:@"Install this site as an app" target:w action:@selector(installWebApp:)];
+    VButton *inst = [VButton symbol:FirstSymbol(@[@"arrow.down.app", @"plus.app", @"plus.square.on.square", @"square.and.arrow.down"]) size:13 tip:@"Install this site as an app" target:w action:@selector(installWebApp:)];
     for (VButton *b in @[split, tabs, hist, bms, priv, find, inst]) { b.hidden = YES; [self addSubview:b]; }
     self.keyed = @{@"split": split, @"tabs": tabs, @"history": hist, @"bookmarks": bms, @"private": priv, @"find": find, @"install": inst};
     self.dlRing = [[VRing alloc] initWithFrame:NSMakeRect(0, 0, 30, 28)]; self.dlRing.value = -1;
@@ -2824,8 +2875,13 @@ static NSString *gUpdateNotes;
     NSMutableArray *shapes = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill], [NSValue valueWithRect:up], nil];
     [shapes addObjectsFromArray:self.glassCircles ?: @[]]; [shapes addObjectsFromArray:self.glassCapsules ?: @[]];
     for (NSValue *v in shapes) if (NSPointInRect(q, v.rectValue)) return [super hitTest:p];
+    // a right-click (or Control-click) anywhere along the bar is for the bar: its menu, not the window's or the page's
+    NSEvent *e = NSApp.currentEvent;
+    BOOL menuClick = e.type == NSEventTypeRightMouseDown || (e.type == NSEventTypeLeftMouseDown && (e.modifierFlags & NSEventModifierFlagControl));
+    if (menuClick && NSPointInRect(q, self.bounds)) return self;
     return nil;   // the page underneath gets it
 }
+
 - (void)layoutBar {
     CGFloat H = NSHeight(self.bounds), W = NSWidth(self.bounds), y = round((H - 28) / 2);
     if (self.capsule) { [self layoutCapsule]; return; }
@@ -3048,6 +3104,7 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
 }
 - (void)mouseUp:(NSEvent *)e { if (e.clickCount == 2 && !self.capsule) [self.window performZoom:nil]; }
 - (void)mouseDown:(NSEvent *)e {
+    if (e.modifierFlags & NSEventModifierFlagControl) { NSMenu *m = [self menuForEvent:e]; if (m) { PopMenuForEvent(m, e, self); return; } }   // Control-click: the bar's menu
     if (!self.capsule) { [super mouseDown:e]; return; }
     VWindow *w = WinFor(self);   // the glass around the controls: clicking it lets go of the address
     if (self.field.currentEditor) [self.window makeFirstResponder:w.current.web.web];
@@ -5046,7 +5103,19 @@ static BOOL SiteAllowlisted(NSString *host) {
     return NO;
 }
 
+// What the lists say, not when they were saved: Iris Dev, a profile's app or an installed site with the same lists
+// as Iris has the same fingerprint, and can use the lists Iris already compiled.
 static NSString *RulesFingerprint(NSString *dir, NSArray *allow) {
+    NSMutableString *fp = [NSMutableString stringWithString:@"v8|"];
+    for (NSString *f in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
+        NSData *d = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:f] options:NSDataReadingMappedIfSafe error:nil];
+        unsigned char h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(d.bytes, (CC_LONG)d.length, h);
+        [fp appendFormat:@"%@:", f]; for (int i = 0; i < 12; i++) [fp appendFormat:@"%02x", h[i]]; [fp appendString:@"|"];
+    }
+    [fp appendString:[allow componentsJoinedByString:@","]];
+    return fp;
+}
+static NSString *RulesFingerprintV7(NSString *dir, NSArray *allow) {   // the old one, by size and date: read once, to carry compiled lists over
     NSMutableString *fp = [NSMutableString stringWithString:@"v7|"];
     for (NSString *f in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] sortedArrayUsingSelector:@selector(compare:)]) {
         NSDictionary *a = [NSFileManager.defaultManager attributesOfItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
@@ -5058,6 +5127,18 @@ static NSString *RulesFingerprint(NSString *dir, NSArray *allow) {
 
 static NSString *IrisJSON(id obj) { NSData *d = [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil]; return d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"[]"; }
 static NSArray *IrisRuleChunk(NSArray *body, NSString *tailJSON) { return @[IrisJSON(body), tailJSON ?: @"[]", @(body.count)]; }
+// Iris's own compiled lists, read from where WebKit keeps them (only from Iris Dev, a profile's app or an installed site).
+static WKContentRuleListStore *IrisMainRuleStore(void) {
+    if (!(IrisIsDev() || gProfileApp || gWebApp)) return nil;
+    static WKContentRuleListStore *found; if (found) return found;
+    NSString *base = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/WebKit/com.y.iris"];
+    for (NSString *n in @[@"ContentRuleLists", @"ContentExtensions"]) {
+        NSString *p = [base stringByAppendingPathComponent:n]; BOOL dir = NO;
+        if ([NSFileManager.defaultManager fileExistsAtPath:p isDirectory:&dir] && dir) return found = [WKContentRuleListStore storeWithURL:[NSURL fileURLWithPath:p isDirectory:YES]];
+    }
+    DLog(@"blocker: Iris's compiled lists not found under %@", base);
+    return nil;
+}
 // Compiles the lists into WebKit's store. A list WebKit refuses is split in half and tried again, so one rule it
 // can't take costs only its neighbours, never the whole blocker.
 static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInteger count, NSDate *t0, void (^finish)(NSArray *, NSUInteger)) {
@@ -5100,14 +5181,25 @@ static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInt
             } else { dropped += bodyCount; DLog(@"rule list of %lu dropped: %@", (unsigned long)bodyCount, why); }
             dispatch_async(dispatch_get_main_queue(), weakNext);
         };
+        // A list already built from exactly these rules (a restart part-way through a build, or the same list in Iris
+        // itself) is used as it is: a build that's interrupted carries on where it stopped instead of starting over.
+        unsigned char h[CC_SHA256_DIGEST_LENGTH]; NSData *jd = [json dataUsingEncoding:NSUTF8StringEncoding]; CC_SHA256(jd.bytes, (CC_LONG)jd.length, h);
+        NSMutableString *sha = [NSMutableString string]; for (int i = 0; i < 16; i++) [sha appendFormat:@"%02x", h[i]];
+        NSString *chunkKey = [@"ruleChunk-" stringByAppendingString:ident];
+        void (^built)(WKContentRuleList *, NSString *) = ^(WKContentRuleList *list, NSString *why) {
+            if (list) [Defaults() setObject:sha forKey:chunkKey]; else [Defaults() removeObjectForKey:chunkKey];
+            landed(list, why);
+        };
         void (^inProcess)(void) = ^{
             [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:ident encodedContentRuleList:json completionHandler:^(WKContentRuleList *list, NSError *err) {
-                landed(list, err.localizedDescription);
+                built(list, err.localizedDescription);
             }];
         };
+        void (^compile)(void);
         // WebKit builds a list's matcher in the calling process, and a big list briefly needs a lot of memory. A helper
         // (Iris itself, started with --compile-rules) does the building, so the browser never carries that peak and
         // the rules can sit in a few large lists, which pages check faster than many small ones.
+        compile = ^{
         NSString *tmp = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"iris-rules-%@.json", NSUUID.UUID.UUIDString]];
         if (![json writeToFile:tmp atomically:NO encoding:NSUTF8StringEncoding error:nil]) { inProcess(); return; }
         NSTask *task = [NSTask new];
@@ -5121,13 +5213,24 @@ static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInt
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (clean && status == 0)
                     [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *list, NSError *err) {
-                        if (list) landed(list, nil); else inProcess();
+                        if (list) built(list, nil); else inProcess();
                     }];
-                else landed(nil, clean ? [NSString stringWithFormat:@"WebKit refused it (%d)", status] : @"the helper stopped");
+                else built(nil, clean ? [NSString stringWithFormat:@"WebKit refused it (%d)", status] : @"the helper stopped");
             });
         };
         NSError *launchErr = nil;
         if (![task launchAndReturnError:&launchErr]) { [NSFileManager.defaultManager removeItemAtPath:tmp error:nil]; DLog(@"blocker: helper didn't start (%@), compiling here", launchErr.localizedDescription); inProcess(); }
+        };
+        // mine first, then Iris's (from Iris Dev, a profile's app or an installed site), then build it
+        WKContentRuleListStore *iris = IrisMainRuleStore();
+        NSString *irisSha = iris ? [[Defaults() persistentDomainForName:@"com.y.iris"][chunkKey] description] : nil;
+        void (^tryIris)(void) = ^{
+            if (![irisSha isEqualToString:sha]) { compile(); return; }
+            [iris lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *l, NSError *e) { if (l) { [Defaults() setObject:sha forKey:chunkKey]; landed(l, nil); } else compile(); }];
+        };
+        if ([[Defaults() stringForKey:chunkKey] isEqualToString:sha])
+            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:ident completionHandler:^(WKContentRuleList *l, NSError *e) { if (l) landed(l, nil); else tryIris(); }];
+        else tryIris();
     };
     weakNext = next;
     dispatch_async(dispatch_get_main_queue(), next);
@@ -5135,9 +5238,10 @@ static void IrisCompileRuleLists(NSArray<NSArray *> *lists, NSString *fp, NSUInt
 
 static void (^gRulesWaiter)(void);
 static void IrisReloadBlocklistsThen(void (^then)(void)) {
-    NSString *dir = SupportFile(@"lists");
+    NSString *dir = ListDir();
     NSArray *allow = BlockerSiteSwitch() ? @[] : [Defaults() arrayForKey:kAllowlist] ?: @[];   // per page when WebKit can, else compiled in
     NSString *fp = RulesFingerprint(dir, allow);
+    if ([[Defaults() stringForKey:@"ruleFingerprint"] isEqualToString:RulesFingerprintV7(dir, allow)]) [Defaults() setObject:fp forKey:@"ruleFingerprint"];   // same lists, compiled before the fingerprint changed
     gRulesWaiter = then;
     void (^finish)(NSArray *, NSUInteger) = ^(NSArray *lists, NSUInteger count) {
         gRules = lists; gRuleCount = count;
@@ -5150,15 +5254,49 @@ static void IrisReloadBlocklistsThen(void (^then)(void)) {
         NSMutableArray *found = [NSMutableArray array];
         __block NSUInteger pending = cached; __block BOOL missing = NO;
         for (NSUInteger k = 0; k < cached; k++) {
-            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:[NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k] completionHandler:^(WKContentRuleList *l, NSError *e) {
+            NSString *lid = [NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k];
+            void (^got)(WKContentRuleList *) = ^(WKContentRuleList *l) {
                 if (l) [found addObject:l]; else missing = YES;
                 if (--pending) return;
                 if (!missing) { finish(found, (NSUInteger)[Defaults() integerForKey:@"ruleHostCount"]); DLog(@"blocker: %lu cached lists", (unsigned long)found.count); }
                 else { [Defaults() removeObjectForKey:@"ruleFingerprint"]; IrisReloadBlocklistsThen(gRulesWaiter); }
+            };
+            [WKContentRuleListStore.defaultStore lookUpContentRuleListForIdentifier:lid completionHandler:^(WKContentRuleList *l, NSError *e) {
+                if (l) { got(l); return; }
+                // a list this app took from Iris's own when it built: still there?
+                WKContentRuleListStore *iris = IrisMainRuleStore(); NSString *mine = [Defaults() stringForKey:[@"ruleChunk-" stringByAppendingString:lid]];
+                if (iris && mine && [[[Defaults() persistentDomainForName:@"com.y.iris"][[@"ruleChunk-" stringByAppendingString:lid]] description] isEqualToString:mine])
+                    [iris lookUpContentRuleListForIdentifier:lid completionHandler:^(WKContentRuleList *l2, NSError *e2) { got(l2); }];
+                else got(nil);
             }];
         }
         return;
     }
+    // Iris Dev, a profile's app or an installed site with the same lists as Iris: Iris's compiled lists, used where they are
+    static BOOL triedIris;
+    WKContentRuleListStore *irisStore = triedIris ? nil : IrisMainRuleStore();
+    NSDictionary *irisPrefs = irisStore ? [Defaults() persistentDomainForName:@"com.y.iris"] : nil;
+    NSUInteger irisCount = [irisPrefs[@"ruleListCount"] unsignedIntegerValue];
+    if (irisStore && irisCount && ([irisPrefs[@"ruleFingerprint"] isEqual:fp] || [irisPrefs[@"ruleFingerprint"] isEqual:RulesFingerprintV7(dir, allow)])) {
+        triedIris = YES;
+        NSMutableArray *found = [NSMutableArray array];
+        __block NSUInteger pending = irisCount; __block BOOL missing = NO;
+        for (NSUInteger k = 0; k < irisCount; k++)
+            [irisStore lookUpContentRuleListForIdentifier:[NSString stringWithFormat:@"iris-block-%lu", (unsigned long)k] completionHandler:^(WKContentRuleList *l, NSError *e) {
+                if (l) [found addObject:l]; else missing = YES;
+                if (--pending) return;
+                if (missing) { DLog(@"blocker: Iris's lists aren't all there, compiling"); IrisReloadBlocklistsThen(gRulesWaiter); return; }
+                [Defaults() setObject:irisPrefs[@"ruleCosmeticFrom"] ?: @0 forKey:@"ruleCosmeticFrom"];
+                finish(found, [irisPrefs[@"ruleHostCount"] unsignedIntegerValue]);
+                DLog(@"blocker: using Iris's %lu compiled lists", (unsigned long)found.count);
+            }];
+        return;
+    }
+    if (irisStore && !triedIris) {
+        NSString *theirs = [irisPrefs[@"ruleFingerprint"] description] ?: @"(none)", *v7 = RulesFingerprintV7(dir, allow);
+        DLog(@"blocker: Iris's lists differ (%lu compiled; theirs %@… mine %@… / %@…)", (unsigned long)irisCount, [theirs substringToIndex:MIN(80, theirs.length)], [fp substringToIndex:MIN(80, fp.length)], [v7 substringToIndex:MIN(80, v7.length)]);
+    }
+    triedIris = YES;
     // A build takes minutes on an Intel Mac: one at a time, and the previous lists keep blocking until the new ones are ready.
     static BOOL compiling, again;
     if (compiling) { again = YES; return; }
@@ -6962,9 +7100,8 @@ static NSString *DNRUpdate(NSMutableArray *rules, NSDictionary *opts, NSUInteger
 @implementation FPort
 @end
 
-static NSString *ExtRoot(void) {
-    NSString *d = [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
-                    stringByAppendingPathComponent:@"Iris"] stringByAppendingPathComponent:@"Extensions"];
+static NSString *ExtRoot(void) {   // each Iris has its own: Iris Dev, every profile's app; installed sites use their installer's
+    NSString *d = SupportFile(@"Extensions");
     [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
     return d;
 }
@@ -7138,9 +7275,25 @@ __attribute__((constructor)) static void IrisExtDebugInit(void) { gExtDebug = [N
     return s;
 }
 
+// Where extensions keep their data (chrome.storage). The extensions themselves are shared, but each running copy of
+// Iris keeps its own data: Iris, Iris Dev, and every installed app (which starts from a copy of Iris's, so an extension
+// you're signed in to, a password manager say, is signed in there too).
+static NSString *ExtStorageDir(void) {
+    static NSString *dir;
+    if (dir) return dir;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *yours = [ExtRoot().stringByDeletingLastPathComponent stringByAppendingPathComponent:@"Extension Storage"];
+    NSString *d = gWebApp ? [[SupportFile(@"WebApps") stringByAppendingPathComponent:gWebApp[@"id"] ?: @"_"] stringByAppendingPathComponent:@"Extension Storage"]
+                          : SupportFile(@"Extension Storage");
+    if (gWebApp && ![fm fileExistsAtPath:d] && [fm fileExistsAtPath:yours]) {   // only an installed app starts from yours
+        [fm createDirectoryAtPath:d.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm copyItemAtPath:yours toPath:d error:nil];
+    }
+    [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir = d;
+}
 - (NSString *)storePath:(FExt *)e area:(NSString *)area {
-    NSString *d = [ExtRoot().stringByDeletingLastPathComponent stringByAppendingPathComponent:@"Extension Storage"];
-    [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *d = ExtStorageDir();
     return [d stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%@.json", e.ident, area]];
 }
 
@@ -10248,6 +10401,12 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     };
     VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, w.isPrivate ? cw : cw - 140, 40) title:w.isPrivate ? @"Private window" : ProfileName(w.profile)];
     if (w.isPrivate) { h.icon = Tinted(Symbol(@"eye.slash", 16, NSFontWeightMedium), vText); h.meta = @"Nothing is kept when it closes"; }
+    else if (IrisIsDev()) {   // the testing copy says so, plainly, wherever you'd look for whose browser this is
+        h.title = @"Iris Dev"; h.icon = NSApp.applicationIconImage; h.on = YES;
+        h.meta = [NSString stringWithFormat:@"Testing copy · %@ profile · its own tabs and sign-ins", ProfileName(w.profile)];
+        VPItem *ch = [self add:VPPill rect:NSMakeRect(W - P - 132, y + 6, 132, 28) title:@"Change profile"]; ch.symbol = @"person.2";
+        ch.act = profiles;
+    }
     else {
         h.icon = ProfileAvatar(w.profile, ProfileName(w.profile), 38); h.on = YES; h.meta = @"Profile";
         VPItem *ch = [self add:VPPill rect:NSMakeRect(W - P - 132, y + 6, 132, 28) title:@"Change profile"]; ch.symbol = @"person.2";
@@ -10281,7 +10440,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     }
     y += 3 * 66 + 6;
     if (web) {
-        BOOL other = !IrisIsDefaultBrowser();
+        BOOL other = !IrisIsDefaultBrowser() && !IrisIsDev();   // Iris Dev is never your browser
         CGFloat bw = other ? floor((cw - 8) / 2) : cw;
         VPItem *src = [self add:VPPill rect:NSMakeRect(x, y, bw, 28) title:@"View source"]; src.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww viewSource:nil]; };
         if (other) {
@@ -10634,21 +10793,126 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
 
 static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full screen; windowed it's the title bar's
 
+// A short message at the top of the page ("Filter lists updated"): a floating capsule with a mark saying what kind of
+// news it is (done, a problem, or just so you know), centred text, a soft shadow. It drops in and lifts away.
+@interface VToast : NSView
+@property (copy) NSString *message;
+@property NSInteger kind;   // 0 note, 1 done, 2 problem
+- (void)appear;
+- (void)vanish;
+@end
+@implementation VToast
+- (instancetype)init {
+    if (!(self = [super initWithFrame:NSMakeRect(0, 0, 200, 34)])) return nil;
+    self.wantsLayer = YES; self.alphaValue = 0;
+    self.layer.shadowColor = NSColor.blackColor.CGColor; self.layer.shadowOpacity = 0.35; self.layer.shadowRadius = 14; self.layer.shadowOffset = CGSizeMake(0, -5);
+    return self;
+}
+- (BOOL)isFlipped { return YES; }
+- (NSView *)hitTest:(NSPoint)p { return nil; }   // never in the way of the page
+static NSDictionary *ToastAttrs(void) { return @{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium), NSForegroundColorAttributeName: vText}; }
+- (void)setMessage:(NSString *)m {
+    _message = [m copy];
+    NSString *l = m.lowercaseString;
+    BOOL bad = NO; for (NSString *w in @[@"couldn't", @"could not", @"didn't", @"failed", @"can't", @"cannot", @"not allowed", @"blocked", @"error", @"needs "]) if ([l containsString:w]) bad = YES;
+    BOOL good = NO; for (NSString *w in @[@"updated", @"saved", @"created", @"deleted", @"renamed", @"installed", @"copied", @"added", @"removed", @"cleared", @"done", @"ready", @"restored", @"imported"]) if ([l containsString:w]) good = YES;
+    self.kind = bad ? 2 : good ? 1 : 0;
+    self.needsDisplay = YES;
+}
+- (NSSize)fittingSize { return NSMakeSize(ceil([self.message ?: @"" sizeWithAttributes:ToastAttrs()].width) + 16 + 20 + 8 + 18, 34); }
+- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; CGPathRef p = CGPathCreateWithRoundedRect((CGRect){CGPointZero, s}, s.height / 2, s.height / 2, NULL); self.layer.shadowPath = p; CGPathRelease(p); }
+- (void)drawRect:(NSRect)r {
+    NSRect b = self.bounds; CGFloat rad = NSHeight(b) / 2;
+    BOOL light = ThemeIsLight();
+    RoundRect(b, rad, light ? HexA(0xffffff, 0.98) : HexA(0x1f1f23, 0.97));
+    ShardStroke(b, rad, light ? HexA(0x000000, 0.10) : HexA(0xffffff, 0.11), 1);
+    // a faint lit rim along the top
+    NSBezierPath *clip = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(b, 1, 1) xRadius:rad - 1 yRadius:rad - 1];
+    [NSGraphicsContext saveGraphicsState]; [clip addClip];
+    [[[NSGradient alloc] initWithStartingColor:[NSColor colorWithWhite:1 alpha:light ? 0.0 : 0.05] endingColor:[NSColor colorWithWhite:1 alpha:0]] drawInRect:NSMakeRect(0, 0, NSWidth(b), NSHeight(b) / 2) angle:90];
+    [NSGraphicsContext restoreGraphicsState];
+    // the mark: a check in Iris's colours, a warning in red, or a small Aperture dot
+    NSRect m = NSMakeRect(9, round((NSHeight(b) - 18) / 2), 18, 18);
+    if (self.kind == 2) {
+        RoundRect(m, 9, HexA(0xf06a6a, light ? 0.16 : 0.2));
+        NSImage *g = Tinted(Symbol(@"exclamationmark", 9.5, NSFontWeightBold), light ? Hex(0xd94848) : Hex(0xf59a9a));
+        DrawImage(g, CenterIn(g.size, m));
+    } else if (self.kind == 1) {
+        NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:m];
+        [ApertureGradient(1) drawInBezierPath:dot angle:-35];
+        NSImage *g = Tinted(Symbol(@"checkmark", 9, NSFontWeightBold), Hex(0x0b0d16));
+        DrawImage(g, CenterIn(g.size, m));
+    } else {
+        NSRect d = NSInsetRect(m, 5, 5);
+        [ApertureGradient(1) drawInBezierPath:[NSBezierPath bezierPathWithOvalInRect:d] angle:-35];
+        RoundRect(NSInsetRect(m, 1.5, 1.5), 7.5, [ApBlue() colorWithAlphaComponent:0.12]);
+    }
+    NSMutableDictionary *a = [ToastAttrs() mutableCopy];
+    NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.lineBreakMode = NSLineBreakByTruncatingTail; a[NSParagraphStyleAttributeName] = ps;
+    NSSize ts = [self.message ?: @"" sizeWithAttributes:a];
+    [self.message drawInRect:NSMakeRect(NSMaxX(m) + 8, round((NSHeight(b) - ts.height) / 2), NSWidth(b) - NSMaxX(m) - 8 - 16, ts.height) withAttributes:a];
+}
+- (void)appear {
+    [self.layer removeAllAnimations];
+    self.alphaValue = 1;
+    CABasicAnimation *f = [CABasicAnimation animationWithKeyPath:@"opacity"]; f.fromValue = @0; f.toValue = @1; f.duration = 0.18;
+    CASpringAnimation *drop = [CASpringAnimation animationWithKeyPath:@"transform"];
+    CGFloat above = self.superview.isFlipped ? -1 : 1;   // which way is up for the layer depends on its parent
+    drop.fromValue = [NSValue valueWithCATransform3D:CATransform3DMakeTranslation(0, 12 * above, 0)]; drop.toValue = [NSValue valueWithCATransform3D:CATransform3DIdentity];
+    drop.damping = 16; drop.stiffness = 260; drop.mass = 1; drop.duration = drop.settlingDuration;
+    [self.layer addAnimation:f forKey:@"in-fade"]; [self.layer addAnimation:drop forKey:@"in-drop"];
+}
+- (void)vanish {
+    if (!self.superview) return;
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) {
+        c.duration = 0.22; c.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn];
+        self.animator.alphaValue = 0;
+        CABasicAnimation *up = [CABasicAnimation animationWithKeyPath:@"transform"];
+        up.toValue = [NSValue valueWithCATransform3D:CATransform3DMakeTranslation(0, 8 * (self.superview.isFlipped ? -1 : 1), 0)]; up.duration = 0.22;
+        up.fillMode = kCAFillModeForwards; up.removedOnCompletion = NO;
+        [self.layer addAnimation:up forKey:@"out"];
+    } completionHandler:^{ if (self.alphaValue < 0.01) { [self.layer removeAllAnimations]; [self removeFromSuperview]; } }];
+}
+@end
+
+// The browser window. AppKit sets the arrow whenever it rebuilds a window's cursor rects (any view added, removed,
+// moved or shown: the link address in the corner, a toast, a button appearing), and the page doesn't send its cursor
+// again until the cursor it wants changes. So over a link the hand turned into an arrow a moment after it appeared and
+// stayed that way. WebKit's own window did the same thing for its pages: over a page, the page owns the cursor.
+@interface VBrowserWindow : NSWindow @end
+@implementation VBrowserWindow
+static BOOL gCursorGuardOff;   // dev: "cursorguard 0" to see the old behaviour
+static BOOL PointIsOverPage(NSWindow *w, NSPoint p) {   // p: window coordinates
+    if (gCursorGuardOff) return NO;
+    NSView *frame = w.contentView.superview ?: w.contentView;
+    for (NSView *v = [frame hitTest:[frame convertPoint:p fromView:nil]]; v; v = v.superview) if ([v isKindOfClass:WKWebView.class]) return YES;
+    return NO;
+}
+- (void)_setCursorForMouseLocation:(NSPoint)p {
+    if (PointIsOverPage(self, p)) return;
+    struct objc_super sup = {self, NSWindow.class};
+    if ([NSWindow instancesRespondToSelector:_cmd]) ((void (*)(struct objc_super *, SEL, NSPoint))objc_msgSendSuper)(&sup, _cmd, p);
+}
+- (void)resetCursorRects {   // the public path to the same reset: the page's cursor survives it
+    NSCursor *had = NSCursor.currentCursor;
+    [super resetCursorRects];
+    if (had && NSCursor.currentCursor != had && PointIsOverPage(self, self.mouseLocationOutsideOfEventStream)) [had set];
+}
+@end
+
 @implementation VWindow
 
 // The first window restores the saved session; later ones start empty (or from their saved state).
 - (instancetype)init { return [self initPrivate:NO state:[Defaults() dictionaryForKey:kTabsState] ?: @{}]; }
 
 - (instancetype)initPrivate:(BOOL)priv state:(NSDictionary *)state {
-    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1320, 860)
+    NSWindow *w = [[VBrowserWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1320, 860)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView
         backing:NSBackingStoreBuffered defer:NO];
     if (!(self = [super initWithWindow:w])) return nil;
     _isPrivate = priv;
     if (priv) _privateStore = WKWebsiteDataStore.nonPersistentDataStore;
-    NSString *pid = [state[@"profile"] isKindOfClass:NSString.class] ? state[@"profile"] : @"";
-    BOOL known = NO; for (NSDictionary *p in Profiles()) if ([p[@"id"] isEqualToString:pid]) known = YES;
-    _profile = priv || !known ? @"" : [pid copy];   // a deleted profile's window comes back in the first profile
+    _profile = @"";   // other profiles are apps of their own: every window here is this app's person
     VWindow *previous = gWin;
     BOOL firstNormal = !priv && ![gWindows filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"isPrivate == NO"]].count;
     if (!gWindows) gWindows = [NSMutableArray array];
@@ -10710,10 +10974,7 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
     InstallShelfMonitor();
     for (NSView *v in @[root, self.toolbar, self.bookmarksBar, self.sidebar, self.sideScroll, self.home, self.findBar, self.content]) Clip(v);
 
-    self.toast = [NSTextField labelWithString:@""];
-    self.toast.font = UIFont(12.5, NSFontWeightMedium); self.toast.textColor = vText;
-    self.toast.wantsLayer = YES; self.toast.layer.backgroundColor = vToast.CGColor;
-    self.toast.alignment = NSTextAlignmentCenter; self.toast.alphaValue = 0;
+    self.toast = [VToast new];
 
     self.linkStatus = [NSTextField labelWithString:@""];
     self.linkStatus.font = UIFont(11.5, NSFontWeightRegular); self.linkStatus.textColor = vDim;
@@ -10732,6 +10993,8 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
 
 // The window for a profile: the frontmost one already open, or a new one.
 static VWindow *OpenProfileWindow(NSString *pid) {
+    if (pid.length && !IrisIsDev() && !gWebApp) { ProfileAppOpen(pid, nil); return nil; }   // another person: their own app
+    pid = @"";
     for (VWindow *w in gWindows.reverseObjectEnumerator) if (!w.isPrivate && [w.profile isEqualToString:pid ?: @""]) { [w.window makeKeyAndOrderFront:nil]; return w; }
     VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"profile": pid ?: @""}];
     [w showWindow:nil]; [w windowDidResize:nil];
@@ -10739,11 +11002,11 @@ static VWindow *OpenProfileWindow(NSString *pid) {
 }
 static NSString *CreateProfile(NSString *name) {
     NSString *pid = NSUUID.UUID.UUIDString;
-    NSMutableArray *a = [[Defaults() arrayForKey:kProfiles] ?: @[] mutableCopy];
+    NSMutableArray *a = [ProfilesStored() mutableCopy];
     NSMutableSet *used = [NSMutableSet set]; for (NSDictionary *p in Profiles()) [used addObject:@(ProfileColorIndex(p[@"id"]))];
     NSInteger color = 0; while (color < (NSInteger)ProfileColors().count - 1 && [used containsObject:@(color)]) color++;   // the first colour not taken
     [a addObject:@{@"id": pid, @"name": name.length ? name : [NSString stringWithFormat:@"Profile %lu", (unsigned long)a.count + 2], @"color": @(color)}];
-    [Defaults() setObject:a forKey:kProfiles];
+    ProfilesStore(a);
     for (VWindow *w in gWindows) [w.toolbar layoutBar];
     return pid;
 }
@@ -10770,7 +11033,7 @@ static NSString *CreateProfile(NSString *name) {
 - (void)manageProfiles:(id)s { [self showSettingsSection:@"profiles"]; }
 - (void)newProfile:(id)s {
     NSAlert *a = [NSAlert new]; a.messageText = @"New profile";
-    a.informativeText = @"A profile keeps its own sign-ins, cookies, history and tabs. Bookmarks and extensions are shared.";
+    a.informativeText = @"For another person, or a part of your life you keep apart. It opens as its own app, with its own extensions, passwords, bookmarks, downloads, history and sign-ins.";
     NSTextField *f = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)]; f.placeholderString = @"Name, e.g. Work";
     a.accessoryView = f; [a addButtonWithTitle:@"Create"]; [a addButtonWithTitle:@"Cancel"];
     a.window.initialFirstResponder = f;
@@ -11201,7 +11464,7 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     self.window.backgroundColor = vBg;
     self.content.layer.backgroundColor = vContentBg.CGColor;
     self.content.layer.borderColor = vBorder.CGColor;
-    self.toast.layer.backgroundColor = vToast.CGColor; self.toast.textColor = ThemeIsLight() ? Hex(0xffffff) : vText;
+    self.toast.needsDisplay = YES;
     self.linkStatus.layer.backgroundColor = vLinkBg.CGColor; self.linkStatus.textColor = vDim;
     self.toolbar.field.textColor = vText;
     [self frameContent]; FacetView(self.findBar, 10, vLine);
@@ -11316,7 +11579,7 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     else {   // the install button: install the site, or open the app it already is
         VButton *ib = tb.keyed[@"install"];
         BOOL have = WebAppFor([NSURL URLWithString:t.url ?: @""]) != nil;
-        NSString *sym = have ? @"arrow.up.forward.app" : @"arrow.down.app";
+        NSString *sym = have ? FirstSymbol(@[@"arrow.up.forward.app", @"arrow.up.forward.square", @"arrow.up.right.square"]) : FirstSymbol(@[@"arrow.down.app", @"plus.app", @"plus.square.on.square", @"square.and.arrow.down"]);
         if (![ib.symbolName isEqualToString:sym]) { ib.symbolName = sym; ib.toolTip = have ? @"Open in its app" : @"Install this site as an app"; ib.needsDisplay = YES; }
     }
 }
@@ -12020,20 +12283,20 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 #pragma mark Toast
 
 - (void)showToast:(NSString *)s {
-    NSTextField *t = self.toast;
-    t.stringValue = [NSString stringWithFormat:@"   %@   ", s];
-    [t sizeToFit];
-    NSSize sz = NSMakeSize(MAX(120, NSWidth(t.frame) + 10), 30);
-    t.frame = NSMakeRect(round((NSWidth(self.content.bounds) - sz.width) / 2), NSHeight(self.content.bounds) - sz.height - 18, sz.width, sz.height);
-    FacetView(t, 8, vLine);
-    [self.content addSubview:t];
-    t.alphaValue = 1;
+    VToast *t = (VToast *)self.toast;
+    [t setMessage:s];
+    NSSize sz = t.fittingSize;
+    NSRect cb = self.content.bounds;
+    sz.width = MIN(sz.width, NSWidth(cb) - 40);
+    CGFloat y = self.content.isFlipped ? 14 : NSHeight(cb) - sz.height - 14;
+    t.frame = NSMakeRect(round((NSWidth(cb) - sz.width) / 2), y, sz.width, sz.height);
+    BOOL shown = t.superview == self.content && t.alphaValue > 0.5;
+    if (t.superview != self.content) [self.content addSubview:t positioned:NSWindowAbove relativeTo:nil];
+    if (!shown) [t appear];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideToast) object:nil];
-    [self performSelector:@selector(hideToast) withObject:nil afterDelay:2.2];
+    [self performSelector:@selector(hideToast) withObject:nil afterDelay:MIN(5, 1.9 + s.length * 0.03)];   // longer messages stay a little longer
 }
-- (void)hideToast {
-    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.3; self.toast.animator.alphaValue = 0; } completionHandler:^{ [self.toast removeFromSuperview]; }];
-}
+- (void)hideToast { [(VToast *)self.toast vanish]; }
 
 @end
 
@@ -12788,7 +13051,11 @@ static volatile BOOL gGovRunning;
 // app (gWebApp is set) with a slim bar of the site's colour instead of the browser's controls. Pages outside the app's
 // site open in Iris. The app keeps its own website data, so your sign-in is carried over once, at install.
 
-static NSString *WebAppsDir(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/Iris Apps"]; }
+static NSString *WebAppsDir(void) {   // a profile's sites sit in a folder of their own, so two people can each install the same site
+    if (IrisIsDev()) return [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/Iris Dev Apps"];
+    NSString *d = [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/Iris Apps"];
+    return gProfileApp ? [d stringByAppendingPathComponent:[[gProfileApp[@"name"] ?: @"Profile" stringByReplacingOccurrencesOfString:@"/" withString:@"-"] stringByReplacingOccurrencesOfString:@":" withString:@"-"]] : d;
+}
 static NSString *WebAppDataDir(NSString *ident) {
     NSString *d = SupportFile([@"WebApps" stringByAppendingPathComponent:ident ?: @"_"]);
     [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
@@ -13016,12 +13283,13 @@ static NSDictionary *WebAppInfoPlist(NSDictionary *app) {
     NSMutableDictionary *p = [@{
         @"CFBundleName": app[@"name"], @"CFBundleDisplayName": app[@"name"],
         @"CFBundleIdentifier": [@"com.y.iris.app." stringByAppendingString:app[@"id"]],
-        @"CFBundleExecutable": @"Iris", @"CFBundlePackageType": @"APPL", @"CFBundleIconFile": @"app",
+        @"CFBundleExecutable": @"IrisApp", @"CFBundlePackageType": @"APPL", @"CFBundleIconFile": @"app",
         @"CFBundleShortVersionString": @"1.0", @"CFBundleVersion": @"1", @"LSMinimumSystemVersion": @"12.3",
         @"NSHighResolutionCapable": @YES, @"NSSupportsAutomaticGraphicsSwitching": @YES,
         @"LSApplicationCategoryType": @"public.app-category.productivity",
         @"IrisWebApp": @{@"id": app[@"id"], @"name": app[@"name"], @"start": app[@"start"], @"scope": app[@"scope"], @"host": app[@"host"] ?: @"",
-                         @"theme": app[@"theme"] ?: @"", @"mainApp": NSBundle.mainBundle.bundlePath}} mutableCopy];
+                         @"theme": app[@"theme"] ?: @"", @"mainApp": NSBundle.mainBundle.bundlePath,
+                         @"root": SupportDir(), @"prefs": NSBundle.mainBundle.bundleIdentifier ?: @"com.y.iris"}} mutableCopy];   // whoever installed it: their extensions, lists and settings
     for (NSString *k in @[@"NSCameraUsageDescription", @"NSMicrophoneUsageDescription", @"NSLocationUsageDescription", @"NSLocationWhenInUseUsageDescription", @"NSAppTransportSecurity"])
         if (mainInfo[k]) p[k] = mainInfo[k];
     return p;
@@ -13037,7 +13305,7 @@ static NSString *WebAppWriteBundle(NSDictionary *app, NSImage *icon) {
     NSString *macos = [contents stringByAppendingPathComponent:@"MacOS"], *res = [contents stringByAppendingPathComponent:@"Resources"];
     for (NSString *d in @[macos, res]) if (![fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil]) return @"Couldn't create the app's folder";
     NSError *err = nil;
-    if (![fm copyItemAtPath:NSBundle.mainBundle.executablePath toPath:[macos stringByAppendingPathComponent:@"Iris"] error:&err]) return err.localizedDescription ?: @"Couldn't copy Iris into the app";
+    if (![fm copyItemAtPath:NSBundle.mainBundle.executablePath toPath:[macos stringByAppendingPathComponent:@"IrisApp"] error:&err]) return err.localizedDescription ?: @"Couldn't copy Iris into the app";
     if (![WebAppInfoPlist(app) writeToURL:[NSURL fileURLWithPath:[contents stringByAppendingPathComponent:@"Info.plist"]] error:&err]) return err.localizedDescription ?: @"Couldn't write the app's description";
     [@"APPL????" writeToFile:[contents stringByAppendingPathComponent:@"PkgInfo"] atomically:YES encoding:NSASCIIStringEncoding error:nil];
     if (!WriteICNS(icon, [res stringByAppendingPathComponent:@"app.icns"])) return @"Couldn't write the icon";
@@ -13074,18 +13342,25 @@ static void WebAppExportCookies(VWindow *win, NSString *host, NSString *ident, v
 }
 // After Iris itself changes (a new build), every installed app gets the new Iris inside it.
 static void WebAppRefreshShims(void) {
+    if (IrisIsDev()) return;   // apps belong to the Iris you browse with
     NSString *me = NSBundle.mainBundle.executablePath;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSFileManager *fm = NSFileManager.defaultManager;
         for (NSDictionary *a in WebAppRegistry()) {
-            NSString *exe = [a[@"path"] stringByAppendingPathComponent:@"Contents/MacOS/Iris"];
-            if (![fm fileExistsAtPath:exe] || [fm contentsEqualAtPath:exe andPath:me]) continue;
+            if ([NSRunningApplication runningApplicationsWithBundleIdentifier:[@"com.y.iris.app." stringByAppendingString:a[@"id"]]].count) continue;   // next time, when it isn't open
+            NSString *old = [a[@"path"] stringByAppendingPathComponent:@"Contents/MacOS/Iris"], *exe = [a[@"path"] stringByAppendingPathComponent:@"Contents/MacOS/IrisApp"];
+            if ([fm fileExistsAtPath:old] && ![fm fileExistsAtPath:exe]) [fm moveItemAtPath:old toPath:exe error:nil];   // apps made before the executable had its own name
+            if (![fm fileExistsAtPath:exe] || [fm contentsEqualAtPath:exe andPath:me]) {
+                NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[a[@"path"] stringByAppendingPathComponent:@"Contents/Info.plist"]];
+                if (![info[@"CFBundleExecutable"] isEqual:@"IrisApp"] && [fm fileExistsAtPath:exe]) { NSMutableDictionary *m = [info mutableCopy]; m[@"CFBundleExecutable"] = @"IrisApp"; [m writeToFile:[a[@"path"] stringByAppendingPathComponent:@"Contents/Info.plist"] atomically:YES]; SignApp(a[@"path"]); }
+                continue;
+            }
             NSString *next = [exe stringByAppendingString:@".new"];
             [fm removeItemAtPath:next error:nil];
             if (![fm copyItemAtPath:me toPath:next error:nil]) continue;
             rename(next.fileSystemRepresentation, exe.fileSystemRepresentation);   // a running app keeps the copy it started with
             NSMutableDictionary *info = [NSMutableDictionary dictionaryWithContentsOfFile:[a[@"path"] stringByAppendingPathComponent:@"Contents/Info.plist"]];
-            if (info) { NSMutableDictionary *w = [info[@"IrisWebApp"] mutableCopy]; w[@"mainApp"] = NSBundle.mainBundle.bundlePath; info[@"IrisWebApp"] = w;
+            if (info) { NSMutableDictionary *w = [info[@"IrisWebApp"] mutableCopy]; w[@"mainApp"] = NSBundle.mainBundle.bundlePath; info[@"IrisWebApp"] = w; info[@"CFBundleExecutable"] = @"IrisApp";
                         [info writeToFile:[a[@"path"] stringByAppendingPathComponent:@"Contents/Info.plist"] atomically:YES]; }
             SignApp(a[@"path"]);
             DLog(@"apps: %@ now runs this build of Iris", a[@"name"]);
@@ -13171,7 +13446,7 @@ static void WebAppUninstall(NSDictionary *a) {
 static char kAppBarKey;
 @interface VAppBar : NSView
 @property (weak) VWindow *owner;
-@property (strong) VButton *back, *fwd, *reload, *openIn, *more;
+@property (strong) VButton *back, *fwd, *reload, *openIn, *more, *exts;
 @end
 @implementation VAppBar
 - (BOOL)isFlipped { return YES; }
@@ -13184,7 +13459,8 @@ static char kAppBarKey;
     self.reload = [VButton symbol:@"arrow.clockwise" size:12 tip:@"Reload (⌘R)" target:w action:@selector(reloadOrStop:)];
     self.openIn = [VButton symbol:@"safari" size:13 tip:@"Open this page in Iris" target:self action:@selector(openInIris:)];
     self.more = [VButton symbol:@"ellipsis" size:13 tip:@"More" target:self action:@selector(showMore:)];
-    for (VButton *b in @[self.back, self.fwd, self.reload, self.openIn, self.more]) { b.round = YES; [self addSubview:b]; }
+    self.exts = [VButton symbol:@"puzzlepiece.extension" size:12.5 tip:@"Extensions" target:self action:@selector(showExtensions:)];
+    for (VButton *b in @[self.back, self.fwd, self.reload, self.openIn, self.more, self.exts]) { b.round = YES; [self addSubview:b]; }
     return self;
 }
 - (NSColor *)tint { return ColorFromCSS(gWebApp[@"theme"]); }
@@ -13197,7 +13473,23 @@ static char kAppBarKey;
     for (VButton *b in @[self.back, self.fwd, self.reload]) { b.frame = NSMakeRect(x, y, 29, 28); x += 29; }
     self.more.frame = NSMakeRect(W - 12 - 28, y, 28, 28);
     self.openIn.frame = NSMakeRect(W - 12 - 28 - 32, y, 28, 28);
+    self.exts.hidden = !FExtHost.shared.extensions.count;
+    self.exts.frame = NSMakeRect(W - 12 - 28 - 64, y, 28, 28);
 }
+// Your extensions, as in Iris: pick one to open it (a password manager's popup, say).
+- (void)showExtensions:(VButton *)s {
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
+    for (id e in FExtHost.shared.extensions) {
+        NSString *name = [e valueForKey:@"name"] ?: @"Extension";
+        NSRange cut = [name rangeOfString:@" - "]; if (cut.location == NSNotFound) cut = [name rangeOfString:@": "];
+        NSMenuItem *i = [m addItemWithTitle:cut.location != NSNotFound ? [name substringToIndex:cut.location] : name action:@selector(openExtension:) keyEquivalent:@""];
+        i.target = self; i.representedObject = e;
+        NSImage *ic = [FExtHost.shared iconFor:e]; if (ic) { ic = [ic copy]; ic.size = NSMakeSize(16, 16); i.image = ic; }
+    }
+    if (!m.numberOfItems) { NSMenuItem *n = [m addItemWithTitle:@"No extensions" action:nil keyEquivalent:@""]; n.enabled = NO; }
+    PopMenu(m, NSMakePoint(NSMinX(s.frame), NSMaxY(s.frame) + 4), self);
+}
+- (void)openExtension:(NSMenuItem *)i { [FExtHost.shared openPopup:i.representedObject from:self.exts]; }
 - (void)drawRect:(NSRect)dirty {
     NSColor *tint = self.tint;
     [(tint ?: vBg) setFill]; NSRectFill(self.bounds);
@@ -13208,7 +13500,7 @@ static char kAppBarKey;
     BOOL away = u.host && !WebAppInScope(u);
     NSString *title = t.title.length ? t.title : gWebApp[@"name"];
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentCenter; ps.lineBreakMode = NSLineBreakByTruncatingTail;
-    CGFloat left = 84 + 3 * 29 + 12, right = NSWidth(self.bounds) - 12 - 60 - 12;
+    CGFloat left = 84 + 3 * 29 + 12, right = NSWidth(self.bounds) - 12 - 92 - 12;
     if (away) {   // somewhere outside the app (a sign-in page, say): say where, plainly
         NSString *host = u.host ?: @"";
         NSDictionary *ha = @{NSFontAttributeName: UIFont(12, NSFontWeightMedium), NSForegroundColorAttributeName: ink};
@@ -13265,7 +13557,8 @@ static char kAppBarKey;
     VTab *t = self.owner.current; VPage *p = t.web;
     self.back.enabled = p.canGoBack; self.fwd.enabled = p.canGoForward;
     self.reload.symbolName = p.loading ? @"xmark" : @"arrow.clockwise";
-    for (VButton *b in @[self.back, self.fwd, self.reload, self.openIn, self.more]) b.needsDisplay = YES;
+    self.exts.hidden = !FExtHost.shared.extensions.count;
+    for (VButton *b in @[self.back, self.fwd, self.reload, self.openIn, self.more, self.exts]) b.needsDisplay = YES;
     self.needsDisplay = YES;
 }
 @end
@@ -13274,7 +13567,8 @@ static char kAppBarKey;
 
 // The app sees your Iris settings (theme, blocking, codecs…) as its starting point, but keeps its own state.
 static void WebAppAdoptSettings(void) {
-    NSDictionary *main = [Defaults() persistentDomainForName:@"com.y.iris"];
+    NSString *from = [gWebApp[@"prefs"] isKindOfClass:NSString.class] ? gWebApp[@"prefs"] : @"com.y.iris";   // the Iris or profile that installed it
+    NSDictionary *main = [Defaults() persistentDomainForName:from];
     if (![main isKindOfClass:NSDictionary.class]) return;
     NSMutableDictionary *d = [main mutableCopy];
     for (NSString *k in main) if ([k hasPrefix:@"NSWindow Frame"] || [k hasPrefix:@"rule"] || [k hasPrefix:@"NSNavPanel"]) [d removeObjectForKey:k];
@@ -13324,7 +13618,7 @@ static VWindow *WebAppOpenWindow(NSURL *u) {
     NSView *root = self.window.contentView;
     CGFloat W = NSWidth(root.bounds), H = NSHeight(root.bounds), top = 36;
     BOOL fs = (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
-    VAppBar *bar = [self appBar];
+    VAppBar *bar = (VAppBar *)[self appBar];
     if (bar.superview != root) [root addSubview:bar positioned:NSWindowAbove relativeTo:self.content];
     self.toolbar.hidden = YES; self.shelfHandle.hidden = YES; self.shelf.hidden = YES;
     bar.frame = NSMakeRect(0, 0, W, top); [bar place];
@@ -13344,7 +13638,7 @@ static VWindow *WebAppOpenWindow(NSURL *u) {
 - (void)refreshWebAppBar {
     VTab *t = self.current;
     self.window.title = t.title.length ? t.title : gWebApp[@"name"] ?: @"App";
-    [[self appBar] refresh];
+    [(VAppBar *)[self appBar] refresh];
 }
 
 // Install: read what the page says about itself, make the icon, and show the Install page over the window.
@@ -13373,6 +13667,281 @@ static VWindow *WebAppOpenWindow(NSURL *u) {
 }
 - (void)openInstalledApp:(id)s { NSDictionary *a = WebAppFor([NSURL URLWithString:self.current.url ?: @""]); if (a) WebAppOpen(a); }
 @end
+#pragma mark - Profiles as separate apps
+
+// A profile is a different person. Each one besides the first runs as its own app, "Iris <Name>" in
+// ~/Applications/Iris Profiles: its own Dock icon, and its own everything (extensions and their data, bookmarks,
+// downloads, settings, history, tabs, sign-ins), kept apart by macOS itself. The app carries this same Iris, with an
+// IrisProfile entry in its Info.plist; started that way, gProfileApp is set and Iris keeps that profile's data in
+// Application Support/Iris/Profiles/<id>.
+
+static NSString *ProfileAppsDir(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/Iris Profiles"]; }
+static NSString *ProfileDataDir(NSString *pid) {
+    NSString *d = [[[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
+                     stringByAppendingPathComponent:@"Iris"] stringByAppendingPathComponent:@"Profiles"] stringByAppendingPathComponent:pid ?: @"_"];
+    [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    return d;
+}
+static NSString *ProfileBundleID(NSString *pid) { return [@"com.y.iris.profile." stringByAppendingString:[[pid stringByReplacingOccurrencesOfString:@"-" withString:@""] lowercaseString]]; }
+static NSString *MainIrisPath(void) {   // the Iris you browse with, from wherever this code is running
+    if (gProfileApp[@"mainApp"]) return gProfileApp[@"mainApp"];
+    return NSBundle.mainBundle.bundlePath;
+}
+// The profile's app on disk, if it has been made.
+static NSString *ProfileAppFind(NSString *pid) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *f in [fm contentsOfDirectoryAtPath:ProfileAppsDir() error:nil]) {
+        if (![f hasSuffix:@".app"]) continue;
+        NSString *p = [ProfileAppsDir() stringByAppendingPathComponent:f];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[p stringByAppendingPathComponent:@"Contents/Info.plist"]];
+        if ([info[@"IrisProfile"][@"id"] isEqualToString:pid]) return p;
+    }
+    return nil;
+}
+static NSDictionary *ProfileEntry(NSString *pid) {
+    for (NSDictionary *p in ProfilesStored()) if ([p[@"id"] isEqualToString:pid]) return p;
+    return nil;
+}
+// The Iris binary a profile's app carries: the one in Iris itself, so an app made from another profile's app is never older.
+static NSString *IrisBinary(void) {
+    NSString *b = [MainIrisPath() stringByAppendingPathComponent:@"Contents/MacOS/Iris"];
+    return [NSFileManager.defaultManager isExecutableFileAtPath:b] ? b : NSBundle.mainBundle.executablePath;
+}
+// Its Dock icon: Iris's, with the profile's initial on its colour in the corner.
+static NSImage *ProfileAppIcon(NSString *pid, NSString *name, NSInteger colorIndex) {
+    NSImage *base = [[NSImage alloc] initWithContentsOfFile:[MainIrisPath() stringByAppendingPathComponent:@"Contents/Resources/Iris.icns"]] ?: NSApp.applicationIconImage;
+    NSArray *cols = ProfileColors();
+    NSColor *c = Hex((uint32_t)[cols[(NSUInteger)MAX(0, MIN((NSInteger)cols.count - 1, colorIndex))][1] unsignedIntValue]);
+    NSString *initial = name.length ? [[name substringToIndex:[name rangeOfComposedCharacterSequenceAtIndex:0].length] uppercaseString] : @"•";
+    return [NSImage imageWithSize:NSMakeSize(1024, 1024) flipped:NO drawingHandler:^BOOL(NSRect r) {
+        [base drawInRect:r fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+        NSRect dot = NSMakeRect(600, 110, 330, 330);
+        [NSGraphicsContext saveGraphicsState];
+        NSShadow *sh = [NSShadow new]; sh.shadowBlurRadius = 22; sh.shadowOffset = NSMakeSize(0, -8); sh.shadowColor = [NSColor colorWithWhite:0 alpha:0.4]; [sh set];
+        [c setFill]; [[NSBezierPath bezierPathWithOvalInRect:dot] fill];
+        [NSGraphicsContext restoreGraphicsState];
+        NSBezierPath *ring = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(dot, 5, 5)]; ring.lineWidth = 10; [[NSColor colorWithWhite:1 alpha:0.9] setStroke]; [ring stroke];
+        NSDictionary *a = @{NSFontAttributeName: [NSFont systemFontOfSize:190 weight:NSFontWeightBold], NSForegroundColorAttributeName: NSColor.whiteColor};
+        NSSize s = [initial sizeWithAttributes:a];
+        [initial drawAtPoint:NSMakePoint(NSMidX(dot) - s.width / 2, NSMidY(dot) - s.height / 2 + 6) withAttributes:a];
+        return YES;
+    }];
+}
+// Puts a small app together (Iris inside, its own Info.plist and icon) and swaps it into place. Off the main thread.
+static NSString *WriteShimApp(NSString *dest, NSDictionary *info, NSString *exe, NSImage *icon) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm createDirectoryAtPath:dest.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *tmp = [dest.stringByDeletingLastPathComponent stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.building.app", NSUUID.UUID.UUIDString]];
+    NSString *contents = [tmp stringByAppendingPathComponent:@"Contents"];
+    NSString *macos = [contents stringByAppendingPathComponent:@"MacOS"], *res = [contents stringByAppendingPathComponent:@"Resources"];
+    for (NSString *d in @[macos, res]) if (![fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil]) return @"Couldn't create the app's folder";
+    NSError *err = nil;
+    if (![fm copyItemAtPath:IrisBinary() toPath:[macos stringByAppendingPathComponent:exe] error:&err]) { [fm removeItemAtPath:tmp error:nil]; return err.localizedDescription ?: @"Couldn't copy Iris into the app"; }
+    if (![info writeToURL:[NSURL fileURLWithPath:[contents stringByAppendingPathComponent:@"Info.plist"]] error:&err]) { [fm removeItemAtPath:tmp error:nil]; return err.localizedDescription ?: @"Couldn't write the app's description"; }
+    [@"APPL????" writeToFile:[contents stringByAppendingPathComponent:@"PkgInfo"] atomically:YES encoding:NSASCIIStringEncoding error:nil];
+    if (!WriteICNS(icon, [res stringByAppendingPathComponent:@"app.icns"])) { [fm removeItemAtPath:tmp error:nil]; return @"Couldn't write the icon"; }
+    NSString *mainRes = [MainIrisPath() stringByAppendingPathComponent:@"Contents/Resources"];   // built-in pages, icons and the extension layer stay Iris's own, always current
+    for (NSString *f in @[@"pages", @"ext-shim.js", @"Iris.icns"]) [fm createSymbolicLinkAtPath:[res stringByAppendingPathComponent:f] withDestinationPath:[mainRes stringByAppendingPathComponent:f] error:nil];
+    SignApp(tmp);
+    if ([fm fileExistsAtPath:dest]) {
+        if (![fm replaceItemAtURL:[NSURL fileURLWithPath:dest] withItemAtURL:[NSURL fileURLWithPath:tmp] backupItemName:nil options:0 resultingItemURL:nil error:&err]) { [fm removeItemAtPath:tmp error:nil]; return err.localizedDescription ?: @"Couldn't replace the old app"; }
+    } else if (![fm moveItemAtPath:tmp toPath:dest error:&err]) { [fm removeItemAtPath:tmp error:nil]; return err.localizedDescription ?: @"Couldn't put the app in place"; }
+    LSRegisterURL((__bridge CFURLRef)[NSURL fileURLWithPath:dest], true);
+    return nil;
+}
+static NSDictionary *ProfileInfoPlist(NSString *pid, NSString *name, NSInteger color) {
+    NSDictionary *mainInfo = [NSDictionary dictionaryWithContentsOfFile:[MainIrisPath() stringByAppendingPathComponent:@"Contents/Info.plist"]] ?: NSBundle.mainBundle.infoDictionary;
+    NSMutableDictionary *p = [@{
+        @"CFBundleName": [@"Iris " stringByAppendingString:name], @"CFBundleDisplayName": [@"Iris " stringByAppendingString:name],
+        @"CFBundleIdentifier": ProfileBundleID(pid), @"CFBundleExecutable": @"IrisProfile", @"CFBundlePackageType": @"APPL", @"CFBundleIconFile": @"app",
+        @"CFBundleShortVersionString": @"1.0", @"CFBundleVersion": @"1", @"LSMinimumSystemVersion": @"12.3", @"NSHighResolutionCapable": @YES,
+        @"LSApplicationCategoryType": @"public.app-category.productivity",
+        @"IrisProfile": @{@"id": pid, @"name": name, @"color": @(color), @"mainApp": MainIrisPath()}} mutableCopy];
+    for (NSString *k in @[@"NSCameraUsageDescription", @"NSMicrophoneUsageDescription", @"NSLocationUsageDescription", @"NSLocationWhenInUseUsageDescription", @"NSAppTransportSecurity"])
+        if (mainInfo[k]) p[k] = mainInfo[k];
+    return p;
+}
+static BOOL ProfileAppRunning(NSString *pid) { return [NSRunningApplication runningApplicationsWithBundleIdentifier:ProfileBundleID(pid)].count > 0; }
+// The profile's app, made (or brought up to date: this build, its current name and colour) when it isn't open.
+static NSString *ProfileAppEnsure(NSString *pid) {
+    NSDictionary *e = ProfileEntry(pid);
+    NSString *name = e[@"name"] ?: @"Profile"; NSInteger color = ProfileColorIndex(pid);
+    NSString *path = ProfileAppFind(pid), *want = [ProfileAppsDir() stringByAppendingPathComponent:[NSString stringWithFormat:@"Iris %@.app", name]];
+    if (path && ProfileAppRunning(pid)) return path;
+    BOOL stale = YES;
+    if (path) {
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Contents/Info.plist"]];
+        stale = ![info[@"IrisProfile"][@"name"] isEqual:name] || ![info[@"IrisProfile"][@"color"] isEqual:@(color)] || ![path isEqualToString:want]
+             || ![NSFileManager.defaultManager contentsEqualAtPath:[path stringByAppendingPathComponent:@"Contents/MacOS/IrisProfile"] andPath:IrisBinary()];
+    }
+    if (!stale) return path;
+    if (path && ![path isEqualToString:want]) [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    NSString *fail = WriteShimApp(want, ProfileInfoPlist(pid, name, color), @"IrisProfile", ProfileAppIcon(pid, name, color));
+    if (fail) { DLog(@"profiles: couldn't make the app for %@: %@", name, fail); return path && [NSFileManager.defaultManager fileExistsAtPath:path] ? path : nil; }
+    DLog(@"profiles: %@ is ready at %@", name, want);
+    return want;
+}
+
+// The first time a profile opens as its own app, what Iris kept for it comes along: its sign-ins (cookies),
+// history, and any of its windows that were open, with their tabs.
+static NSString *const kProfileMoved = @"movedToApp";
+static void ProfileHandOver(NSString *pid, NSArray *windows, void (^done)(void)) {
+    if (gProfileApp || IrisIsDev() || gWebApp) { done(); return; }
+    NSString *dir = ProfileDataDir(pid);
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (windows.count) {
+        NSMutableArray *ws = [NSMutableArray array];
+        for (NSDictionary *w in windows) { NSMutableDictionary *m = [w mutableCopy]; m[@"profile"] = @""; [ws addObject:m]; }
+        NSString *f = [dir stringByAppendingPathComponent:@"seed-session.plist"];
+        NSArray *old = [NSArray arrayWithContentsOfFile:f] ?: @[];
+        [[old arrayByAddingObjectsFromArray:ws] writeToFile:f atomically:YES];
+    }
+    NSDictionary *e = ProfileEntry(pid);
+    if ([e[kProfileMoved] boolValue]) { done(); return; }
+    NSString *hist = SupportFile([NSString stringWithFormat:@"history-%@.json", pid]);
+    if ([fm fileExistsAtPath:hist] && ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"history.json"]]) [fm copyItemAtPath:hist toPath:[dir stringByAppendingPathComponent:@"history.json"] error:nil];
+    void (^mark)(void) = ^{
+        NSMutableArray *profiles = [NSMutableArray array];
+        for (NSDictionary *x in ProfilesStored()) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[kProfileMoved] = @YES; [profiles addObject:m]; }
+        ProfilesStore(profiles);
+    };
+    WKWebsiteDataStore *store = ProfileStore(pid);
+    if (store == WKWebsiteDataStore.defaultDataStore) { mark(); done(); return; }   // before macOS 14 profiles had no sign-ins of their own to bring
+    [store.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *all) {
+        NSMutableArray *keep = [NSMutableArray array];
+        for (NSHTTPCookie *c in all) {
+            NSMutableDictionary *p = [NSMutableDictionary dictionary];
+            [c.properties enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) { if ([v isKindOfClass:NSString.class] || [v isKindOfClass:NSDate.class] || [v isKindOfClass:NSNumber.class]) p[k] = v; }];
+            [keep addObject:p];
+        }
+        NSData *d = keep.count ? [NSPropertyListSerialization dataWithPropertyList:keep format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil] : nil;
+        NSString *f = [dir stringByAppendingPathComponent:@"cookies.plist"];
+        if (d) { [d writeToFile:f atomically:YES]; chmod(f.fileSystemRepresentation, 0600); }
+        mark();
+        DLog(@"profiles: handed %lu sign-in cookies and its history to the app", (unsigned long)keep.count);
+        dispatch_async(dispatch_get_main_queue(), done);
+    }];
+}
+// Open a profile: its app, made if needed, with these pages if any.
+static void ProfileAppOpen(NSString *pid, NSArray<NSURL *> *urls) {
+    if (!pid.length) return;
+    if ([pid isEqualToString:@"@main"]) {   // from a profile's app: the first profile is Iris itself
+        NSURL *app = [NSURL fileURLWithPath:MainIrisPath()];
+        if (urls.count) [NSWorkspace.sharedWorkspace openURLs:urls withApplicationAtURL:app configuration:[NSWorkspaceOpenConfiguration configuration] completionHandler:nil];
+        else [NSWorkspace.sharedWorkspace openApplicationAtURL:app configuration:[NSWorkspaceOpenConfiguration configuration] completionHandler:nil];
+        return;
+    }
+    ProfileHandOver(pid, nil, ^{
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *path = ProfileAppEnsure(pid);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!path) { [gWin showToast:@"Couldn't open that profile's app"]; return; }
+                NSURL *app = [NSURL fileURLWithPath:path];
+                NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration]; cfg.activates = YES;
+                if (urls.count) [NSWorkspace.sharedWorkspace openURLs:urls withApplicationAtURL:app configuration:cfg completionHandler:nil];
+                else [NSWorkspace.sharedWorkspace openApplicationAtURL:app configuration:cfg completionHandler:nil];
+            });
+        });
+    });
+}
+// At launch, Iris itself: windows of other profiles saved last time go to those profiles' apps.
+static void ProfilesMoveWindowsOut(void) {
+    if (gProfileApp || IrisIsDev() || gWebApp) return;
+    NSDictionary *st = [Defaults() dictionaryForKey:kTabsState];
+    if (![st isKindOfClass:NSDictionary.class]) return;
+    NSMutableArray *all = [NSMutableArray array];
+    NSMutableDictionary *first = [st mutableCopy]; [first removeObjectForKey:@"windows"];
+    [all addObject:first];
+    for (NSDictionary *w in [st[@"windows"] isKindOfClass:NSArray.class] ? st[@"windows"] : @[]) if ([w isKindOfClass:NSDictionary.class]) [all addObject:w];
+    NSMutableArray *mine = [NSMutableArray array]; NSMutableDictionary *theirs = [NSMutableDictionary dictionary];
+    for (NSDictionary *w in all) {
+        NSString *pid = [w[@"profile"] isKindOfClass:NSString.class] ? w[@"profile"] : @"";
+        if (!pid.length || !ProfileEntry(pid)) [mine addObject:w];
+        else { if (!theirs[pid]) theirs[pid] = [NSMutableArray array]; [theirs[pid] addObject:w]; }
+    }
+    if (!theirs.count) return;
+    NSMutableDictionary *next = mine.count ? [mine[0] mutableCopy] : [@{@"tabs": @[], @"current": @0} mutableCopy];
+    if (mine.count > 1) next[@"windows"] = [mine subarrayWithRange:NSMakeRange(1, mine.count - 1)];
+    [Defaults() setObject:next forKey:kTabsState];
+    for (NSString *pid in theirs) {
+        DLog(@"profiles: %lu window(s) of %@ move to its app", (unsigned long)[theirs[pid] count], ProfileName(pid));
+        ProfileHandOver(pid, theirs[pid], ^{ ProfileAppOpen(pid, nil); });
+    }
+}
+
+// In a profile's app, at its first start: Iris's look and the public filter lists, then what Iris handed over.
+static void ProfileAppFirstLaunch(void) {
+    if (!gProfileApp) return;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *dir = SupportDir();
+    if (![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@".seeded"]]) {
+        NSDictionary *main = [NSUserDefaults.standardUserDefaults persistentDomainForName:@"com.y.iris"];
+        for (NSString *k in @[kTheme, kAccent, kDensity, kAddrWidth, kToolbarLayout, kShelfSide, kBlock, kStrip, kCookieReject, kGPC, kCodec, kThrottleOn, kBgThrottle, kSearch])
+            if (main[k] && ![Defaults() objectForKey:k]) [Defaults() setObject:main[k] forKey:k];
+        [@"[]" writeToFile:SupportFile(@"bookmarks.json") atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [@"" writeToFile:[dir stringByAppendingPathComponent:@".seeded"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    // windows Iris handed over: they become this app's saved session
+    NSString *seed = [dir stringByAppendingPathComponent:@"seed-session.plist"];
+    NSArray *ws = [NSArray arrayWithContentsOfFile:seed];
+    if (ws.count) {
+        NSMutableArray *windows = [ws mutableCopy];
+        NSDictionary *cur = [Defaults() dictionaryForKey:kTabsState];
+        if ([cur[@"tabs"] count]) { NSMutableDictionary *c = [cur mutableCopy]; [c removeObjectForKey:@"windows"]; [windows insertObject:c atIndex:0];
+                                    for (id w in cur[@"windows"] ?: @[]) [windows addObject:w]; }
+        NSMutableDictionary *st = [windows[0] mutableCopy];
+        if (windows.count > 1) st[@"windows"] = [windows subarrayWithRange:NSMakeRange(1, windows.count - 1)];
+        [Defaults() setObject:st forKey:kTabsState];
+    }
+    [fm removeItemAtPath:seed error:nil];
+}
+// Its sign-ins from Iris, set before any page loads (the first start only).
+static void ProfileAppImportCookies(void) {
+    if (!gProfileApp) return;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *file = [SupportDir() stringByAppendingPathComponent:@"cookies.plist"];
+    NSData *d = [NSData dataWithContentsOfFile:file];
+    NSArray *props = d ? [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:nil] : nil;
+    if ([props isKindOfClass:NSArray.class] && props.count) {
+        __block NSInteger left = 0;
+        WKHTTPCookieStore *store = WKWebsiteDataStore.defaultDataStore.httpCookieStore;
+        for (NSDictionary *p in props) {
+            NSHTTPCookie *c = [p isKindOfClass:NSDictionary.class] ? [NSHTTPCookie cookieWithProperties:p] : nil;
+            if (!c) continue;
+            left++; [store setCookie:c completionHandler:^{ left--; }];
+        }
+        NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:8];
+        while (left > 0 && limit.timeIntervalSinceNow > 0) [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        DLog(@"profile: %lu sign-in cookies from Iris", (unsigned long)props.count);
+    }
+    [fm removeItemAtPath:file error:nil];
+}
+static void ProfileAppUninstall(NSString *pid) {
+    NSArray *running = [NSRunningApplication runningApplicationsWithBundleIdentifier:ProfileBundleID(pid)];
+    for (NSRunningApplication *r in running) [r terminate];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((running.count ? 4 : 0) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{   // once it has closed
+        for (NSRunningApplication *r in running) if (!r.terminated) [r forceTerminate];
+        NSString *path = ProfileAppFind(pid);
+        if (path) [NSWorkspace.sharedWorkspace recycleURLs:@[[NSURL fileURLWithPath:path]] completionHandler:nil];
+        // everything that person had: Iris's folder for them, WebKit's website data and caches, their settings
+        NSFileManager *fm = NSFileManager.defaultManager;
+        [fm removeItemAtPath:ProfileDataDir(pid) error:nil];
+        NSString *bid = ProfileBundleID(pid), *lib = [NSHomeDirectory() stringByAppendingPathComponent:@"Library"];
+        for (NSString *d in @[@"WebKit", @"HTTPStorages", @"Caches", @"Saved Application State"])
+            [fm removeItemAtPath:[[lib stringByAppendingPathComponent:d] stringByAppendingPathComponent:[d isEqualToString:@"Saved Application State"] ? [bid stringByAppendingString:@".savedState"] : bid] error:nil];
+        [NSUserDefaults.standardUserDefaults removePersistentDomainForName:bid];
+        [fm removeItemAtPath:[lib stringByAppendingPathComponent:[NSString stringWithFormat:@"Preferences/%@.plist", bid]] error:nil];
+        DLog(@"profiles: removed the app and data of %@", pid);
+    });
+}
+// Iris, after a new build: every profile app that isn't open gets it (and its current name and colour).
+static void ProfileAppsRefresh(void) {
+    if (gProfileApp || IrisIsDev() || gWebApp) return;
+    NSArray *ids = [ProfilesStored() valueForKey:@"id"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        for (NSString *pid in ids) if (ProfileAppFind(pid) && !ProfileAppRunning(pid)) ProfileAppEnsure(pid);
+    });
+}
 #pragma mark - Test harness: commands from control.txt, screenshots into shots/
 
 // Development aid. Write lines to control.txt beside Iris.app; each runs once, in order:
@@ -13401,6 +13970,8 @@ static void CtlOut(NSString *s) {
 }
 
 - (void)startControl {
+    // with Iris Dev beside it, only Iris Dev answers control.txt: tests never touch the Iris you browse with
+    if (!IrisIsDev() && [NSFileManager.defaultManager fileExistsAtPath:[CtlDir() stringByAppendingPathComponent:@"Iris Dev.app"]]) return;
     static NSDate *seen;
     NSString *p = [CtlDir() stringByAppendingPathComponent:@"control.txt"];
     static BOOL busy;
@@ -13446,7 +14017,7 @@ static void CtlOut(NSString *s) {
         else if ([cmd isEqualToString:@"reload"]) [w reload];
         else if ([cmd isEqualToString:@"scroll"]) [w runJS:[NSString stringWithFormat:@"window.scrollBy(0,%f)", arg.doubleValue]];
         else if ([cmd isEqualToString:@"top"]) [w runJS:@"window.scrollTo(0,0)"];
-        else if ([cmd isEqualToString:@"act"] && [@[@"toggleSplit:", @"swapSplit:", @"toggleReader:", @"showFind:", @"closePeek:", @"toggleSidebar:", @"toggleLens:", @"toggleShieldPanel:", @"toggleSitePanel:", @"closePanels", @"showToolbarCustomiser:", @"closeToolbarCustomiser"] containsObject:arg]) {
+        else if ([cmd isEqualToString:@"act"] && [@[@"toggleSplit:", @"swapSplit:", @"toggleReader:", @"showFind:", @"closePeek:", @"toggleSidebar:", @"toggleLens:", @"toggleShieldPanel:", @"toggleSitePanel:", @"closePanels", @"showToolbarCustomiser:", @"closeToolbarCustomiser", @"installWebApp:"] containsObject:arg]) {
             [NSApp sendAction:NSSelectorFromString(arg) to:self from:nil];
             CtlOut([NSString stringWithFormat:@"act %@ split=%lu", arg, (unsigned long)self.splitPair.count]);
         }
@@ -13534,7 +14105,43 @@ static void CtlOut(NSString *s) {
             if ([v isKindOfClass:WKWebView.class]) [v evaluateJavaScript:arg completionHandler:^(id r, NSError *e) { CtlOut([NSString stringWithFormat:@"czjs %@", e ? e.localizedDescription : r]); }];
             else CtlOut(@"czjs no customiser");
         }
-        else if ([cmd isEqualToString:@"slowmo"]) gSlowMo = MAX(1, MIN(20, arg.doubleValue));   // dev: "slowmo 8" stretches panel animations, "slowmo 1" back
+        else if ([cmd isEqualToString:@"tbstate"]) {   // dev: the toolbar's arrangement and what shows now
+            NSMutableArray *live = [NSMutableArray array];
+            for (NSString *k in self.toolbar.keyed) { VButton *b = self.toolbar.keyed[k]; if (!b.hidden) [live addObject:[NSString stringWithFormat:@"%@%@", k, b.symbolName && !Symbol(b.symbolName, 13, NSFontWeightMedium) ? @"(no symbol)" : @""]]; }
+            CtlOut([NSString stringWithFormat:@"tbstate layout=%@ installable=%d shown=%@", [IrisJSON(ToolbarLayout()) stringByReplacingOccurrencesOfString:@"\n" withString:@""], self.current.installable, [live componentsJoinedByString:@","]]);
+        }
+        else if ([cmd isEqualToString:@"mouse"]) {   // dev: who has the pointer: muting, panels, and the view under it in every window
+            NSMutableArray *o = [NSMutableArray array];
+            SEL g = NSSelectorFromString(@"_ignoresMouseMoveEvents"), g2 = NSSelectorFromString(@"_ignoresNonWheelEvents");
+            for (VWindow *w in gWindows) {
+                NSView *root = w.window.contentView;
+                NSPoint p = [root.superview ?: root convertPoint:[w.window convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
+                NSView *hv = [root hitTest:p];
+                NSMutableArray *ig = [NSMutableArray array];
+                for (VTab *t in w.tabs) if (t.web.web) { WKWebView *v = t.web.web;
+                    BOOL a = [v respondsToSelector:g] ? ((BOOL (*)(id, SEL))objc_msgSend)(v, g) : 0, b = [v respondsToSelector:g2] ? ((BOOL (*)(id, SEL))objc_msgSend)(v, g2) : 0;
+                    if (a || b) [ig addObject:[NSString stringWithFormat:@"%@%@%@", t == w.current ? @"*" : @"", a ? @"M" : @"", b ? @"N" : @""]]; }
+                [o addObject:[NSString stringWithFormat:@"[%@ key=%d muted=%d panel=%d cz=%d under=%@ ignoring=%@]", NSStringFromRect(w.window.frame), w.window.isKeyWindow, gMuted == w, [w panelOpen], objc_getAssociatedObject(w, &kCustomiserKey) != nil, NSStringFromClass(hv.class), ig]];
+            }
+            NSCursor *c = NSCursor.currentCursor;
+            NSString *cn = c == NSCursor.arrowCursor ? @"arrow" : c == NSCursor.pointingHandCursor ? @"hand" : c == NSCursor.IBeamCursor ? @"ibeam" : c ? [NSString stringWithFormat:@"other(%@)", NSStringFromPoint(c.hotSpot)] : @"nil";
+            CtlOut([NSString stringWithFormat:@"mouse at %@ active=%d cursor=%@ appkitHook=%d %@", NSStringFromPoint(NSEvent.mouseLocation), NSApp.isActive, cn, [NSWindow instancesRespondToSelector:NSSelectorFromString(@"_setCursorForMouseLocation:")], [o componentsJoinedByString:@" "]]);
+        }
+        else if ([cmd isEqualToString:@"profiletest"]) {   // dev: make, open or remove a throwaway profile app ("Iris Test")
+            NSString *pid = @"0000test-dev0-0000-0000-000000000000";
+            if ([arg isEqualToString:@"remove"]) { ProfileAppUninstall(pid); CtlOut(@"profiletest removing"); }
+            else {
+                NSString *dest = [ProfileAppsDir() stringByAppendingPathComponent:@"Iris Test.app"];
+                NSString *fail = WriteShimApp(dest, ProfileInfoPlist(pid, @"Test", 3), @"IrisProfile", ProfileAppIcon(pid, @"Test", 3));
+                NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[dest stringByAppendingPathComponent:@"Contents/Info.plist"]];
+                CtlOut([NSString stringWithFormat:@"profiletest made=%@ id=%@ exe=%d", fail ?: @"ok", info[@"CFBundleIdentifier"], [NSFileManager.defaultManager isExecutableFileAtPath:[dest stringByAppendingPathComponent:@"Contents/MacOS/IrisProfile"]]]);
+                if (!fail) [NSWorkspace.sharedWorkspace openApplicationAtURL:[NSURL fileURLWithPath:dest] configuration:[NSWorkspaceOpenConfiguration configuration] completionHandler:nil];
+            }
+        }
+        else if ([cmd isEqualToString:@"toast"]) [self showToast:arg];   // dev: "toast Filter lists updated"
+        else if ([cmd isEqualToString:@"cursorguard"]) gCursorGuardOff = !arg.boolValue;
+        else if ([cmd isEqualToString:@"linkflash"]) { for (int i = 0; i < 3; i++) { [self showLink:@"https://example.com/flash"]; [self showLink:@""]; } [self showLink:@"https://example.com/flash"]; }
+        else if ([cmd isEqualToString:@"slowmo"])gSlowMo = MAX(1, MIN(20, arg.doubleValue));   // dev: "slowmo 8" stretches panel animations, "slowmo 1" back
         else if ([cmd isEqualToString:@"hover"]) { VButton *b = self.toolbar.menuBtn; b.hovered = [arg isEqualToString:@"lens"]; b.needsDisplay = YES; }   // dev: Lens as if under the pointer
         else if ([cmd isEqualToString:@"loadline"]) {   // dev: hold the loading line at a point ("loadline 0.55"), or "loadline off"
             VLoadLine *ll = (VLoadLine *)self.loadLine;
@@ -13845,6 +14452,7 @@ static void RunBuildScript(NSString *stamp);
     if (hard != last) { last = hard; for (VTab *t in AllTabs(YES)) if (t.web) ApplyThrottle(t.web.web, hard); }
 }
 - (void)checkForStagedBuild {
+    if (IrisIsDev()) return;   // Iris Dev is replaced by each build directly; the Update pill is Iris's
     dispatch_async(DevQueue(), ^{
         NSString *dir = StageDir();
         BOOL ready = [NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:@"ready"]];
@@ -13891,14 +14499,16 @@ static NSString *BuildStamp(void) {
 static BOOL gBuilding;
 static NSString *gSeenStamp; static NSTimeInterval gSeenAt;
 // Runs the build script (a fresh copy, so editing it mid-build is safe). Call on DevQueue.
-static void RunBuildScript(NSString *stamp) {
+static void RunBuildScriptWith(NSString *stamp, NSArray *args);
+static void RunBuildScript(NSString *stamp) { RunBuildScriptWith(stamp, nil); }
+static void RunBuildScriptWith(NSString *stamp, NSArray *args) {
     NSString *d = StageDir().stringByDeletingLastPathComponent, *script = [d stringByAppendingPathComponent:@"iris"], *copy = [d stringByAppendingPathComponent:@".iris-run"];
     if (![NSFileManager.defaultManager fileExistsAtPath:script]) return;
     [NSFileManager.defaultManager removeItemAtPath:copy error:nil];
     [NSFileManager.defaultManager copyItemAtPath:script toPath:copy error:nil];
     NSTask *t = [NSTask new];
     t.executableURL = [NSURL fileURLWithPath:@"/bin/bash"];
-    t.arguments = stamp ? @[copy, @"build"] : @[copy];   // a source change always compiles (file times can't be trusted after copies)
+    t.arguments = args ? [@[copy] arrayByAddingObjectsFromArray:args] : stamp ? @[copy, @"build"] : @[copy];   // a source change always compiles (file times can't be trusted after copies)
     t.currentDirectoryURL = [NSURL fileURLWithPath:d];
     t.standardOutput = NSFileHandle.fileHandleWithNullDevice; t.standardError = NSFileHandle.fileHandleWithNullDevice;
     gBuilding = YES;
@@ -13906,6 +14516,7 @@ static void RunBuildScript(NSString *stamp) {
         int code = task.terminationStatus;
         dispatch_async(DevQueue(), ^{
             gBuilding = NO;
+            if (code == 75 && [args containsObject:@"ship"]) [@"" writeToFile:[d stringByAppendingPathComponent:@".ship"] atomically:YES encoding:NSUTF8StringEncoding error:nil];   // a build was running: ship once it's done
             if (stamp && code != 75) [stamp writeToFile:[d stringByAppendingPathComponent:@".built-stamp"] atomically:YES encoding:NSUTF8StringEncoding error:nil];   // 75: another build was running; try again
             NSString *st = [NSString stringWithContentsOfFile:[d stringByAppendingPathComponent:@"watch.status"] encoding:NSUTF8StringEncoding error:nil];
             NSInteger n = [[st componentsSeparatedByString:@" "].firstObject integerValue] + 1;
@@ -13921,6 +14532,8 @@ static void RunBuildScript(NSString *stamp) {
     dispatch_async(DevQueue(), ^{
         NSString *d = StageDir().stringByDeletingLastPathComponent;
         if (gBuilding || ![NSFileManager.defaultManager fileExistsAtPath:[d stringByAppendingPathComponent:@"iris"]]) return;
+        NSString *ship = [d stringByAppendingPathComponent:@".ship"];   // a tested build is being sent from Iris Dev to Iris
+        if ([NSFileManager.defaultManager fileExistsAtPath:ship]) { [NSFileManager.defaultManager removeItemAtPath:ship error:nil]; RunBuildScriptWith(nil, @[@"ship"]); return; }
         NSString *st = BuildStamp();
         NSString *built = [NSString stringWithContentsOfFile:[d stringByAppendingPathComponent:@".built-stamp"] encoding:NSUTF8StringEncoding error:nil] ?: @"";
         if ([st isEqualToString:built]) { gSeenStamp = nil; return; }
@@ -13950,7 +14563,7 @@ static void RunBuildScript(NSString *stamp) {
     InitPalette();
     NSApp.appearance = ThemeAppearance();   // the palette and the app agree from the first frame
     // the Dock keeps an old icon for ad-hoc builds; hand it the current one directly
-    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:gWebApp ? @"app" : @"Iris" ofType:@"icns"]];
+    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:gWebApp || gProfileApp ? @"app" : IrisIsDev() ? @"IrisDev" : @"Iris" ofType:@"icns"]];
     if (icon) NSApp.applicationIconImage = icon;
     // "Follow macOS": recolour when the system switches between light and dark
     [NSDistributedNotificationCenter.defaultCenter addObserverForName:@"AppleInterfaceThemeChangedNotification" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
@@ -13972,11 +14585,15 @@ static void RunBuildScript(NSString *stamp) {
         [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:YES block:^(NSTimer *t) {
             for (VWindow *w in gWindows) if (w.window.isVisible) [w.current.web checkVideo]; }];
         [VBlocker.shared prepare:nil];
+        [FExtHost.shared start];   // your extensions run in the app too (a password manager on the site, say)
         if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start];
         IrisCrashStarted();
         return;
     }
     WebAppRefreshShims();   // installed apps pick up this build of Iris
+    ProfileAppImportCookies();   // a profile's app, the first time: its sign-ins, before any page loads
+    ProfilesMoveWindowsOut();    // Iris: windows of other profiles left from before go to those profiles' apps
+    ProfileAppsRefresh();        // and closed profile apps pick up this build
     self.win = [VWindow new];
     [self buildMenu];
     [self.win showWindow:nil];
@@ -13987,10 +14604,12 @@ static void RunBuildScript(NSString *stamp) {
         for (NSDictionary *d in extra) if ([d isKindOfClass:NSDictionary.class]) { VWindow *x = [[VWindow alloc] initPrivate:NO state:d]; [x.window orderWindow:NSWindowBelow relativeTo:self.win.window.windowNumber]; [x windowDidResize:nil]; }
     gWin = self.win; [self.win.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
-    [self checkForStagedBuild];
     __weak VApp *ws = self;
-    [NSTimer scheduledTimerWithTimeInterval:4 repeats:YES block:^(NSTimer *t) { [ws checkForStagedBuild]; }];
-    [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *t) { [ws watchOwnSource]; }];
+    if (!gProfileApp) {   // building and updating belong to Iris itself; a profile's app gets the new build when it next opens
+        [self checkForStagedBuild];
+        [NSTimer scheduledTimerWithTimeInterval:4 repeats:YES block:^(NSTimer *t) { [ws checkForStagedBuild]; }];
+        [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *t) { [ws watchOwnSource]; }];
+    }
     [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(NSTimer *t) { [ws checkPower]; }];
     // pages that grow a video after loading (YouTube moving between videos): the PiP button follows
     [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:YES block:^(NSTimer *t) {   // video bookkeeping: only where there is video to keep track of
@@ -14003,7 +14622,7 @@ static void RunBuildScript(NSString *stamp) {
             }
         } }];
     [VBlocker.shared prepare:nil];
-    [self.win startControl];
+    if (!gProfileApp) [self.win startControl];
     [FExtHost.shared start];
     if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start];
     IrisCrashStarted();   // the CPU rule: background pages share a quarter of the processor on battery, 40% plugged in; what you watch is never paced
@@ -14365,12 +14984,39 @@ static int IrisCompileRulesHelper(const char *ident, const char *path) {
     }
 }
 
+// Iris Dev's first start: it begins with a copy of your bookmarks, filter lists, extensions and settings
+// (never your tabs, history or sign-ins), then lives its own life.
+static void DevFirstLaunch(void) {
+    // Iris Dev shares nothing personal: no bookmarks, extensions, passwords, profiles, tabs, history or sign-ins.
+    // It starts from your look-and-feel settings and the public filter lists only.
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *as = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *mine = [as stringByAppendingPathComponent:@"Iris Dev"], *yours = [as stringByAppendingPathComponent:@"Iris"];
+    if ([fm fileExistsAtPath:[mine stringByAppendingPathComponent:@".seeded3"]]) return;   // 3: also undo the bookmarks an earlier Iris Dev brought in from Helium
+    [fm createDirectoryAtPath:mine withIntermediateDirectories:YES attributes:nil error:nil];
+    for (NSString *f in @[@"bookmarks.json", @"Extensions", @"Extension Storage", @"icons", @"webapps.json", @"WebApps"])   // an earlier Iris Dev copied some of these: gone
+        [fm removeItemAtPath:[mine stringByAppendingPathComponent:f] error:nil];
+    for (NSString *f in [fm contentsOfDirectoryAtPath:mine error:nil]) if ([f hasPrefix:@"history"]) [fm removeItemAtPath:[mine stringByAppendingPathComponent:f] error:nil];
+    NSString *lists = [yours stringByAppendingPathComponent:@"lists"];
+    if ([fm fileExistsAtPath:lists] && ![fm fileExistsAtPath:[mine stringByAppendingPathComponent:@"lists"]]) [fm copyItemAtPath:lists toPath:[mine stringByAppendingPathComponent:@"lists"] error:nil];
+    NSDictionary *main = [NSUserDefaults.standardUserDefaults persistentDomainForName:@"com.y.iris"];
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionary];
+    for (NSString *k in @[kTheme, kAccent, kDensity, kAddrWidth, kToolbarLayout, kShelfSide, kBlock, kStrip, kCookieReject, kGPC, kCodec, kThrottleOn, kBgThrottle])
+        if (main[k]) prefs[k] = main[k];
+    [NSUserDefaults.standardUserDefaults setPersistentDomain:prefs forName:@"com.y.iris.dev"];
+    [@"[]" writeToFile:[mine stringByAppendingPathComponent:@"bookmarks.json"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"" writeToFile:[mine stringByAppendingPathComponent:@".seeded3"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 int main(int argc, const char *argv[]) {
     if (argc >= 4 && !strcmp(argv[1], "--compile-rules")) return IrisCompileRulesHelper(argv[2], argv[3]);
     @autoreleasepool {
         NSDictionary *wa = NSBundle.mainBundle.infoDictionary[@"IrisWebApp"];   // started as an installed app?
-        if ([wa isKindOfClass:NSDictionary.class] && [wa[@"start"] isKindOfClass:NSString.class]) gWebApp = wa;
-        if (!gWebApp) MigrateFromFlint();
+        if ([wa isKindOfClass:NSDictionary.class] && [wa[@"start"] isKindOfClass:NSString.class]) { gWebApp = wa; gWebAppTag = [NSString stringWithFormat:@"[%@] ", wa[@"name"] ?: @"app"]; }
+        NSDictionary *pa = NSBundle.mainBundle.infoDictionary[@"IrisProfile"];   // started as a profile's own app?
+        if (!gWebApp && [pa isKindOfClass:NSDictionary.class] && [pa[@"id"] isKindOfClass:NSString.class] && [pa[@"id"] length]) { gProfileApp = pa; gWebAppTag = [NSString stringWithFormat:@"[%@] ", pa[@"name"] ?: @"profile"]; }
+        if (!gWebApp && !gProfileApp && !IrisIsDev()) MigrateFromFlint();
+        ProfileAppFirstLaunch();
+        if (IrisIsDev()) DevFirstLaunch();
         NSApplication *app = NSApplication.sharedApplication;
         app.activationPolicy = NSApplicationActivationPolicyRegular;
         IrisCrashInstall();   // Iris's own crash reports; Apple's crash reporter never sees a crash
@@ -14477,12 +15123,9 @@ static NSArray *SettingsSchema(VWindow *win) {
     accentRow[@"options"] = accents; accentRow[@"value"] = @([Defaults() integerForKey:kAccent]);
     gSSet[@"accent"] = ^(id v) { [Defaults() setInteger:[v integerValue] forKey:kAccent]; IrisApplyTheme(); };
     NSMutableArray *tb = [NSMutableArray array];
-    [tb addObject:SButton(@"tbCustomise", @"Arrange the toolbar", @"Drag items between the left, the address bar and the right.", @"Customise…", ^(NSDictionary *a, void (^done)(NSString *)) { [win showToolbarCustomiser:nil]; done(nil); })];
-    for (NSArray *b in @[@[@"back", @"Back"], @[@"forward", @"Forward"], @[@"home", @"Home"], @[@"newtab", @"New tab"], @[@"reload", @"Reload"], @[@"star", @"Bookmark star"],
-                          @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"shield", @"Ad blocking shield"], @[@"dlalways", @"Downloads, always"]]) {
-        NSString *k = b[0];
-        [tb addObject:SSwitch([@"tb." stringByAppendingString:k], b[1], nil, ToolbarShows(k), ^(id v) { SetToolbarShows(k, [v boolValue]); RelayoutAll(); })];
-    }
+    // which buttons, and where, is Customise Toolbar's job: here just the way in, and the one standing choice
+    [tb addObject:SButton(@"tbCustomise", @"Arrange the toolbar", @"Drag any of its items between the left, the address bar and the right, or take them off. Right-click the bar for the same.", @"Customise…", ^(NSDictionary *a, void (^done)(NSString *)) { [win showToolbarCustomiser:nil]; done(nil); })];
+    [tb addObject:SSwitch(@"tb.dlalways", @"Always show Downloads", @"Otherwise its button appears only while something is downloading or just finished.", ToolbarShows(@"dlalways"), ^(id v) { SetToolbarShows(@"dlalways", [v boolValue]); RelayoutAll(); })];
     NSArray *fonts = @[@0, @9, @10, @11, @12, @14, @16];
     NSUInteger mi = [fonts indexOfObject:@([Defaults() integerForKey:kMinFont])]; if (mi == NSNotFound) mi = 0;
     [S addObject:SSection(@"appearance", @"Appearance", @"Make Iris look the way you want. Changes apply instantly.", @"brush", @[
@@ -14491,9 +15134,9 @@ static NSArray *SettingsSchema(VWindow *win) {
                     ^(NSInteger i) { [Defaults() setInteger:i forKey:kTheme]; IrisApplyTheme(); }),
             accentRow ]),
         SGroup(@"Tabs", @[
-            SKey(kShelfNoHover, @"Show tabs when the pointer reaches the bottom edge", @"⌘S brings them up at any time. Bookmarks open from the address.", YES, ^{ RelayoutAll(); }),
-            SKey(kShelfNoHint, @"Show the handle at the bottom of the page", @"A small bar that hints where the tabs are; hover or click it.", YES, ^{ RelayoutAll(); }) ]),
-        SGroup(@"Top bar", [@[ SSelect(@"addrWidth", @"Address width", @"How wide the address capsule grows. Right-click the top bar to change these right where they are.", @[@"Wide", @"Medium", @"Compact"], [Defaults() integerForKey:kAddrWidth],
+            SKey(kShelfNoHover, @"Show tabs when the pointer reaches their edge", @"⌘S brings them out at any time. Choose the edge in General › Tabs.", YES, ^{ RelayoutAll(); }),
+            SKey(kShelfNoHint, @"Show the tab map", @"A dot for each tab along the edge, the one you're on longer; hover or click it.", YES, ^{ RelayoutAll(); }) ]),
+        SGroup(@"Top bar", [@[ SSelect(@"addrWidth", @"Address width", @"How wide the address capsule grows.", @[@"Full", @"Medium", @"Compact"], [Defaults() integerForKey:kAddrWidth],
                                       ^(NSInteger i) { [Defaults() setInteger:i forKey:kAddrWidth]; RelayoutAll(); }) ] arrayByAddingObjectsFromArray:tb]),
         SGroup(@"New tab page", @[ SKey(kHomeTopSites, @"Show your most visited sites", nil, NO, ^{ RelayoutAll(); }) ]),
         SGroup(@"Text", @[ SSelect(@"minFont", @"Minimum font size", @"Tiny text on pages is enlarged to at least this size. Applies to pages you open next.", @[@"None", @"9 pt", @"10 pt", @"11 pt", @"12 pt", @"14 pt", @"16 pt"], (NSInteger)mi,
@@ -14667,26 +15310,36 @@ static NSArray *SettingsSchema(VWindow *win) {
                     ^(NSInteger i) { [Defaults() setInteger:[limits[(NSUInteger)i] integerValue] forKey:kDLLimit]; }) ])
     ])];
 
-    // ── Profiles
+    // ── Profiles: each one a different person, in an app of its own
     NSMutableArray *profRows = [NSMutableArray array];
+    if (gProfileApp || IrisIsDev()) {   // a profile's app (or Iris Dev): itself, and a way to the others
+        for (NSDictionary *p in Profiles()) {
+            NSString *pid = p[@"id"];
+            NSString *rid = [@"prof." stringByAppendingString:pid.length ? [pid stringByReplacingOccurrencesOfString:@"@" withString:@""] : @"me"];
+            NSString *detail = !pid.length ? (IrisIsDev() ? @"Iris Dev: a testing copy that shares nothing with you" : @"This app") : [pid isEqualToString:@"@main"] ? @"Iris itself" : @"Its own app";
+            NSMutableDictionary *row = pid.length ? SButton(rid, p[@"name"], detail, @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { OpenProfileWindow(pid); done(nil); })
+                                                  : SRow(@"value", @"", p[@"name"], detail);
+            row[@"icon"] = PNGDataURL(ProfileAvatar(pid, p[@"name"], 40), 40);
+            [profRows addObject:row];
+        }
+        [S addObject:SSection(@"profiles", @"Profiles", IrisIsDev() ? @"Iris Dev is a profile of its own." : @"Each profile is a different person, in its own app with its own extensions, passwords, bookmarks, downloads, history and sign-ins. Add, rename, recolour or delete profiles in Iris.", @"person", @[
+            SGroup(@"Profiles", profRows) ])];
+    } else {
     for (NSDictionary *p in Profiles()) {
         NSString *pid = p[@"id"];
-        NSUInteger open = 0; for (VWindow *w in gWindows) if (!w.isPrivate && [w.profile isEqualToString:pid]) open++;
-        NSString *detail = [NSString stringWithFormat:@"%@%@", pid.length ? @"Its own sign-ins, cookies, history and tabs" : @"The first profile",
-                            open ? [NSString stringWithFormat:@" · %lu window%@ open", (unsigned long)open, open == 1 ? @"" : @"s"] : @""];
+        NSString *detail = !pid.length ? @"This app: Iris" : ProfileAppRunning(pid) ? [NSString stringWithFormat:@"Open, as Iris %@", p[@"name"]]
+                         : ProfileAppFind(pid) ? [NSString stringWithFormat:@"Its own app, Iris %@", p[@"name"]] : @"Its own app, made when you first open it";
         NSMutableDictionary *row = SButton([@"prof." stringByAppendingString:pid.length ? pid : @"main"], p[@"name"], detail, @"Rename…", ^(NSDictionary *a, void (^done)(NSString *)) {
             if ([a[@"remove"] boolValue] && pid.length) {
-                BOOL others = NO; for (VWindow *w in gWindows) if (w.isPrivate || ![w.profile isEqualToString:pid]) others = YES;
-                if (!others) OpenProfileWindow(@"");   // never close Iris's last window
-                for (VWindow *w in gWindows.copy) if (!w.isPrivate && [w.profile isEqualToString:pid]) [w.window performClose:nil];
-                NSMutableArray *all = [[Defaults() arrayForKey:kProfiles] ?: @[] mutableCopy];
+                NSMutableArray *all = [ProfilesStored() mutableCopy];
                 [all filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *x, NSDictionary *b) { return ![x[@"id"] isEqualToString:pid]; }]];
-                [Defaults() setObject:all forKey:kProfiles];
+                ProfilesStore(all);
+                ProfileAppUninstall(pid);   // its app, and everything that person had in it
                 [NSFileManager.defaultManager removeItemAtPath:SupportFile([NSString stringWithFormat:@"history-%@.json", pid]) error:nil];
                 [gProfileStores removeObjectForKey:pid];
-                if (@available(macOS 14.0, *)) {   // its website data goes too (once its pages have closed)
+                if (@available(macOS 14.0, *)) {   // the website data it had before profiles became apps
                     NSUUID *u = [[NSUUID alloc] initWithUUIDString:pid];
-                    if (u) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [WKWebsiteDataStore removeDataStoreForIdentifier:u completionHandler:^(NSError *e) { if (e) DLog(@"profile data not removed: %@", e.localizedDescription); }]; });
+                    if (u) [WKWebsiteDataStore removeDataStoreForIdentifier:u completionHandler:^(NSError *e) { if (e) DLog(@"profile data not removed: %@", e.localizedDescription); }];
                 }
                 RelayoutAll(); done(@"Profile deleted"); return;
             }
@@ -14694,20 +15347,22 @@ static NSArray *SettingsSchema(VWindow *win) {
             if (!pid.length) [Defaults() setObject:n forKey:kMainProfileName];
             else {
                 NSMutableArray *all = [NSMutableArray array];
-                for (NSDictionary *x in [Defaults() arrayForKey:kProfiles] ?: @[]) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[@"name"] = n; [all addObject:m]; }
-                [Defaults() setObject:all forKey:kProfiles];
+                for (NSDictionary *x in ProfilesStored()) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[@"name"] = n; [all addObject:m]; }
+                ProfilesStore(all);
+                if (ProfileAppFind(pid)) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ProfileAppEnsure(pid); });   // renamed now, or when it next closes
             }
-            for (VWindow *w in gWindows) if (!w.isPrivate && [w.profile isEqualToString:pid]) w.window.title = pid.length ? [@"Iris · " stringByAppendingString:n] : @"Iris";
             RelayoutAll(); done(@"Profile renamed");
         });
-        row[@"prompt"] = @{@"title": @"Profile", @"text": pid.length ? @"Deleting a profile closes its windows and erases its sign-ins, cookies and history." : @"The first profile can be renamed but not deleted.",
+        row[@"prompt"] = @{@"title": @"Profile", @"text": pid.length ? @"Deleting a profile removes its app and everything in it: its extensions, passwords, bookmarks, downloads list, history, sign-ins and tabs." : @"The first profile is Iris itself: it can be renamed but not deleted.",
                            @"ok": @"Save", @"remove": pid.length ? @"Delete Profile" : @"", @"fields": @[@{@"name": @"name", @"placeholder": @"Name", @"value": p[@"name"]}]};
         row[@"icon"] = PNGDataURL(ProfileAvatar(pid, p[@"name"], 40), 40);
-        NSString *openId = [@"profopen." stringByAppendingString:pid.length ? pid : @"main"];
-        gSAct[openId] = ^(NSDictionary *a, void (^done)(NSString *)) { OpenProfileWindow(pid); done(nil); };
-        row[@"more"] = @[@{@"id": openId, @"label": @"Open"}];
+        if (pid.length) {
+            NSString *openId = [@"profopen." stringByAppendingString:pid];
+            gSAct[openId] = ^(NSDictionary *a, void (^done)(NSString *)) { OpenProfileWindow(pid); done(nil); };
+            row[@"more"] = @[@{@"id": openId, @"label": @"Open"}];
+        }
         [profRows addObject:row];
-        // its colour: the avatar, the badge's outline and the window's tint
+        // its colour: the avatar, the app's icon badge and the window's tint
         NSMutableArray *opts = [NSMutableArray array];
         for (NSArray *c in ProfileColors()) { NSColor *x = [Hex((uint32_t)[c[1] unsignedIntValue]) colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
             [opts addObject:@{@"label": c[0], @"color": [NSString stringWithFormat:@"#%02x%02x%02x", (int)lround(x.redComponent * 255), (int)lround(x.greenComponent * 255), (int)lround(x.blueComponent * 255)]}]; }
@@ -14719,20 +15374,22 @@ static NSArray *SettingsSchema(VWindow *win) {
             if (!pid.length) [Defaults() setInteger:ci forKey:kMainProfileColor];
             else {
                 NSMutableArray *all = [NSMutableArray array];
-                for (NSDictionary *x in [Defaults() arrayForKey:kProfiles] ?: @[]) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[@"color"] = @(ci); [all addObject:m]; }
-                [Defaults() setObject:all forKey:kProfiles];
+                for (NSDictionary *x in ProfilesStored()) { NSMutableDictionary *m = [x mutableCopy]; if ([x[@"id"] isEqualToString:pid]) m[@"color"] = @(ci); [all addObject:m]; }
+                ProfilesStore(all);
+                if (ProfileAppFind(pid)) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ProfileAppEnsure(pid); });
             }
             RelayoutAll();
         };
         [profRows addObject:sw];
     }
-    NSMutableDictionary *newProf = SButton(@"profNew", @"New profile", @"For work, study or anything you keep apart. Bookmarks and extensions are shared.", @"Add…", ^(NSDictionary *a, void (^done)(NSString *)) {
+    NSMutableDictionary *newProf = SButton(@"profNew", @"New profile", @"For another person, or a part of your life you keep apart. Nothing is shared with it.", @"Add…", ^(NSDictionary *a, void (^done)(NSString *)) {
         NSString *n = Trim([a[@"name"] description] ?: @"");
         OpenProfileWindow(CreateProfile(n)); RelayoutAll(); done(@"Profile created");
     });
-    newProf[@"prompt"] = @{@"title": @"New profile", @"text": @"A profile keeps its own sign-ins, cookies, history and tabs.", @"ok": @"Create", @"fields": @[@{@"name": @"name", @"placeholder": @"Name, e.g. Work"}]};
-    [S addObject:SSection(@"profiles", @"Profiles", @"Separate sign-ins, cookies, history and tabs, one window per profile. Switch from the badge beside the address bar.", @"person", @[
+    newProf[@"prompt"] = @{@"title": @"New profile", @"text": @"It opens as its own app, with its own extensions, passwords, bookmarks, downloads, history and sign-ins.", @"ok": @"Create", @"fields": @[@{@"name": @"name", @"placeholder": @"Name, e.g. Work"}]};
+    [S addObject:SSection(@"profiles", @"Profiles", @"Each profile is a different person: its own app in Applications › Iris Profiles, with its own extensions, passwords, bookmarks, downloads, history and sign-ins. Nothing passes between them.", @"person", @[
         SGroup(@"Your profiles", profRows), SGroup(nil, @[ newProf ]) ])];
+    }
 
     // ── Bookmarks & Import
     NSMutableDictionary *helium = SButton(@"reimport", @"Helium", @"Replaces Iris's bookmarks with Helium's, including folders and icons.", @"Import…", ^(NSDictionary *a, void (^done)(NSString *)) {
