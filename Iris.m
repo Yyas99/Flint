@@ -41,6 +41,8 @@ static void IrisRelaunch(void) {
 
 static NSString *const kSearch        = @"searchEngine";     // index into Engines()
 static NSString *const kStartup       = @"startup";          // 0 restore tabs, 1 new tab
+static NSString *const kPrivLock      = @"privateLock";      // private windows lock: 0 never, 1 when the Mac locks, 2/3/4 also after 1/5/15 min away
+static NSString *const kPrivHide      = @"privateHideCapture"; // private windows left out of screenshots and screen sharing
 static NSString *const kBlock         = @"blockAds";
 static NSString *const kStrip         = @"stripTracking";
 static NSString *const kCookieReject  = @"rejectCookieBanners";
@@ -89,6 +91,18 @@ static NSString *const kHomeTopSites  = @"homeTopSites";
 static NSString *const kSuggestNet    = @"searchSuggestions";
 
 static NSUserDefaults *Defaults(void) { return NSUserDefaults.standardUserDefaults; }
+// What a private window decides about a site (zoom, camera and location answers, JavaScript, blocking, hidden
+// elements) is kept in memory, never in your settings, and goes when the last private window closes. Until then
+// private windows read their own decisions over yours; your own windows never see them.
+static NSMutableDictionary *gPrivSite;
+static id SiteVal(BOOL priv, NSString *k) { id v = priv ? gPrivSite[k] : nil; return v ?: [Defaults() objectForKey:k]; }
+static NSDictionary *SiteDict(BOOL priv, NSString *k) { id v = SiteVal(priv, k); return [v isKindOfClass:NSDictionary.class] ? v : nil; }
+static NSArray *SiteArray(BOOL priv, NSString *k) { id v = SiteVal(priv, k); return [v isKindOfClass:NSArray.class] ? v : nil; }
+static void SiteSet(BOOL priv, NSString *k, id v) {
+    if (!priv) { [Defaults() setObject:v forKey:k]; return; }
+    if (!gPrivSite) gPrivSite = [NSMutableDictionary dictionary];
+    gPrivSite[k] = v ?: @[];
+}
 
 // Toolbar customisation. Core buttons are on unless hidden; extras (home, reader…) are off unless added.
 static NSString *const kShowExtra     = @"shownToolbarButtons";
@@ -746,6 +760,7 @@ static NSURL *StripTracking(NSURL *u) {
 @end
 
 static VWindow *gWin;                       // the browser window you're using (the last one that was key)
+static void PrivateWindowOpened(VWindow *w); static void PrivateWindowClosed(VWindow *w); static BOOL PrivateWindowLocked(VWindow *w);   // v5i_private
 static void ProfileAppOpen(NSString *pid, NSArray<NSURL *> *urls);   // a profile's own app (v5h_profiles)
 
 // Profiles: every profile has its own website data (cookies, sign-ins, site storage), history and open tabs.
@@ -3987,6 +4002,13 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
     [vContentBg setFill]; NSRectFill(NSIntersectionRect(dirty, self.bounds));
     BOOL priv = WinFor(self).isPrivate;
     CGFloat W = NSWidth(self.bounds), top = self.top;
+    if (priv) {   // a private window's own light: one low, cool violet, quieter than Iris's three colours
+        NSPoint p = NSMakePoint(W / 2, top + 20);
+        NSColor *c = ThemeIsLight() ? Hex(0x6b5bd6) : Hex(0x7a68e8);
+        CGFloat a = ThemeIsLight() ? 0.06 : 0.12;
+        NSGradient *rg = [[NSGradient alloc] initWithColors:@[[c colorWithAlphaComponent:a], [c colorWithAlphaComponent:a * 0.4], [c colorWithAlphaComponent:0]]];
+        [rg drawFromCenter:p radius:0 toCenter:p radius:MIN(380, W * 0.45) options:0];
+    }
     if (!priv) {   // Iris's own light behind the day: teal, blue and violet, very soft, as on the About page
         CGFloat a = ThemeIsLight() ? 0.075 : 0.11;
         NSArray *glows = @[@[ApTeal(), @(-190), @(40)], @[ApBlue(), @(10), @(-10)], @[ApViolet(), @(200), @(50)]];
@@ -4032,11 +4054,28 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
     }
     NSImage *mg = Tinted(Symbol(@"magnifyingglass", 13, NSFontWeightMedium), vFaint);
     DrawImage(mg, CenterIn(mg.size, NSMakeRect(NSMinX(self.strike) + 14, NSMinY(self.strike), 20, 44)));
-    if (priv) {
-        NSMutableParagraphStyle *cp = [NSMutableParagraphStyle new]; cp.alignment = NSTextAlignmentCenter; cp.lineSpacing = 3;
-        [@"Nothing from this window is kept: no history, and cookies and site data disappear when you close it. Extensions don't run here."
-            drawInRect:NSMakeRect(round((W - 400) / 2), NSMaxY(self.strike) + 36, 400, 60)
-            withAttributes:@{NSFontAttributeName: UIFont(12.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: cp}];
+    if (priv) {   // what a private window does for you, in four lines
+        NSInteger lock = [Defaults() integerForKey:kPrivLock];
+        NSString *lockText = lock == 0 ? @"Locking is off: turn it on in Settings › Privacy & Security." : lock == 1 ? @"Locks when your Mac locks or sleeps; Touch ID or your password opens it."
+                           : [NSString stringWithFormat:@"Locks when your Mac locks, or after %@ away from Iris; Touch ID or your password opens it.", lock == 2 ? @"a minute" : lock == 3 ? @"5 minutes" : @"15 minutes"];
+        NSArray *rows = @[@[@"trash", @"Nothing is kept", @"History, cookies, site data and what you decide on sites are gone when the last private window closes."],
+                          @[@"shield.lefthalf.filled", @"Trackers stopped, links cleaned", @"Known trackers never load, tracking tags come off links, and pages are upgraded to HTTPS."],
+                          @[@"lock", @"Locked while you're away", lockText],
+                          @[@"puzzlepiece.extension", @"No extensions, its own sign-ins", @"Extensions can't see this window, and each private window is signed in separately."]];
+        CGFloat cw = MIN(500, W - 60), cx = round((W - cw) / 2), cy = NSMaxY(self.strike) + 30, rh = 58;
+        NSRect card = NSMakeRect(cx, cy, cw, rows.count * rh + 12);
+        RoundRect(card, 14, [vPill colorWithAlphaComponent:0.55]); ShardStroke(card, 14, vSep, 1);
+        NSMutableParagraphStyle *wrap = [NSMutableParagraphStyle new]; wrap.lineBreakMode = NSLineBreakByWordWrapping; wrap.lineSpacing = 1.5;
+        for (NSUInteger i = 0; i < rows.count; i++) {
+            CGFloat y = cy + 6 + i * rh;
+            NSRect well = NSMakeRect(cx + 14, y + 12, 30, 30);
+            RoundRect(well, 9, [vText colorWithAlphaComponent:0.06]);
+            NSImage *ic = Tinted(Symbol(rows[i][0], 13, NSFontWeightMedium), vDim);
+            DrawImage(ic, CenterIn(ic.size, well));
+            [rows[i][1] drawAtPoint:NSMakePoint(cx + 56, y + 10) withAttributes:@{NSFontAttributeName: UIFont(12.5, NSFontWeightSemibold), NSForegroundColorAttributeName: vText}];
+            [rows[i][2] drawInRect:NSMakeRect(cx + 56, y + 27, cw - 56 - 16, 30) withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: wrap}];
+            if (i + 1 < rows.count) { [vSep setFill]; NSRectFill(NSMakeRect(cx + 56, y + rh + 2, cw - 56 - 14, 1)); }
+        }
         return;
     }
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentCenter; ps.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -4732,7 +4771,7 @@ static void MarkQuarantined(NSString *path, NSString *from) {
         WKWebView *v = x.view ?: gWin.current.web.web;
         NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:x.url]];
         if (x.referer.length) [r setValue:x.referer forHTTPHeaderField:@"Referer"];
-        DLog(@"downloads: %@ handed to WebKit (%@)", HostOf([NSURL URLWithString:x.url]), why);
+        DLog(@"downloads: %@ handed to WebKit (%@)", x.isPrivate ? @"a private download" : HostOf([NSURL URLWithString:x.url]), why);
         if (v) [v startDownloadUsingRequest:r completionHandler:^(WKDownload *d) { d.delegate = (id<WKDownloadDelegate>)v.navigationDelegate; }];
         [VDownloads.shared changed];
     });
@@ -4812,6 +4851,7 @@ static void MarkQuarantined(NSString *path, NSString *from) {
 
 static WKUserContentController *gUCC;
 static WKUserContentController *gPrivUCC;   // private windows: Iris's helpers only, no extensions
+static void IrisYouTubeInstall(WKUserContentController *ucc); static void IrisYouTubeChanged(void); static BOOL SiteAllowlisted(NSString *host, BOOL priv);
 static void IrisApplyRules(void);
 static NSString *const kHideElements = @"hideElements";   // element hiding on (default) or network blocking only
 static WKProcessPool *gPool;
@@ -4998,6 +5038,7 @@ static WKWebViewConfiguration *IrisConfig(void) {
         [gUCC addScriptMessageHandler:[VInstallRelay new] contentWorld:mine name:@"irisInstall"];
         IrisCosmeticInstall(gUCC);
         IrisCodecInstall(gUCC);
+        IrisYouTubeInstall(gUCC);
         // Global Privacy Control: tells sites you don't consent to your data being sold or shared
         if ([Defaults() boolForKey:kGPC])
             [gUCC addUserScript:[[WKUserScript alloc] initWithSource:@"try{Object.defineProperty(Navigator.prototype,'globalPrivacyControl',{get:()=>true,configurable:true})}catch(e){}"
@@ -5042,6 +5083,7 @@ static WKWebViewConfiguration *PrivateConfig(WKWebsiteDataStore *store) {
                                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
         IrisCosmeticInstall(gPrivUCC);
         IrisCodecInstall(gPrivUCC);
+        IrisYouTubeInstall(gPrivUCC);
         IrisApplyRules();
     }
     c.userContentController = gPrivUCC;
@@ -5086,16 +5128,32 @@ static void IrisApplyRules(void) {
     }
 }
 
-static void IrisSetBlocking(BOOL on) { gBlockOn = on; IrisApplyRules(); }
+// YouTube's ads come from youtube.com itself, so no list can stop them by address. Like uBlock Origin, Iris edits the
+// player's instructions on the way in (the ad schedule is removed before the player reads it), hides the ad slots in
+// the feeds, and if one still starts: mutes it, jumps to its end and presses Skip. Runs only on YouTube.
+static NSString *YouTubeAdScript(void) { return @"(() => {\n  if (!/(^|\\.)youtube(-nocookie)?\\.com$/.test(location.hostname) || window.__irisYTDefuse) return;\n  window.__irisYTDefuse = true;\n  const on = () => window.__irisYT !== false;\n  const KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams'];\n  const prune = o => {\n    try {\n      if (!o || typeof o !== 'object') return o;\n      for (const k of KEYS) if (k in o) delete o[k];\n      if (o.playerResponse && typeof o.playerResponse === 'object') prune(o.playerResponse);\n    } catch (e) {}\n    return o;\n  };\n  const hasAds = o => !!o && typeof o === 'object' && (KEYS.some(k => k in o) || (o.playerResponse && typeof o.playerResponse === 'object' && KEYS.some(k => k in o.playerResponse)));\n  // the player's instructions arrive three ways: parsed from text, as the page's first state, and fetched later\n  const parse = JSON.parse;\n  JSON.parse = new Proxy(parse, { apply(t, self, args) { const r = Reflect.apply(t, self, args); return on() && hasAds(r) ? prune(r) : r; } });\n  for (const name of ['ytInitialPlayerResponse', 'playerResponse']) {\n    let held;\n    try { Object.defineProperty(window, name, { configurable: true, get() { return held; }, set(v) { held = on() ? prune(v) : v; } }); } catch (e) {}\n  }\n  const fetch0 = window.fetch;\n  window.fetch = new Proxy(fetch0, { apply(t, self, args) {\n    const p = Reflect.apply(t, self, args);\n    let url = ''; try { url = String(args[0] && args[0].url || args[0]); } catch (e) {}\n    if (!on() || !/\\/youtubei\\/v1\\/(player|get_watch)/.test(url)) return p;\n    return p.then(res => res.clone().text().then(text => {\n      let j; try { j = parse(text); } catch (e) { return res; }\n      if (!hasAds(j)) return res;\n      prune(j);\n      return new Response(JSON.stringify(j), { status: res.status, statusText: res.statusText, headers: res.headers });\n    }).catch(() => res));\n  } });\n  // what still gets through: muted, skipped to its end, and the skip button pressed\n  const css = 'ytd-ad-slot-renderer,ytd-in-feed-ad-layout-renderer,ytd-promoted-sparkles-web-renderer,ytd-promoted-video-renderer,ytd-compact-promoted-video-renderer,' +\n    'ytd-display-ad-renderer,ytd-action-companion-ad-renderer,ytd-companion-slot-renderer,ytd-banner-promo-renderer,ytd-statement-banner-renderer,ytd-search-pyv-renderer,' +\n    'ytd-player-legacy-desktop-watch-ads-renderer,ytd-merch-shelf-renderer,#player-ads,#masthead-ad,.ytp-ad-overlay-container,.ytp-ad-message-container,' +\n    'ytd-rich-item-renderer:has(ytd-ad-slot-renderer),ytd-rich-section-renderer:has(ytd-statement-banner-renderer),ytd-reel-video-renderer:has(.ytd-ad-slot-renderer),' +\n    'ytm-promoted-sparkles-web-renderer,ytm-companion-ad-renderer,ad-slot-renderer{display:none!important}';\n  const addStyle = () => { if (!on()) return; const s = document.createElement('style'); s.textContent = css; (document.head || document.documentElement).appendChild(s); };\n  document.documentElement ? addStyle() : document.addEventListener('DOMContentLoaded', addStyle, { once: true });\n  let mutedByUs = false;\n  setInterval(() => {\n    if (!on()) return;\n    const player = document.querySelector('.html5-video-player');\n    const v = player && player.querySelector('video');\n    if (player && player.classList.contains('ad-showing') && v) {\n      if (!v.muted) { v.muted = true; mutedByUs = true; }\n      if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration - 0.05;\n      const skip = player.querySelector('.ytp-skip-ad-button,.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-ad-skip-button-container button');\n      if (skip) skip.click();\n    } else if (v && mutedByUs) { v.muted = false; mutedByUs = false; }\n    // \"ad blockers aren't allowed\": the wall goes and the video carries on\n    const wall = document.querySelector('ytd-enforcement-message-view-model');\n    if (wall) {\n      const d = wall.closest('tp-yt-paper-dialog'); if (d) d.remove();\n      document.querySelectorAll('tp-yt-iron-overlay-backdrop').forEach(b => b.remove());\n      if (v && v.paused) v.play().catch(() => {});\n    }\n  }, 250);\n})();\n"; }
+static NSString *YouTubeAdConfigJS(void) { return [NSString stringWithFormat:@"window.__irisYT=%@;", [Defaults() boolForKey:kBlock] && !SiteAllowlisted(@"www.youtube.com", NO) ? @"true" : @"false"]; }
+static void IrisYouTubeInstall(WKUserContentController *ucc) {
+    [ucc addUserScript:[[WKUserScript alloc] initWithSource:YouTubeAdScript() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
+    [ucc addUserScript:[[WKUserScript alloc] initWithSource:YouTubeAdConfigJS() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
+}
+// Blocking switched on or off (everywhere, or for YouTube): pages pick it up when they next load.
+static void IrisYouTubeChanged(void) {
+    for (WKUserContentController *u in @[gUCC ?: (id)NSNull.null, gPrivUCC ?: (id)NSNull.null]) {
+        if (![u isKindOfClass:WKUserContentController.class]) continue;
+        [u addUserScript:[[WKUserScript alloc] initWithSource:YouTubeAdConfigJS() injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
+    }
+}
+static void IrisSetBlocking(BOOL on) { gBlockOn = on; IrisApplyRules(); IrisYouTubeChanged(); }
 
 static BOOL BlockerSiteSwitch(void) {   // WebKit can switch content blockers off for one page
     static int has = -1;
     if (has < 0) has = [WKWebpagePreferences instancesRespondToSelector:NSSelectorFromString(@"_setContentBlockersEnabled:")] ? 1 : 0;
     return has == 1;
 }
-static BOOL SiteAllowlisted(NSString *host) {
+static BOOL SiteAllowlisted(NSString *host, BOOL priv) {
     host = host.lowercaseString; if (!host.length) return NO;
-    for (NSString *a in [Defaults() arrayForKey:kAllowlist] ?: @[]) {
+    for (NSString *a in SiteArray(priv, kAllowlist) ?: @[]) {
         if (![a isKindOfClass:NSString.class] || !a.length) continue;
         NSString *e = [a.lowercaseString hasPrefix:@"www."] ? [a.lowercaseString substringFromIndex:4] : a.lowercaseString;
         if ([host isEqualToString:e] || [host hasSuffix:[@"." stringByAppendingString:e]]) return YES;
@@ -5633,6 +5691,21 @@ static NSString *MenuURLLabel(NSString *u) {
 @end
 
 #define PW (self.tab.owner ?: gWin)
+// Safari's own private-browsing protections inside WebKit, where this WebKit has them: its baseline protections against
+// tracking and fingerprinting, and HTTPS first (an http address is tried over HTTPS, and only falls back if the site can't).
+static void PrivateProtect(WKWebpagePreferences *prefs) {
+    static int said;
+    const NSUInteger bits = (1 << 0) | (1 << 1);   // baseline protections, HTTPS first
+    for (NSString *name in @[@"_setAdvancedPrivacyProtections:", @"_setNetworkConnectionIntegrityPolicy:"]) {
+        SEL s = NSSelectorFromString(name);
+        if (![prefs respondsToSelector:s]) continue;
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(prefs, s, bits);
+        if (!said) { said = 1; DLog(@"private: WebKit protections on (%@)", name); }
+        return;
+    }
+    if (!said) { said = 2; DLog(@"private: this WebKit has no protection switches; Iris's own only"); }
+}
+
 @implementation VPage {
     FWebView *_web;
     BOOL _observing, _audioKVO, _watchingLoad;
@@ -5784,10 +5857,11 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     // JavaScript: on everywhere unless you turned it off globally or for this site
     if (a.targetFrame.isMainFrame) {
         NSString *h = HostOf(u);
-        prefs.allowsContentJavaScript = [Defaults() boolForKey:kScripts] && !(h.length && [[Defaults() arrayForKey:kJSOff] containsObject:h]);
+        prefs.allowsContentJavaScript = [Defaults() boolForKey:kScripts] && !(h.length && [SiteArray(self.tab.owner.isPrivate, kJSOff) containsObject:h]);
         // Blocking turned off for this site: WebKit skips the content blockers for this page (Safari's own per-site switch),
         // so changing it never recompiles the lists.
-        if (BlockerSiteSwitch()) ((void (*)(id, SEL, BOOL))objc_msgSend)(prefs, NSSelectorFromString(@"_setContentBlockersEnabled:"), !SiteAllowlisted(u.host));
+        if (BlockerSiteSwitch()) ((void (*)(id, SEL, BOOL))objc_msgSend)(prefs, NSSelectorFromString(@"_setContentBlockersEnabled:"), !SiteAllowlisted(u.host, self.tab.owner.isPrivate));
+        if (self.tab.owner.isPrivate) PrivateProtect(prefs);
         // The tab coming back at launch: WebKit itself refuses playback (Safari's "Never Auto-Play") for this one
         // page until you click or press a key in it, so nothing can start before Iris's own hold arrives.
         if (self.tab.launchRestored && [u.scheme hasPrefix:@"http"]) {
@@ -5849,7 +5923,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
         done(WKNavigationActionPolicyCancel); return;
     }
     // tracking tags (utm_, fbclid…) come off before the page loads
-    if (main && [a.request.HTTPMethod isEqualToString:@"GET"] && [Defaults() boolForKey:kStrip]) {
+    if (main && [a.request.HTTPMethod isEqualToString:@"GET"] && ([Defaults() boolForKey:kStrip] || self.tab.owner.isPrivate)) {   // always in a private window
         NSURL *clean = StripTracking(u);
         if (clean) { done(WKNavigationActionPolicyCancel); [w loadRequest:[NSURLRequest requestWithURL:clean]]; return; }
     }
@@ -5911,7 +5985,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     [self resumeMedia];
     [FExtHost.shared tab:self.tab event:@"complete"];
     [self findIcon];
-    NSNumber *z = [Defaults() dictionaryForKey:kZoom][HostOf(w.URL)] ?: [Defaults() objectForKey:kDefaultZoom];
+    NSNumber *z = SiteDict(self.tab.owner.isPrivate, kZoom)[HostOf(w.URL)] ?: [Defaults() objectForKey:kDefaultZoom];
     if (z && fabs(z.doubleValue - _zoom) > 0.01) [self setZoomLevel:z.doubleValue];
 }
 - (void)webView:(WKWebView *)w didFailProvisionalNavigation:(WKNavigation *)n withError:(NSError *)e { [self showError:e]; }
@@ -6186,7 +6260,7 @@ static NSString *MediaKey(NSURL *u) {
 - (void)webView:(WKWebView *)w requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)o initiatedByFrame:(WKFrameInfo *)f type:(WKMediaCaptureType)t decisionHandler:(void (^)(WKPermissionDecision))done API_AVAILABLE(macos(12.0)) {
     NSString *host = o.host.lowercaseString ?: @"";
     NSString *kind = t == WKMediaCaptureTypeCamera ? @"camera" : t == WKMediaCaptureTypeMicrophone ? @"microphone" : @"camera+microphone";
-    NSDictionary *perms = [Defaults() dictionaryForKey:kSitePerms][host];
+    NSDictionary *perms = SiteDict(self.tab.owner.isPrivate, kSitePerms)[host];
     NSArray *keys = [kind isEqualToString:@"camera+microphone"] ? @[@"camera", @"microphone"] : @[kind];
     BOOL allAllowed = YES, anyBlocked = NO;
     for (NSString *k in keys) { NSInteger v = [perms[k] integerValue]; if (v != 1) allAllowed = NO; if (v == 2) anyBlocked = YES; }
@@ -6196,14 +6270,14 @@ static NSString *MediaKey(NSURL *u) {
     a.messageText = [NSString stringWithFormat:@"%@ wants to use your %@", host, [kind stringByReplacingOccurrencesOfString:@"+" withString:@" and "]];
     a.informativeText = @"You can change this later in Settings ▸ Site Settings.";
     [a addButtonWithTitle:@"Allow"]; [a addButtonWithTitle:@"Don't Allow"];
-    a.showsSuppressionButton = YES; a.suppressionButton.title = @"Remember for this site"; a.suppressionButton.state = NSControlStateValueOn;
+    a.showsSuppressionButton = YES; a.suppressionButton.title = self.tab.owner.isPrivate ? @"Remember until private browsing ends" : @"Remember for this site"; a.suppressionButton.state = NSControlStateValueOn;
     [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
         BOOL allow = r == NSAlertFirstButtonReturn;
         if (a.suppressionButton.state == NSControlStateValueOn) {
-            NSMutableDictionary *all = [[Defaults() dictionaryForKey:kSitePerms] ?: @{} mutableCopy];
+            NSMutableDictionary *all = [SiteDict(self.tab.owner.isPrivate, kSitePerms) ?: @{} mutableCopy];
             NSMutableDictionary *mine = [all[host] ?: @{} mutableCopy];
             for (NSString *k in keys) mine[k] = @(allow ? 1 : 2);
-            all[host] = mine; [Defaults() setObject:all forKey:kSitePerms];
+            all[host] = mine; SiteSet(self.tab.owner.isPrivate, kSitePerms, all);
         }
         done(allow ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
     }];
@@ -6213,30 +6287,30 @@ static NSString *MediaKey(NSURL *u) {
 // WebKit gets the position from macOS Location Services, which asks you the first time Iris uses it.
 - (void)askPermission:(NSString *)key host:(NSString *)host noun:(NSString *)noun done:(void (^)(BOOL))done {
     host = host.lowercaseString ?: @"";
-    NSInteger v = [[Defaults() dictionaryForKey:kSitePerms][host][key] integerValue];
+    NSInteger v = [SiteDict(self.tab.owner.isPrivate, kSitePerms)[host][key] integerValue];
     if (v == 1) { done(YES); return; }
     if (v == 2 || !self.window) { done(NO); return; }
     NSAlert *a = [NSAlert new];
     a.messageText = [NSString stringWithFormat:@"%@ wants to use your %@", host, noun];
     a.informativeText = @"You can change this later from the lock beside the address.";
     [a addButtonWithTitle:@"Allow"]; [a addButtonWithTitle:@"Don't Allow"];
-    a.showsSuppressionButton = YES; a.suppressionButton.title = @"Remember for this site"; a.suppressionButton.state = NSControlStateValueOn;
+    a.showsSuppressionButton = YES; a.suppressionButton.title = self.tab.owner.isPrivate ? @"Remember until private browsing ends" : @"Remember for this site"; a.suppressionButton.state = NSControlStateValueOn;
     [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
         BOOL allow = r == NSAlertFirstButtonReturn;
         if (a.suppressionButton.state == NSControlStateValueOn) {
-            NSMutableDictionary *all = [[Defaults() dictionaryForKey:kSitePerms] ?: @{} mutableCopy];
+            NSMutableDictionary *all = [SiteDict(self.tab.owner.isPrivate, kSitePerms) ?: @{} mutableCopy];
             NSMutableDictionary *mine = [all[host] ?: @{} mutableCopy];
-            mine[key] = @(allow ? 1 : 2); all[host] = mine; [Defaults() setObject:all forKey:kSitePerms];
+            mine[key] = @(allow ? 1 : 2); all[host] = mine; SiteSet(self.tab.owner.isPrivate, kSitePerms, all);
         }
         done(allow);
     }];
 }
 - (void)_webView:(WKWebView *)w requestGeolocationPermissionForOrigin:(WKSecurityOrigin *)o initiatedByFrame:(WKFrameInfo *)f decisionHandler:(void (^)(WKPermissionDecision))done API_AVAILABLE(macos(12.0)) {
-    DLog(@"location: %@ asks (origin form)", o.host);
+    DLog(@"location: %@ asks (origin form)", self.tab.owner.isPrivate ? @"a private page" : o.host);
     [self askPermission:@"location" host:o.host noun:@"location" done:^(BOOL ok) { done(ok ? WKPermissionDecisionGrant : WKPermissionDecisionDeny); }];
 }
 - (void)_webView:(WKWebView *)w requestGeolocationPermissionForFrame:(WKFrameInfo *)f decisionHandler:(void (^)(BOOL))done {
-    DLog(@"location: %@ asks (frame form)", f.securityOrigin.host);
+    DLog(@"location: %@ asks (frame form)", self.tab.owner.isPrivate ? @"a private page" : f.securityOrigin.host);
     [self askPermission:@"location" host:f.securityOrigin.host noun:@"location" done:done];
 }
 
@@ -6469,12 +6543,13 @@ static NSString *ConsentScript(void) {
 - (void)userContentController:(WKUserContentController *)u didReceiveScriptMessage:(WKScriptMessage *)m replyHandler:(void (^)(id, NSString *))reply {
     NSDictionary *b = [m.body isKindOfClass:NSDictionary.class] ? m.body : @{};
     NSString *site = SiteKey([b[@"host"] isKindOfClass:NSString.class] ? b[@"host"] : @"");
+    BOOL priv = WinOfWeb(m.webView).isPrivate;
     if ([b[@"op"] isEqual:@"get"]) {
-        BOOL off = ![Defaults() boolForKey:kBlock] || [[Defaults() arrayForKey:kAllowlist] containsObject:site] || [[Defaults() arrayForKey:kAllowlist] containsObject:[@"www." stringByAppendingString:site]];
-        reply(off ? @[] : ([Defaults() dictionaryForKey:kCosmetic][site] ?: @[]), nil); return;
+        BOOL off = ![Defaults() boolForKey:kBlock] || [SiteArray(priv, kAllowlist) containsObject:site] || [SiteArray(priv, kAllowlist) containsObject:[@"www." stringByAppendingString:site]];
+        reply(off ? @[] : (SiteDict(priv, kCosmetic)[site] ?: @[]), nil); return;
     }
     if ([b[@"op"] isEqual:@"consentOn"]) {
-        NSArray *allow = [Defaults() arrayForKey:kAllowlist];
+        NSArray *allow = SiteArray(priv, kAllowlist);
         reply(@([Defaults() boolForKey:kCookieReject] && ![allow containsObject:site] && ![allow containsObject:[@"www." stringByAppendingString:site]]), nil); return;
     }
     if ([b[@"op"] isEqual:@"consented"]) {   // shown once per site per launch; the banner usually never returns anyway
@@ -6486,10 +6561,10 @@ static NSString *ConsentScript(void) {
     if ([b[@"op"] isEqual:@"add"] && m.frameInfo.isMainFrame) {
         NSString *sel = [b[@"selector"] isKindOfClass:NSString.class] ? Trim(b[@"selector"]) : @"";
         if (!site.length || !sel.length || sel.length > 600 || [sel rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"{}<"]].location != NSNotFound) { reply(@NO, nil); return; }
-        NSMutableDictionary *all = [[Defaults() dictionaryForKey:kCosmetic] ?: @{} mutableCopy];
+        NSMutableDictionary *all = [SiteDict(priv, kCosmetic) ?: @{} mutableCopy];
         NSMutableArray *list = [all[site] ?: @[] mutableCopy];
         if (![list containsObject:sel]) [list addObject:sel];
-        all[site] = list; [Defaults() setObject:all forKey:kCosmetic];
+        all[site] = list; SiteSet(priv, kCosmetic, all);
         [WinOfWeb(m.webView) ?: gWin showToast:[NSString stringWithFormat:@"Element hidden on %@ · undo from the shield", site]];
         reply(@YES, nil); return;
     }
@@ -6614,17 +6689,17 @@ static void IrisCosmeticInstall(WKUserContentController *ucc) {
 }
 - (void)undoLastElement:(NSMenuItem *)i {
     NSString *site = i.representedObject;
-    NSMutableDictionary *all = [[Defaults() dictionaryForKey:kCosmetic] ?: @{} mutableCopy];
+    NSMutableDictionary *all = [SiteDict(self.isPrivate, kCosmetic) ?: @{} mutableCopy];
     NSMutableArray *list = [all[site] ?: @[] mutableCopy];
     if (list.count) [list removeLastObject];
     if (list.count) all[site] = list; else [all removeObjectForKey:site];
-    [Defaults() setObject:all forKey:kCosmetic];
+    SiteSet(self.isPrivate, kCosmetic, all);
     [self.current.web reload];
 }
 - (void)resetElements:(NSMenuItem *)i {
-    NSMutableDictionary *all = [[Defaults() dictionaryForKey:kCosmetic] ?: @{} mutableCopy];
+    NSMutableDictionary *all = [SiteDict(self.isPrivate, kCosmetic) ?: @{} mutableCopy];
     [all removeObjectForKey:i.representedObject];
-    [Defaults() setObject:all forKey:kCosmetic];
+    SiteSet(self.isPrivate, kCosmetic, all);
     [self.current.web reload];
     [self showToast:[NSString stringWithFormat:@"Hidden elements on %@ are back", i.representedObject]];
 }
@@ -9615,7 +9690,7 @@ static NSInteger gShelfGen; static BOOL gShelfIn; static CFTimeInterval gShelfSi
 static __weak VWindow *gMuted;
 static void PageHearsMouse(VWindow *w, BOOL hears) {
     if (!w) return;
-    if (hears && (objc_getAssociatedObject(w, &kCustomiserKey) || [w panelOpen] || gMuted == w)) hears = NO;   // something of Iris's is over the page   // Customise Toolbar is open: the pages under it stay out of the pointer's way
+    if (hears && (objc_getAssociatedObject(w, &kCustomiserKey) || [w panelOpen] || gMuted == w || PrivateWindowLocked(w))) hears = NO;   // something of Iris's is over the page   // Customise Toolbar is open: the pages under it stay out of the pointer's way
     NSMutableArray<WKWebView *> *webs = [NSMutableArray array];
     for (VTab *t in w.tabs) if (t.web.web) [webs addObject:t.web.web];
     SEL a = NSSelectorFromString(@"_setIgnoresMouseMoveEvents:"), b = NSSelectorFromString(@"_setIgnoresNonWheelEvents:");
@@ -9744,6 +9819,7 @@ static void InstallShelfMonitor(void) {
 }
 - (void)showShelf:(BOOL)on {
     if (gWebApp && on) return;   // an installed app has no tabs to show
+    if (on && PrivateWindowLocked(self)) return;   // a locked private window shows nothing, its tabs included
     VTabShelf *s = (VTabShelf *)self.shelf;
     if (!s || s.shown == on) return;
     if (on && [[self valueForKey:@"pageFull"] boolValue]) return;
@@ -10197,11 +10273,12 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
                 break;
             }
             case VPTile: {
-                RoundRect(r, 14, hov ? cardHover : card);
-                NSRect ic = NSMakeRect(NSMidX(r) - 15, NSMinY(r) + 12, 30, 30);
-                RoundRect(ic, 9, ThemeIsLight() ? HexA(0x000000, 0.07) : Hex(0x26282d));
-                if (it.icon) DrawImage(it.icon, NSInsetRect(ic, 6, 6)); else DrawImage(PanelLetter(it.title, 30), ic);
-                [it.title drawInRect:NSMakeRect(NSMinX(r) + 6, NSMaxY(r) - 26, NSWidth(r) - 12, 16) withAttributes:@{NSFontAttributeName: UIFont(11.5, NSFontWeightRegular), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ctr}];
+                CGFloat k = MIN(1, NSHeight(r) / 78), is = round(30 * k);   // smaller tiles when there are more bookmarks: everything scales together
+                RoundRect(r, round(14 * k), hov ? cardHover : card);
+                NSRect ic = NSMakeRect(round(NSMidX(r) - is / 2), NSMinY(r) + round(12 * k), is, is);
+                RoundRect(ic, round(9 * k), ThemeIsLight() ? HexA(0x000000, 0.07) : Hex(0x26282d));
+                if (it.icon) DrawImage(it.icon, NSInsetRect(ic, round(6 * k), round(6 * k))); else DrawImage(PanelLetter(it.title, is), ic);
+                [it.title drawInRect:NSMakeRect(NSMinX(r) + 5, NSMaxY(r) - round(26 * k) - 1, NSWidth(r) - 10, 16) withAttributes:@{NSFontAttributeName: UIFont(MAX(10.5, 11.5 * k), NSFontWeightRegular), NSForegroundColorAttributeName: vDim, NSParagraphStyleAttributeName: ctr}];
                 break;
             }
             case VPGrid: {
@@ -10323,12 +10400,12 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
             VPItem *s1 = [self add:VPStat rect:NSMakeRect(x, y, sw, 62) title:self.cookies >= 0 ? [NSString stringWithFormat:@"%ld", (long)self.cookies] : @"–"]; s1.meta = @"Cookies";
             VPItem *s2 = [self add:VPStat rect:NSMakeRect(x + sw + 8, y, cw - sw - 8, 62) title:[NSString stringWithFormat:@"%d%%", (int)round((t.web.zoom ?: 1) * 100)]]; s2.meta = @"Zoom";
             y += 62 + 16;
-            BOOL js = [Defaults() boolForKey:kScripts] && ![[Defaults() arrayForKey:kJSOff] containsObject:host];
+            BOOL js = [Defaults() boolForKey:kScripts] && ![SiteArray(self.owner.isPrivate, kJSOff) containsObject:host];
             VPItem *jv = [self add:VPToggle rect:NSMakeRect(x, y, cw, 40) title:@"JavaScript"]; jv.on = js;
             jv.act = ^(NSEvent *e, NSRect r) { [ww toggleSiteScripts:Carry(host)]; [ws rebuild]; };
             y += 48;
             [self add:VPLabel rect:NSMakeRect(x, y, cw, 14) title:@"PERMISSIONS"]; y += 20;
-            NSDictionary *perms = [Defaults() dictionaryForKey:kSitePerms][host];
+            NSDictionary *perms = SiteDict(self.owner.isPrivate, kSitePerms)[host];
             CGFloat cx = x;
             for (NSString *k in @[@"location", @"camera", @"microphone"]) {
                 NSInteger v = [perms[k] integerValue];
@@ -10355,7 +10432,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     }
 
     if (self.mode == 2) {   // ---- the shield: blocking ----
-        BOOL global = [Defaults() boolForKey:kBlock], allowed = [[Defaults() arrayForKey:kAllowlist] containsObject:host];
+        BOOL global = [Defaults() boolForKey:kBlock], allowed = [SiteArray(self.owner.isPrivate, kAllowlist) containsObject:host];
         VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:!global ? @"Blocking is off" : (web && allowed) ? [@"Allowed on " stringByAppendingString:host] : @"Blocking ads and trackers"];
         h.icon = Tinted(Symbol(global && !(web && allowed) ? @"checkmark.shield" : @"shield.slash", 16, NSFontWeightMedium), vText);
         h.meta = [@"Filter lists · " stringByAppendingString:VBlocker.shared.status ?: @""];
@@ -10373,7 +10450,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         ga.act = ^(NSEvent *e, NSRect r) { [ww toggleBlockingGlobal:nil]; [ws rebuild]; };
         y += 48;
         if (web) {
-            NSUInteger hidden = [[Defaults() dictionaryForKey:@"cosmeticFilters"][site] count];
+            NSUInteger hidden = [SiteDict(self.owner.isPrivate, @"cosmeticFilters")[site] count];
             VPItem *be = [self add:VPPill rect:NSMakeRect(x, y, cw, 30) title:@"Block an element on this page…"]; be.symbol = @"hand.point.up.left";
             be.act = ^(NSEvent *e, NSRect r) { [ws.owner closePanels]; [ww blockElement:nil]; };
             y += 36;
@@ -10607,21 +10684,24 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         else y += ((MIN(kids.count, 16) + 1) / 2) * 40 + 10;
     }
 
-    if (links.count) {   // loose bookmarks as tiles
-        NSInteger cols = MAX(4, (NSInteger)floor((cw + 8) / 102));
-        CGFloat tw = floor((cw - (cols - 1) * 8) / cols);
+    if (links.count) {   // loose bookmarks as tiles: every one shows. More of them, smaller tiles, two rows; past what fits, a third row
+        const CGFloat gap = 8, minW = 66;
+        NSUInteger n = links.count;
+        NSInteger cols = MAX(4, (NSInteger)floor((cw + gap) / 102));
+        if ((NSInteger)n > cols * 2) cols = MIN((NSInteger)ceil(n / 2.0), MAX(4, (NSInteger)floor((cw + gap) / (minW + gap))));
+        CGFloat tw = floor((cw - (cols - 1) * gap) / cols);
+        CGFloat th = round(MAX(60, MIN(78, 78 * tw / 96))), step = th + 8;
         NSUInteger i = 0;
         for (NSDictionary *b in links) {
             NSString *name = [b[@"name"] length] ? b[@"name"] : (HostOf([NSURL URLWithString:b[@"url"] ?: @""]) ?: @"");
-            VPItem *tile = [self add:VPTile rect:NSMakeRect(x + (i % cols) * (tw + 8), y + (i / cols) * 86, tw, 78) title:name];
+            VPItem *tile = [self add:VPTile rect:NSMakeRect(x + (i % cols) * (tw + gap), y + (i / cols) * step, tw, th) title:name];
             tile.icon = [VFavicons.shared iconForURL:b[@"url"]];
             NSString *url = b[@"url"]; tile.act = ^(NSEvent *e, NSRect r) { [ws open:url event:e]; };
             tile.menu = ^NSMenu *{ return [ws menuForBookmark:b]; };
             tile.node = (NSMutableDictionary *)b; tile.list = VBookmarks.shared.bar;
             i++;
-            if (i >= (NSUInteger)cols * 2) break;
         }
-        y += ((MIN(links.count, (NSUInteger)cols * 2) + cols - 1) / cols) * 86 + 6;
+        y += ((n + cols - 1) / cols) * step + 6;
     }
 
     // your other open tabs, the most recent first
@@ -10796,7 +10876,7 @@ static const CGFloat kTop = 40, kBook = 30; // kTop: toolbar height in full scre
 // A short message at the top of the page ("Filter lists updated"): a floating capsule with a mark saying what kind of
 // news it is (done, a problem, or just so you know), centred text, a soft shadow. It drops in and lifts away.
 @interface VToast : NSView
-@property (copy) NSString *message;
+@property (nonatomic, copy) NSString *message;
 @property NSInteger kind;   // 0 note, 1 done, 2 problem
 - (void)appear;
 - (void)vanish;
@@ -10984,6 +11064,7 @@ static BOOL PointIsOverPage(NSWindow *w, NSPoint p) {   // p: window coordinates
     [self restoreFrom:state];
     [self layout];
     [NSTimer scheduledTimerWithTimeInterval:60 target:self selector:@selector(sleepIdleTabs) userInfo:nil repeats:YES];
+    PrivateWindowOpened(self);
     return self;
 }
 
@@ -11074,7 +11155,7 @@ static NSString *CreateProfile(NSString *name) {
         }
     }
     if (!p.loading) {
-        NSNumber *z = [Defaults() dictionaryForKey:kZoom][host] ?: [Defaults() objectForKey:kDefaultZoom];
+        NSNumber *z = SiteDict(self.isPrivate, kZoom)[host] ?: [Defaults() objectForKey:kDefaultZoom];
         if (z && fabs(z.doubleValue - p.zoom) > 0.01) [p setZoomLevel:z.doubleValue];
     }
     // pages report progress many times a second; the toolbar and sidebar redraw at most ~20 times a second
@@ -11497,6 +11578,7 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     [self.suggest dismiss];
     for (VTab *t in self.tabs) { [FExtHost.shared tab:t event:@"removed"]; [t.web close]; t.web = nil; }
     [self.tabs removeAllObjects];
+    PrivateWindowClosed(self);
     [gWindows removeObject:self];
     if (gWin == self) gWin = gWindows.lastObject;
     [self saveSession];
@@ -11603,7 +11685,7 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     if (!u) return;
     if (nt || !self.current) { [self newTab:u select:!nt || !self.current]; return; }
     VTab *t = self.current;
-    if ([Defaults() boolForKey:kStrip]) { NSURL *clean = StripTracking(u); if (clean) u = clean; }
+    if ([Defaults() boolForKey:kStrip] || self.isPrivate) { NSURL *clean = StripTracking(u); if (clean) u = clean; }
     if (!t.web) {
         BOOL fromHome = t.isHome;
         if (fromHome) { [t.homeFwd close]; t.homeFwd = nil; }   // a new way forward from Home replaces the old one
@@ -11964,8 +12046,8 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     NSString *host = HostOf(u);
     [m addItem:NSMenuItem.separatorItem];
     NSMenuItem *js = [m addItemWithTitle:@"JavaScript on This Site" action:@selector(toggleSiteScripts:) keyEquivalent:@""]; js.target = self; js.representedObject = host;
-    js.state = [Defaults() boolForKey:kScripts] && ![[Defaults() arrayForKey:kJSOff] containsObject:host] ? NSControlStateValueOn : NSControlStateValueOff;
-    NSDictionary *perms = [Defaults() dictionaryForKey:kSitePerms][host];
+    js.state = [Defaults() boolForKey:kScripts] && ![SiteArray(self.isPrivate, kJSOff) containsObject:host] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSDictionary *perms = SiteDict(self.isPrivate, kSitePerms)[host];
     for (NSString *k in @[@"location", @"camera", @"microphone"]) {
         NSInteger v = [perms[k] integerValue];
         NSMenuItem *pi = [m addItemWithTitle:[NSString stringWithFormat:@"%@: %@", k.capitalizedString, v == 1 ? @"Allowed" : v == 2 ? @"Blocked" : @"Ask"] action:nil keyEquivalent:@""];
@@ -11976,7 +12058,7 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
         }
         pi.submenu = sub;
     }
-    NSNumber *z = [Defaults() dictionaryForKey:kZoom][host];
+    NSNumber *z = SiteDict(self.isPrivate, kZoom)[host];
     if (z) { NSMenuItem *zi = [m addItemWithTitle:[NSString stringWithFormat:@"Zoom: %d%% (Reset)", (int)round(z.doubleValue * 100)] action:@selector(zoomReset:) keyEquivalent:@""]; zi.target = self; }
     NSMenuItem *cl = [m addItemWithTitle:@"Clear Cookies and Data for This Site…" action:@selector(clearSiteData:) keyEquivalent:@""]; cl.target = self; cl.representedObject = host;
     [m addItem:NSMenuItem.separatorItem];
@@ -11988,19 +12070,19 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 - (void)toggleSiteScripts:(NSMenuItem *)m {
     NSString *h = m.representedObject; if (!h.length) return;
     if (![Defaults() boolForKey:kScripts]) { [Defaults() setBool:YES forKey:kScripts]; }
-    NSMutableArray *a = [[Defaults() arrayForKey:kJSOff] ?: @[] mutableCopy];
+    NSMutableArray *a = [SiteArray(self.isPrivate, kJSOff) ?: @[] mutableCopy];
     if ([a containsObject:h]) [a removeObject:h]; else [a addObject:h];
-    [Defaults() setObject:a forKey:kJSOff];
+    SiteSet(self.isPrivate, kJSOff, a);
     [self showToast:[a containsObject:h] ? [NSString stringWithFormat:@"JavaScript off for %@", h] : [NSString stringWithFormat:@"JavaScript on for %@", h]];
     [self.current.web reload];
 }
 - (void)setSitePermission:(NSMenuItem *)m {
     NSArray *a = m.representedObject;
-    NSMutableDictionary *all = [[Defaults() dictionaryForKey:kSitePerms] ?: @{} mutableCopy];
+    NSMutableDictionary *all = [SiteDict(self.isPrivate, kSitePerms) ?: @{} mutableCopy];
     NSMutableDictionary *mine = [all[a[0]] ?: @{} mutableCopy];
     if ([a[2] integerValue] == 0) [mine removeObjectForKey:a[1]]; else mine[a[1]] = a[2];
     if (mine.count) all[a[0]] = mine; else [all removeObjectForKey:a[0]];
-    [Defaults() setObject:all forKey:kSitePerms];
+    SiteSet(self.isPrivate, kSitePerms, all);
 }
 - (void)clearSiteData:(NSMenuItem *)m {
     NSString *h = m.representedObject; if (!h.length) return;
@@ -12028,14 +12110,14 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     [m addItem:NSMenuItem.separatorItem];
     NSString *site = HostOf([NSURL URLWithString:t.url ?: @""]);
     if (on && site.length && !t.isHome) {
-        BOOL allowed = [[Defaults() arrayForKey:kAllowlist] containsObject:site];
+        BOOL allowed = [SiteArray(self.isPrivate, kAllowlist) containsObject:site];
         NSMenuItem *si = [m addItemWithTitle:[NSString stringWithFormat:allowed ? @"Turn On Blocking for %@" : @"Turn Off Blocking for %@", site] action:@selector(toggleBlockingSite:) keyEquivalent:@""];
         si.target = self; si.representedObject = site;
     }
     if (site.length && !t.isHome && [t.url hasPrefix:@"http"]) {
         NSMenuItem *be = [m addItemWithTitle:@"Block Element on This Page…" action:@selector(blockElement:) keyEquivalent:@""]; be.target = self;
         NSString *key = [site hasPrefix:@"www."] ? [site substringFromIndex:4] : site;
-        NSUInteger n = [[Defaults() dictionaryForKey:@"cosmeticFilters"][key] count];
+        NSUInteger n = [SiteDict(self.isPrivate, @"cosmeticFilters")[key] count];
         if (n) {
             NSMenuItem *ul = [m addItemWithTitle:@"Undo Last Blocked Element" action:@selector(undoLastElement:) keyEquivalent:@""]; ul.target = self; ul.representedObject = key;
             NSMenuItem *re = [m addItemWithTitle:[NSString stringWithFormat:@"Show All %lu Hidden Element%@ on %@", (unsigned long)n, n == 1 ? @"" : @"s", key] action:@selector(resetElements:) keyEquivalent:@""]; re.target = self; re.representedObject = key;
@@ -12059,12 +12141,14 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
 }
 - (void)toggleBlockingSite:(NSMenuItem *)m {
     NSString *site = m.representedObject; if (!site.length) return;
-    NSMutableArray *a = [[Defaults() arrayForKey:kAllowlist] ?: @[] mutableCopy];
+    NSMutableArray *a = [SiteArray(self.isPrivate, kAllowlist) ?: @[] mutableCopy];
     BOOL wasAllowed = [a containsObject:site];
     if (wasAllowed) [a removeObject:site]; else [a addObject:site];
-    [Defaults() setObject:a forKey:kAllowlist];
+    SiteSet(self.isPrivate, kAllowlist, a);
     [self showToast:wasAllowed ? [NSString stringWithFormat:@"Blocking back on for %@…", site] : [NSString stringWithFormat:@"Blocking off for %@…", site]];
     VPage *w = self.current.web;
+    IrisYouTubeChanged();
+    if (self.isPrivate) { [w reload]; return; }   // switched per page by WebKit: nothing to rebuild, and nothing of it kept
     IrisReloadBlocklistsThen(^{ [w reload]; });
 }
 - (void)updateListsNow:(id)s {
@@ -12242,10 +12326,10 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     VPage *w = self.current.web; if (!w) return;
     z = MAX(0.3, MIN(3, z));
     [w setZoomLevel:z];
-    NSMutableDictionary *d = [[Defaults() dictionaryForKey:kZoom] ?: @{} mutableCopy];
+    NSMutableDictionary *d = [SiteDict(self.isPrivate, kZoom) ?: @{} mutableCopy];
     NSString *h = HostOf([NSURL URLWithString:w.url ?: @""]);
     if (fabs(z - 1) < 0.01) [d removeObjectForKey:h]; else if (h.length) d[h] = @(z);
-    [Defaults() setObject:d forKey:kZoom];
+    SiteSet(self.isPrivate, kZoom, d);
     [self showToast:[NSString stringWithFormat:@"Zoom %d%%", (int)round(z * 100)]];
 }
 - (void)zoomIn:(id)s { [self setZoom:self.current.web.zoom + 0.1]; }
@@ -13942,6 +14026,204 @@ static void ProfileAppsRefresh(void) {
         for (NSString *pid in ids) if (ProfileAppFind(pid) && !ProfileAppRunning(pid)) ProfileAppEnsure(pid);
     });
 }
+#pragma mark - Private windows: locking, and nothing left behind
+
+// Private windows lock when your Mac locks or sleeps and, if you like, after a while away from Iris. A locked window
+// shows nothing of its pages (they're hidden, not blurred, and paused) until Touch ID or your password opens it. All
+// private windows lock and unlock together. When the last one closes, every decision made in them goes too.
+
+static BOOL gPrivLocked;
+static NSTimer *gPrivAwayTimer;
+static void PrivateUnlockAll(void);
+
+static NSArray<VWindow *> *PrivateWindows(void) {
+    NSMutableArray *a = [NSMutableArray array];
+    for (VWindow *w in gWindows) if (w.isPrivate) [a addObject:w];
+    return a;
+}
+
+@interface VPrivateLock : NSView
+@property (weak) VWindow *owner;
+@property BOOL hoverBtn, pressing;
+@property (strong) NSString *problem;
+- (NSRect)buttonRect;
+@end
+@implementation VPrivateLock
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)e { return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (NSView *)hitTest:(NSPoint)p { NSView *h = [super hitTest:p]; return h ? self : nil; }   // nothing under it can be reached
+- (void)resetCursorRects { [self addCursorRect:self.bounds cursor:NSCursor.arrowCursor]; }
+- (NSRect)buttonRect { CGFloat w = 168, h = 36; return NSMakeRect(round(NSMidX(self.bounds) - w / 2), round(NSMidY(self.bounds) + 46), w, h); }
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *t in self.trackingAreas.copy) [self removeTrackingArea:t];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect owner:self userInfo:nil]];
+}
+- (void)mouseMoved:(NSEvent *)e { BOOL h = NSPointInRect([self convertPoint:e.locationInWindow fromView:nil], self.buttonRect); if (h != self.hoverBtn) { self.hoverBtn = h; self.needsDisplay = YES; } }
+- (void)mouseExited:(NSEvent *)e { self.hoverBtn = NO; self.needsDisplay = YES; }
+- (void)mouseDown:(NSEvent *)e {
+    if (NSPointInRect([self convertPoint:e.locationInWindow fromView:nil], self.buttonRect)) { self.pressing = YES; self.needsDisplay = YES; }
+    else if (e.clickCount == 2) [self.window performZoom:nil];
+    else [self.window performWindowDragWithEvent:e];
+}
+- (void)mouseUp:(NSEvent *)e {
+    BOOL was = self.pressing; self.pressing = NO; self.needsDisplay = YES;
+    if (was && NSPointInRect([self convertPoint:e.locationInWindow fromView:nil], self.buttonRect)) PrivateUnlockAll();
+}
+- (void)rightMouseDown:(NSEvent *)e {}
+- (void)scrollWheel:(NSEvent *)e {}
+- (void)keyDown:(NSEvent *)e {
+    if (e.keyCode == 36 || e.keyCode == 76 || e.keyCode == 49) { PrivateUnlockAll(); return; }   // Return, Enter, Space
+    if (e.modifierFlags & NSEventModifierFlagCommand) { [super keyDown:e]; return; }          // ⌘W, ⌘Q and the rest still work
+}
+- (void)drawRect:(NSRect)r {
+    BOOL light = ThemeIsLight();
+    [vContentBg setFill]; NSRectFill(self.bounds);
+    CGFloat W = NSWidth(self.bounds), cy = NSMidY(self.bounds);
+    NSPoint c = NSMakePoint(W / 2, cy - 40);
+    NSColor *v = light ? Hex(0x6b5bd6) : Hex(0x7a68e8);
+    NSGradient *glow = [[NSGradient alloc] initWithColors:@[[v colorWithAlphaComponent:light ? 0.10 : 0.18], [v colorWithAlphaComponent:0]]];
+    [glow drawFromCenter:c radius:0 toCenter:c radius:220 options:0];
+    // the lock, in a ring of the private window's violet
+    NSRect ring = NSMakeRect(c.x - 34, c.y - 58, 68, 68);
+    RoundRect(ring, 34, [v colorWithAlphaComponent:light ? 0.12 : 0.18]);
+    NSBezierPath *edge = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(ring, 0.75, 0.75)]; edge.lineWidth = 1.5; [[v colorWithAlphaComponent:0.55] setStroke]; [edge stroke];
+    NSImage *lk = Tinted(Symbol(@"lock.fill", 24, NSFontWeightSemibold), light ? Hex(0x4b3db8) : Hex(0xd6cffb));
+    DrawImage(lk, CenterIn(lk.size, ring));
+    NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentCenter;
+    NSUInteger n = PrivateWindows().count;
+    [@"Private browsing is locked" drawInRect:NSMakeRect(0, cy - 22 + 10, W, 26)
+       withAttributes:@{NSFontAttributeName: TitleFont(20, YES), NSForegroundColorAttributeName: vText, NSParagraphStyleAttributeName: ps}];
+    NSString *sub = self.problem ?: [NSString stringWithFormat:@"%lu private window%@ · its pages are hidden and paused", (unsigned long)n, n == 1 ? @"" : @"s"];
+    [sub drawInRect:NSMakeRect(0, cy + 14, W, 18) withAttributes:@{NSFontAttributeName: UIFont(12.5, NSFontWeightRegular), NSForegroundColorAttributeName: self.problem ? Hex(0xf08a8a) : vDim, NSParagraphStyleAttributeName: ps}];
+    NSRect b = self.buttonRect;
+    [NSGraphicsContext saveGraphicsState];
+    NSShadow *sh = [NSShadow new]; sh.shadowBlurRadius = 16; sh.shadowOffset = NSZeroSize; sh.shadowColor = [v colorWithAlphaComponent:self.hoverBtn ? 0.55 : 0.35]; [sh set];
+    RoundRect(b, NSHeight(b) / 2, self.pressing ? [v blendedColorWithFraction:0.2 ofColor:NSColor.blackColor] : self.hoverBtn ? [v blendedColorWithFraction:0.12 ofColor:NSColor.whiteColor] : v);
+    [NSGraphicsContext restoreGraphicsState];
+    NSImage *tid = Tinted(Symbol(@"touchid", 14, NSFontWeightMedium), NSColor.whiteColor);
+    NSString *label = @"Unlock";
+    NSDictionary *la = @{NSFontAttributeName: UIFont(13, NSFontWeightSemibold), NSForegroundColorAttributeName: NSColor.whiteColor};
+    NSSize ls = [label sizeWithAttributes:la];
+    CGFloat total = (tid ? tid.size.width + 8 : 0) + ls.width, x = NSMidX(b) - total / 2;
+    if (tid) { DrawImage(tid, NSMakeRect(x, NSMidY(b) - tid.size.height / 2, tid.size.width, tid.size.height)); x += tid.size.width + 8; }
+    [label drawAtPoint:NSMakePoint(x, NSMidY(b) - ls.height / 2) withAttributes:la];
+    [@"Return also unlocks" drawInRect:NSMakeRect(0, NSMaxY(b) + 12, W, 16) withAttributes:@{NSFontAttributeName: UIFont(11, NSFontWeightRegular), NSForegroundColorAttributeName: vFaint, NSParagraphStyleAttributeName: ps}];
+}
+@end
+
+static char kPrivLockViewKey;
+// A locked window: its pages hidden (not just covered), playback paused, the cover on top of everything, the tabs closed.
+static void PrivateLockWindow(VWindow *w) {
+    if (!w.isPrivate || objc_getAssociatedObject(w, &kPrivLockViewKey)) return;
+    [w closePanels]; [w showShelf:NO]; [w.suggest dismiss];
+    for (VTab *t in w.tabs) if (t.web.web) {
+        [t.web.web evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(m=>{try{m.pause()}catch(e){}})" completionHandler:nil];
+        if ([t.web.web respondsToSelector:@selector(pauseAllMediaPlaybackWithCompletionHandler:)]) [t.web.web pauseAllMediaPlaybackWithCompletionHandler:^{}];
+    }
+    [w.current.web.web closeAllMediaPresentationsWithCompletionHandler:^{}];   // picture in picture and full-screen video too
+    w.content.hidden = YES;
+    NSView *root = w.window.contentView;
+    VPrivateLock *lock = [[VPrivateLock alloc] initWithFrame:root.bounds];
+    lock.owner = w; lock.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [root addSubview:lock positioned:NSWindowAbove relativeTo:nil];
+    if (w.lights.superview == root) [root addSubview:w.lights positioned:NSWindowAbove relativeTo:lock];   // close, minimise and zoom stay usable
+    objc_setAssociatedObject(w, &kPrivLockViewKey, lock, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    PageHearsMouse(w, NO);
+    if (w.window.isKeyWindow) [w.window makeFirstResponder:lock];
+}
+static void PrivateUnlockWindow(VWindow *w) {
+    VPrivateLock *lock = objc_getAssociatedObject(w, &kPrivLockViewKey);
+    if (!lock) return;
+    [lock removeFromSuperview];
+    objc_setAssociatedObject(w, &kPrivLockViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    w.content.hidden = NO;
+    PageHearsMouse(w, YES);
+    [w.window makeFirstResponder:w.current.web.web];
+    [w layout];
+}
+static BOOL PrivateWindowLocked(VWindow *w) { return objc_getAssociatedObject(w, &kPrivLockViewKey) != nil; }
+
+static void PrivateLockAll(NSString *why) {
+    NSArray *ws = PrivateWindows();
+    if (!ws.count || gPrivLocked) return;
+    gPrivLocked = YES;
+    for (VWindow *w in ws) PrivateLockWindow(w);
+    DLog(@"private: locked (%@)", why);
+}
+// Touch ID, or your Mac's password when there's no Touch ID; the framework is loaded only when it's needed.
+static void PrivateUnlockAll(void) {
+    if (!gPrivLocked) return;
+    static BOOL asking; if (asking) return;
+    void (^open)(void) = ^{ gPrivLocked = NO; for (VWindow *w in PrivateWindows()) PrivateUnlockWindow(w); DLog(@"private: unlocked"); };
+    void (^problem)(NSString *) = ^(NSString *s) { for (VWindow *w in PrivateWindows()) { VPrivateLock *l = objc_getAssociatedObject(w, &kPrivLockViewKey); l.problem = s; l.needsDisplay = YES; } };
+    dlopen("/System/Library/Frameworks/LocalAuthentication.framework/LocalAuthentication", RTLD_LAZY);
+    Class LA = NSClassFromString(@"LAContext");
+    id ctx = [LA new];
+    const NSInteger kOwnerAuth = 2;   // LAPolicyDeviceOwnerAuthentication: Touch ID, Apple Watch or the password
+    NSError *err = nil;
+    BOOL can = ctx && ((BOOL (*)(id, SEL, NSInteger, NSError **))objc_msgSend)(ctx, NSSelectorFromString(@"canEvaluatePolicy:error:"), kOwnerAuth, &err);
+    if (!can) { DLog(@"private: no way to ask who you are (%@), opening", err.localizedDescription); open(); return; }   // a Mac with no password set
+    asking = YES;
+    ((void (*)(id, SEL, NSInteger, NSString *, void (^)(BOOL, NSError *)))objc_msgSend)(ctx, NSSelectorFromString(@"evaluatePolicy:localizedReason:reply:"), kOwnerAuth,
+        @"show your private windows", ^(BOOL ok, NSError *e) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                asking = NO;
+                if (ok) open();
+                else if (e.code != -2 && e.code != -4) problem(@"That didn't match. Try again.");   // -2 you cancelled, -4 the system did
+            });
+        });
+}
+
+// Locking when the Mac locks or sleeps, and after the time away you chose
+static void PrivateAwayChanged(BOOL away) {
+    [gPrivAwayTimer invalidate]; gPrivAwayTimer = nil;
+    NSInteger mode = [Defaults() integerForKey:kPrivLock];
+    if (!away || mode < 2 || !PrivateWindows().count) return;
+    NSTimeInterval after = mode == 2 ? 60 : mode == 3 ? 300 : 900;
+    gPrivAwayTimer = [NSTimer scheduledTimerWithTimeInterval:after repeats:NO block:^(NSTimer *t) { gPrivAwayTimer = nil; if (!NSApp.isActive) PrivateLockAll(@"away"); }];
+}
+static void PrivateWatch(void) {
+    static BOOL on; if (on) return; on = YES;
+    void (^mac)(NSNotification *) = ^(NSNotification *n) { if ([Defaults() integerForKey:kPrivLock] > 0) PrivateLockAll(@"Mac locked or asleep"); };
+    [NSDistributedNotificationCenter.defaultCenter addObserverForName:@"com.apple.screenIsLocked" object:nil queue:NSOperationQueue.mainQueue usingBlock:mac];
+    [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceScreensDidSleepNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:mac];
+    [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:mac];
+    [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceSessionDidResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:mac];   // switched to another user
+    [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { PrivateAwayChanged(YES); }];
+    [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { PrivateAwayChanged(NO); }];
+}
+
+// A private window opening: nothing of it goes into macOS's own window restoration, it can be left out of screenshots,
+// and if the others are locked it starts locked too.
+static void PrivateWindowOpened(VWindow *w) {
+    if (!w.isPrivate) return;
+    PrivateWatch();
+    w.window.restorable = NO;
+    if ([Defaults() boolForKey:kPrivHide]) w.window.sharingType = NSWindowSharingNone;
+    if (gPrivLocked) PrivateLockWindow(w);
+}
+// The last private window closing: what was decided in them goes, the lock resets.
+static void PrivateWindowClosed(VWindow *w) {
+    if (!w.isPrivate) return;
+    for (VWindow *x in gWindows) if (x != w && x.isPrivate) return;
+    gPrivSite = nil;
+    gPrivLocked = NO;
+    [gPrivAwayTimer invalidate]; gPrivAwayTimer = nil;
+    DLog(@"private: last window closed, nothing kept");
+}
+static void PrivateApplyCaptureSetting(void) {
+    for (VWindow *w in PrivateWindows()) w.window.sharingType = [Defaults() boolForKey:kPrivHide] ? NSWindowSharingNone : NSWindowSharingReadOnly;
+}
+
+@implementation VWindow (Private)
+- (void)lockPrivateWindows:(id)s {
+    if (!PrivateWindows().count) { [self showToast:@"No private windows are open"]; return; }
+    PrivateLockAll(@"you asked");
+}
+@end
 #pragma mark - Test harness: commands from control.txt, screenshots into shots/
 
 // Development aid. Write lines to control.txt beside Iris.app; each runs once, in order:
@@ -14021,6 +14303,15 @@ static void CtlOut(NSString *s) {
             [NSApp sendAction:NSSelectorFromString(arg) to:self from:nil];
             CtlOut([NSString stringWithFormat:@"act %@ split=%lu", arg, (unsigned long)self.splitPair.count]);
         }
+        else if ([cmd isEqualToString:@"privwindow"]) {   // dev: a fresh private window; the rest of the commands run in it
+            VWindow *nw = [[VWindow alloc] initPrivate:YES state:@{}]; [nw showWindow:nil]; [nw windowDidResize:nil];
+            [nw.window makeKeyAndOrderFront:nil];
+            CtlOut(@"private window opened");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ [nw runControl:lines]; });
+            return;
+        }
+        else if ([cmd isEqualToString:@"privlock"]) PrivateLockAll(@"test");
+        else if ([cmd isEqualToString:@"privstate"]) CtlOut([NSString stringWithFormat:@"privstate locked=%d thisLocked=%d private=%d remembered=%@ restorable=%d sharing=%ld", gPrivLocked, PrivateWindowLocked(self), self.isPrivate, [gPrivSite.allKeys componentsJoinedByString:@","] ?: @"-", self.window.restorable, (long)self.window.sharingType]);
         else if ([cmd isEqualToString:@"window"]) {   // a fresh window; the rest of the commands run in it
             VWindow *nw = [[VWindow alloc] initPrivate:NO state:@{}]; [nw showWindow:nil]; [nw windowDidResize:nil];
             [nw.window makeKeyAndOrderFront:nil];
@@ -14546,7 +14837,7 @@ static void RunBuildScriptWith(NSString *stamp, NSArray *args) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
-    [Defaults() registerDefaults:@{kDLAccel: @YES, kCodec: @(MacIsAppleSilicon() ? 0 : 2), kCodec30: @NO, kBgThrottle: @1, kSingleProcess: @NO, kRestorePaused: @YES, kResumeMedia: @YES, kLazyRestore: @NO, kBlock: @YES, kStrip: @YES, kCookieReject: @YES, kAutoPiP: @YES, kSleepMins: @10, kShowBookmarks: @YES, kSearch: @0, kStartup: @0, kScripts: @YES, kAskDownload: @NO,
+    [Defaults() registerDefaults:@{kDLAccel: @YES, kCodec: @(MacIsAppleSilicon() ? 0 : 2), kCodec30: @NO, kBgThrottle: @1, kSingleProcess: @NO, kRestorePaused: @YES, kResumeMedia: @YES, kLazyRestore: @NO, kBlock: @YES, kStrip: @YES, kCookieReject: @YES, kAutoPiP: @YES, kSleepMins: @10, kShowBookmarks: @YES, kSearch: @0, kStartup: @0, kPrivLock: @3, kPrivHide: @NO, kScripts: @YES, kAskDownload: @NO,
                                    kThrottleOn: @YES, kTheme: @1, kAccent: @0, kDensity: @1, kHTTPSOnly: @NO, kGPC: @YES, kHomeTopSites: @YES, kConfirmQuit: @NO, kSuggestNet: @YES}];
     if (gWebApp) WebAppAdoptSettings();   // an installed app starts from your Iris settings
     if (!gWebApp && ![Defaults() boolForKey:@"toolbarInstallV1"]) {   // the install button joins the address bar (Oct 2026)
@@ -14721,6 +15012,7 @@ static void RunBuildScriptWith(NSString *stamp, NSArray *args) {
     [self item:@"New Tab" action:@selector(newTabAction:) key:@"t" mods:C in:file target:nil];
     [self item:@"New Window" action:@selector(newWindow:) key:@"n" mods:C in:file target:self];
     [self item:@"New Private Window" action:@selector(newPrivateWindow:) key:@"n" mods:C | S in:file target:self];
+    if (!gWebApp) [self item:@"Lock Private Windows" action:@selector(lockPrivateWindows:) key:@"l" mods:C | K in:file target:nil];
     if (!gWebApp) [self item:@"Install Site as App…" action:@selector(installWebApp:) key:@"" mods:0 in:file target:nil];
     NSMenuItem *profs = [file addItemWithTitle:@"Profiles" action:nil keyEquivalent:@""];
     NSMenu *pm = [[NSMenu alloc] initWithTitle:@"Profiles"]; pm.delegate = self; profs.submenu = pm;   // filled in each time it opens
@@ -15174,6 +15466,12 @@ static NSArray *SettingsSchema(VWindow *win) {
             SKey(kCookieReject, @"Reject cookie banners", @"Answers consent pop-ups with “Reject all” on sites that offer it. Turning the shield off for a site skips it there.", NO, nil),
             SValue(@"Prevent cross-site tracking", @"WebKit's Intelligent Tracking Prevention limits cookies that follow you between sites.", @"Always on"),
             SKey(kGPC, @"Ask sites not to sell or share my data", @"Sends the Global Privacy Control signal. Applies to pages you open next.", NO, nil) ]),
+        SGroup(@"Private windows", @[
+            SSelect(@"privLock", @"Lock private windows", @"A locked private window hides and pauses its pages until Touch ID or your password opens it. ⌃⌘L locks them now.",
+                    @[@"Never", @"When my Mac locks or sleeps", @"Also after 1 minute away from Iris", @"Also after 5 minutes away from Iris", @"Also after 15 minutes away from Iris"], [Defaults() integerForKey:kPrivLock],
+                    ^(NSInteger i) { [Defaults() setInteger:i forKey:kPrivLock]; }),
+            SKey(kPrivHide, @"Hide private windows from screenshots and screen sharing", @"They show up blank in screenshots, recordings and shared screens, including your own.", NO, ^{ PrivateApplyCaptureSetting(); }),
+            SNote(@"Always on in private windows", @"No history, cookies or site data kept; what you decide on sites is forgotten when the last one closes; tracking tags removed; WebKit's own tracking and fingerprinting protections and HTTPS first; no extensions; each window signed in separately; never restored by macOS.") ]),
         SGroup(@"Security", @[
             SKey(kHTTPSOnly, @"HTTPS-only mode", @"Tries every site over a secure connection and warns you before opening one that isn't.", NO, nil),
             SValue(@"Fraudulent website warnings", @"Off: it would send the addresses you visit to Google Safe Browsing.", @"Off") ]),
