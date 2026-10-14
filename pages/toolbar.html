@@ -1,0 +1,312 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Customise Toolbar</title>
+<style>
+/*THEME*/
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+html{background:transparent;color:var(--text);font:13px/1.35 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased;-webkit-user-select:none;user-select:none}
+body{background:color-mix(in srgb,var(--bg) 96%,transparent);display:flex;flex-direction:column;overflow:hidden;position:relative;isolation:isolate}
+button{font:inherit;color:inherit}
+.aura{position:absolute;inset:0 0 auto 0;height:300px;z-index:-1;pointer-events:none;overflow:hidden;-webkit-mask-image:linear-gradient(180deg,#000 20%,transparent);mask-image:linear-gradient(180deg,#000 20%,transparent)}
+.aura i{position:absolute;width:46%;height:220px;border-radius:50%;filter:blur(70px);opacity:var(--ap-glow,.2)}
+.aura i:nth-child(1){left:2%;top:-90px;background:var(--ap-t)}
+.aura i:nth-child(2){left:28%;top:-120px;background:var(--ap-b)}
+.aura i:nth-child(3){left:54%;top:-80px;background:var(--ap-v)}
+
+header{display:flex;align-items:flex-start;gap:16px;padding:24px 26px 6px}
+.ttl{flex:1;min-width:0}
+h1{margin:0;font:700 24px/1.1 -apple-system,system-ui;letter-spacing:-.03em;background:linear-gradient(180deg,var(--text) 40%,color-mix(in srgb,var(--text) 58%,transparent));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{margin:7px 0 0;color:var(--dim);font-size:13px}
+.done{height:32px;padding:0 18px;border:0;border-radius:999px;cursor:pointer;font-weight:650;font-size:13px;color:#0b0d16;
+  background:linear-gradient(90deg,var(--ap-t),var(--ap-b),var(--ap-v),var(--ap-b),var(--ap-t));background-size:300% 100%;animation:flow 6s linear infinite;
+  box-shadow:0 0 18px color-mix(in srgb,var(--ap-b) 40%,transparent),inset 0 1px 0 rgba(255,255,255,.35);transition:transform .15s}
+.done:active{transform:scale(.97)}
+@keyframes flow{to{background-position:300% 0}}
+.ghostbtn{height:32px;padding:0 14px;border-radius:999px;border:1px solid var(--border);background:var(--pill);color:var(--dim);cursor:pointer}
+.ghostbtn:hover{color:var(--text);background:var(--hover)}
+
+/* the bar, large: three groups you drop into */
+.stage{margin:14px 26px 0;padding:22px 18px 18px;border-radius:18px;background:color-mix(in srgb,var(--card) 70%,transparent);border:1px solid var(--border);position:relative}
+.stage .lbls{display:flex;gap:10px;margin-bottom:10px;font:600 10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;color:var(--faint);text-transform:uppercase}
+.bar{display:flex;align-items:center;gap:12px;min-height:56px}
+.zone{position:relative;display:flex;align-items:center;gap:4px;min-height:48px;padding:6px;border-radius:999px;background:color-mix(in srgb,var(--text) 5%,transparent);border:1px solid var(--border);transition:box-shadow .18s,border-color .18s,background .18s}
+.zone.left{min-width:64px}
+.zone.addr{flex:1;min-width:220px;padding-left:14px}
+.zone.addr .where{flex:1;display:flex;align-items:center;gap:9px;color:var(--faint);font-size:13px;white-space:nowrap;overflow:hidden}
+.zone.addr .where .lk{width:11px;height:11px;background:currentColor;-webkit-mask:var(--lock) center/contain no-repeat;mask:var(--lock) center/contain no-repeat;flex:none}
+.zone.right{background:none;border-color:transparent;gap:8px;padding:6px 0}
+.zone.right .it{background:color-mix(in srgb,var(--text) 5%,transparent);border:1px solid var(--border)}
+.zone.over{border-color:color-mix(in srgb,var(--ap-b) 70%,transparent)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--ap-b) 18%,transparent),0 0 24px color-mix(in srgb,var(--ap-b) 22%,transparent)}
+.zone.no{opacity:.35}
+.zone .empty{color:var(--faint);font-size:12px;padding:0 10px;white-space:nowrap}
+.it{position:relative;flex:none;height:36px;min-width:36px;padding:0 9px;border-radius:999px;display:flex;align-items:center;justify-content:center;gap:7px;cursor:grab;color:var(--text);transition:background .15s,transform .22s cubic-bezier(.2,.8,.2,1),opacity .15s}
+.it:hover{background:var(--hover)}
+.it .ic{width:16px;height:16px;background:currentColor;-webkit-mask:var(--i) center/contain no-repeat;mask:var(--i) center/contain no-repeat;flex:none}
+.it .ct{font:600 11.5px ui-monospace,Menlo,monospace;color:var(--dim)}
+.it .x{position:absolute;top:-5px;right:-5px;width:17px;height:17px;border-radius:50%;background:var(--text);color:var(--bg);display:grid;place-items:center;font-size:11px;line-height:1;opacity:0;transform:scale(.6);transition:.15s;cursor:pointer;border:2px solid var(--bg)}
+.it:hover .x{opacity:1;transform:none}
+.it .nm{position:absolute;top:calc(100% + 7px);left:50%;transform:translate(-50%,-3px);white-space:nowrap;font-size:11px;color:var(--dim);background:var(--card);border:1px solid var(--border);padding:3px 8px;border-radius:7px;opacity:0;pointer-events:none;transition:.12s;z-index:4}
+.it:hover .nm{opacity:1;transform:translate(-50%,0)}
+body.dragging .it .nm,body.dragging .it .x{display:none}
+.it.ext{gap:3px;padding:0 8px}
+.it.ext img{width:18px;height:18px;border-radius:4px}
+.it.lens{cursor:default}
+.it.lens .ic{background:linear-gradient(135deg,var(--ap-t),var(--ap-b),var(--ap-v))}
+.it.lens::after{content:"";position:absolute;inset:-1px;border-radius:999px;border:1px solid color-mix(in srgb,var(--ap-b) 45%,transparent)}
+.it.hole{opacity:0}
+.caret{position:absolute;width:3px;height:30px;border-radius:3px;background:linear-gradient(180deg,var(--ap-t),var(--ap-b),var(--ap-v));box-shadow:0 0 10px color-mix(in srgb,var(--ap-b) 70%,transparent);pointer-events:none;display:none;z-index:5;transition:left .12s,top .12s}
+.tip{margin-top:12px;color:var(--faint);font-size:12px;display:flex;gap:14px;flex-wrap:wrap}
+.tip b{color:var(--dim);font-weight:600}
+
+main{flex:1;min-height:0;overflow:auto;padding:4px 26px 26px}
+h2{margin:22px 0 10px;font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em;color:var(--faint);text-transform:uppercase;display:flex;align-items:center;gap:10px}
+h2::after{content:"";flex:1;height:1px;background:var(--line)}
+.lib{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.tile{position:relative;display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:14px;background:color-mix(in srgb,var(--card) 80%,transparent);border:1px solid var(--border);cursor:grab;transition:transform .2s cubic-bezier(.2,.8,.2,1),background .15s,border-color .15s}
+.tile:hover{background:var(--hover);transform:translateY(-1px)}
+.tile .well{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:color-mix(in srgb,var(--text) 7%,transparent);flex:none}
+.tile .well .ic{width:16px;height:16px;background:var(--text);-webkit-mask:var(--i) center/contain no-repeat;mask:var(--i) center/contain no-repeat}
+.tile b{display:block;font-weight:600;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile small{display:block;color:var(--faint);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.tile .tx{min-width:0}
+.tile.used{opacity:.42}
+.tile.used::after{content:"";position:absolute;top:9px;right:9px;width:6px;height:6px;border-radius:50%;background:linear-gradient(135deg,var(--ap-t),var(--ap-v))}
+
+.presets{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+.pre{padding:12px;border-radius:14px;border:1px solid var(--border);background:color-mix(in srgb,var(--card) 80%,transparent);cursor:pointer;text-align:left;transition:.15s}
+.pre:hover{background:var(--hover)}
+.pre.on{border-color:color-mix(in srgb,var(--ap-b) 60%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--ap-b) 14%,transparent)}
+.pre b{font-size:12.5px;font-weight:600}
+.pre small{display:block;color:var(--faint);font-size:11px;margin-top:2px}
+.mini{display:flex;align-items:center;gap:4px;margin-top:10px;height:16px}
+.mini i{height:10px;border-radius:5px;background:color-mix(in srgb,var(--text) 22%,transparent)}
+.mini i.a{flex:1;background:color-mix(in srgb,var(--text) 12%,transparent)}
+.mini i.l{width:10px;background:linear-gradient(135deg,var(--ap-t),var(--ap-v))}
+
+.opts{display:flex;flex-wrap:wrap;gap:10px}
+.opt{flex:1 1 260px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-radius:14px;border:1px solid var(--border);background:color-mix(in srgb,var(--card) 80%,transparent)}
+.opt span b{display:block;font-size:12.5px;font-weight:600}
+.opt span small{color:var(--faint);font-size:11px}
+.seg{display:flex;background:var(--pill);border:1px solid var(--border);border-radius:999px;padding:2px;flex:none}
+.seg button{border:0;background:none;height:24px;padding:0 11px;border-radius:999px;color:var(--dim);cursor:pointer;font-size:12px}
+.seg button.on{background:var(--active);color:var(--text);font-weight:600}
+.reset{margin-top:16px;background:none;border:0;color:var(--faint);cursor:pointer;font-size:12px;text-decoration:underline;text-underline-offset:3px}
+.reset:hover{color:var(--text)}
+
+.drag{position:fixed;z-index:50;pointer-events:none;height:40px;min-width:40px;padding:0 12px;border-radius:999px;display:flex;align-items:center;gap:8px;color:var(--text);
+  background:color-mix(in srgb,var(--card) 92%,transparent);border:1px solid color-mix(in srgb,var(--ap-b) 50%,transparent);
+  box-shadow:0 14px 34px rgba(0,0,0,.35),0 0 20px color-mix(in srgb,var(--ap-b) 25%,transparent);transform:translate(-50%,-50%) scale(1.06);font-size:12.5px;font-weight:600}
+.drag .ic{width:16px;height:16px;background:currentColor;-webkit-mask:var(--i) center/contain no-repeat;mask:var(--i) center/contain no-repeat}
+.drag.out{opacity:.55;border-color:var(--border)}
+.drag.out::after{content:"Remove";position:absolute;left:50%;top:calc(100% + 6px);transform:translateX(-50%);font-size:11px;color:var(--faint);font-weight:500}
+body.dragging,body.dragging *{cursor:grabbing!important}
+@media (prefers-reduced-motion:reduce){.done{animation:none}}
+</style>
+</head>
+<body>
+<div class="aura" aria-hidden="true"><i></i><i></i><i></i></div>
+<header>
+  <div class="ttl"><h1>Customise Toolbar</h1><p class="sub">Drag items into the bar, between groups, or out to remove them. The real bar above changes as you go.</p></div>
+  <button class="done" id="done">Done</button>
+</header>
+<section class="stage" id="stage">
+  <div class="bar" id="bar">
+    <div class="zone left" data-z="left"></div>
+    <div class="zone addr" data-z="address"><div class="where"><i class="lk"></i><span>Where you are</span></div></div>
+    <div class="zone right" data-z="right"></div>
+  </div>
+  <div class="caret" id="caret"></div>
+  <div class="tip"><span><b>Left</b> one capsule, for moving</span><span><b>Address</b> about this page</span><span><b>Right</b> the browser, Lens always last</span></div>
+</section>
+<main>
+  <h2>Items</h2>
+  <div class="lib" id="lib"></div>
+  <h2>Start from</h2>
+  <div class="presets" id="presets"></div>
+  <h2>Options</h2>
+  <div class="opts">
+    <div class="opt"><span><b>Address bar width</b><small>How wide the middle grows</small></span>
+      <div class="seg" id="width"><button data-v="0">Full</button><button data-v="1">Medium</button><button data-v="2">Compact</button></div></div>
+    <div class="opt"><span><b>Downloads button</b><small>When it's in the bar</small></span>
+      <div class="seg" id="dl"><button data-v="0">While downloading</button><button data-v="1">Always</button></div></div>
+  </div>
+  <button class="reset" id="reset">Reset to the Iris default</button>
+</main>
+<script nonce="{{NONCE}}">
+const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+const ZK = {left: 'L', address: 'A', right: 'R'}, HOME = {L: 'left', A: 'address', R: 'right'};
+let S = null, cat = {}, layout = {left: [], address: [], right: []};
+
+const PRESETS = [
+  {n: 'Iris', d: 'Moving left, the browser right', l: {left: ['back', 'forward', 'reload'], address: ['pip', 'star'], right: ['shield', 'downloads', 'extensions']}},
+  {n: 'Quiet', d: 'Just the address and Lens', l: {left: [], address: ['pip'], right: ['downloads']}},
+  {n: 'Navigator', d: 'Everything for moving around', l: {left: ['back', 'forward', 'reload', 'home', 'newtab'], address: ['pip', 'reader', 'star'], right: ['shield', 'downloads', 'tabs', 'extensions']}},
+  {n: 'Workbench', d: 'Tools within reach', l: {left: ['back', 'forward', 'reload'], address: ['pip', 'find', 'reader', 'share', 'star'], right: ['shield', 'split', 'history', 'bookmarks', 'downloads', 'extensions']}},
+];
+
+function icon(k) { return cat[k] ? `url("${cat[k].icon}")` : 'none'; }
+function used(k) { return Object.values(layout).some(a => a.includes(k)); }
+function same(a, b) { return ['left', 'address', 'right'].every(z => (a[z] || []).join() === (b[z] || []).join()); }
+
+function itemEl(k, z) {
+  const e = document.createElement('div');
+  e.className = 'it'; e.dataset.k = k; e.dataset.z = z; e.setAttribute('aria-label', cat[k].title);
+  if (k === 'extensions') {
+    const i = document.createElement('i'); i.className = 'ic'; i.style.setProperty('--i', `url("${S.puzzle || cat[k].icon}")`); e.append(i);   // the button that opens them
+  } else {
+    const i = document.createElement('i'); i.className = 'ic'; i.style.setProperty('--i', icon(k)); e.append(i);
+    if (k === 'shield' && S.blocked > 0) { const c = document.createElement('span'); c.className = 'ct'; c.textContent = S.blocked > 999 ? '999+' : S.blocked; e.append(c); }   // this page's real count
+  }
+  const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = cat[k].title; e.append(nm);
+  const x = document.createElement('span'); x.className = 'x'; x.textContent = '×'; x.setAttribute('aria-label', 'Remove');
+  x.addEventListener('pointerdown', ev => ev.stopPropagation());
+  x.addEventListener('click', ev => { ev.stopPropagation(); remove(k); });
+  e.append(x);
+  return e;
+}
+function render() {
+  const zl = $('.zone.left'), za = $('.zone.addr'), zr = $('.zone.right');
+  for (const z of [zl, za, zr]) z.querySelectorAll('.it,.empty').forEach(n => n.remove());
+  for (const k of layout.left) zl.append(itemEl(k, 'left'));
+  if (!layout.left.length) { const e = document.createElement('span'); e.className = 'empty'; e.textContent = 'Drop here'; zl.append(e); }
+  for (const k of layout.address) za.append(itemEl(k, 'address'));
+  for (const k of layout.right) zr.append(itemEl(k, 'right'));
+  const lens = document.createElement('div'); lens.className = 'it lens'; lens.setAttribute('aria-label', 'Lens stays in the corner');
+  const li = document.createElement('i'); li.className = 'ic'; li.style.setProperty('--i', `url("${S.lens}")`); lens.append(li); zr.append(lens);
+  // library
+  const lib = $('#lib'); lib.textContent = '';
+  for (const c of S.catalog) {
+    const t = document.createElement('div'); t.className = 'tile' + (used(c.k) ? ' used' : ''); t.dataset.k = c.k;
+    t.innerHTML = '<div class="well"><i class="ic"></i></div><div class="tx"><b></b><small></small></div>';
+    t.querySelector('.ic').style.setProperty('--i', `url("${c.icon}")`);
+    t.querySelector('b').textContent = c.title; t.querySelector('small').textContent = used(c.k) ? 'In the bar · click to remove' : c.desc;
+    lib.append(t);
+  }
+  // presets
+  const pr = $('#presets'); pr.textContent = '';
+  for (const p of PRESETS) {
+    const b = document.createElement('button'); b.className = 'pre' + (same(p.l, layout) ? ' on' : '');
+    b.innerHTML = '<b></b><small></small><div class="mini"></div>';
+    b.querySelector('b').textContent = p.n; b.querySelector('small').textContent = p.d;
+    const m = b.querySelector('.mini');
+    const add = (cls, w) => { const i = document.createElement('i'); if (cls) i.className = cls; if (w) i.style.width = w + 'px'; m.append(i); };
+    if (p.l.left.length) add('', p.l.left.length * 9 + 4);
+    add('a'); for (const k of p.l.right) add('', 10); add('l');
+    b.onclick = () => apply(JSON.parse(JSON.stringify(p.l)));
+    pr.append(b);
+  }
+  $$('#width button').forEach(b => b.classList.toggle('on', +b.dataset.v === S.width));
+  $$('#dl button').forEach(b => b.classList.toggle('on', +b.dataset.v === (S.dlAlways ? 1 : 0)));
+}
+// FLIP: items glide to their new places instead of jumping
+function flip(fn) {
+  const before = new Map($$('.zone .it[data-k]').map(e => [e.dataset.k, e.getBoundingClientRect()]));
+  fn();
+  for (const e of $$('.zone .it[data-k]')) {
+    const b = before.get(e.dataset.k); if (!b) { e.animate([{transform: 'scale(.6)', opacity: 0}, {transform: 'none', opacity: 1}], {duration: 240, easing: 'cubic-bezier(.2,.8,.2,1)'}); continue; }
+    const a = e.getBoundingClientRect(), dx = b.left - a.left, dy = b.top - a.top;
+    if (dx || dy) e.animate([{transform: `translate(${dx}px,${dy}px)`}, {transform: 'none'}], {duration: 240, easing: 'cubic-bezier(.2,.8,.2,1)'});
+  }
+}
+async function apply(next) {
+  flip(() => { layout = next; render(); });
+  try { layout = await call('toolbar.set', {layout}); } catch (e) {}
+  render();
+}
+function without(k) { const n = {}; for (const z in layout) n[z] = layout[z].filter(x => x !== k); return n; }
+function remove(k) { apply(without(k)); }
+function add(k) { const c = cat[k]; const n = without(k); n[HOME[c.home]].push(k); apply(n); }
+
+// dragging, by pointer: a lifted chip follows you, the group under it lights, a caret shows where it lands
+let drag = null;
+function zoneAt(x, y) {
+  for (const z of $$('.zone')) { const r = z.getBoundingClientRect(); if (x >= r.left - 14 && x <= r.right + 14 && y >= r.top - 22 && y <= r.bottom + 22) return z; }
+  return null;
+}
+function slotIn(zone, x) {
+  const items = [...zone.querySelectorAll('.it[data-k]')].filter(e => e.dataset.k !== drag.k);
+  let i = 0; for (const e of items) { const r = e.getBoundingClientRect(); if (x > r.left + r.width / 2) i++; }
+  return {i, items};
+}
+function showCaret(zone, slot) {
+  const c = $('#caret'), st = $('#stage').getBoundingClientRect(), zr = zone.getBoundingClientRect();
+  let x;
+  if (slot.items.length === 0) x = zone.dataset.z === 'address' ? zr.right - 18 : zr.left + 12;
+  else if (slot.i >= slot.items.length) x = slot.items[slot.items.length - 1].getBoundingClientRect().right + 3;
+  else x = slot.items[slot.i].getBoundingClientRect().left - 3;
+  if (zone.dataset.z === 'right' && slot.i >= slot.items.length) { const lens = zone.querySelector('.lens'); if (lens) x = Math.min(x, lens.getBoundingClientRect().left - 4); }
+  c.style.display = 'block'; c.style.left = (x - st.left - 1.5) + 'px'; c.style.top = (zr.top - st.top + zr.height / 2 - 15) + 'px';
+}
+function startDrag(k, ev, src) {
+  drag = {k, from: src, x0: ev.clientX, y0: ev.clientY, live: false};
+}
+document.addEventListener('pointerdown', ev => {
+  if (ev.button !== 0 || drag) return;
+  const it = ev.target.closest('.zone .it[data-k], .tile');
+  if (!it) return;
+  ev.preventDefault();
+  try { it.setPointerCapture(ev.pointerId); } catch (e) {}
+  startDrag(it.dataset.k, ev, it);
+});
+document.addEventListener('dragstart', ev => ev.preventDefault());
+document.addEventListener('selectstart', ev => ev.preventDefault());
+document.addEventListener('pointermove', ev => {
+  if (!drag) return;
+  if (!drag.live) {
+    if (Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0) < 4) return;
+    drag.live = true; document.body.classList.add('dragging');
+    const g = document.createElement('div'); g.className = 'drag';
+    const i = document.createElement('i'); i.className = 'ic'; i.style.setProperty('--i', icon(drag.k)); g.append(i, document.createTextNode(cat[drag.k].title));
+    document.body.append(g); drag.ghost = g;
+    if (drag.from.classList.contains('it')) drag.from.classList.add('hole');
+  }
+  drag.ghost.style.left = ev.clientX + 'px'; drag.ghost.style.top = ev.clientY + 'px';
+  const z = zoneAt(ev.clientX, ev.clientY);
+  for (const e of $$('.zone')) { e.classList.remove('over'); e.classList.toggle('no', !cat[drag.k].zones.includes(ZK[e.dataset.z])); }
+  const ok = z && cat[drag.k].zones.includes(ZK[z.dataset.z]);
+  drag.ghost.classList.toggle('out', !z && drag.from.classList.contains('it'));
+  if (ok) { z.classList.add('over'); drag.slot = slotIn(z, ev.clientX); drag.zone = z; showCaret(z, drag.slot); }
+  else { drag.zone = null; $('#caret').style.display = 'none'; }
+});
+function endDrag(ev, cancel) {
+  if (!drag) return;
+  const d = drag; drag = null;
+  document.body.classList.remove('dragging'); $('#caret').style.display = 'none';
+  for (const e of $$('.zone')) e.classList.remove('over', 'no');
+  if (d.ghost) d.ghost.remove();
+  if (d.from) d.from.classList.remove('hole');
+  const later = fn => setTimeout(fn, 0);   // after the browser has finished delivering this click
+  if (!d.live) { if (d.from.classList.contains('tile') && !cancel) later(() => used(d.k) ? remove(d.k) : add(d.k)); return; }
+  if (cancel) return;
+  if (d.zone) {
+    const n = without(d.k), z = d.zone.dataset.z;
+    n[z].splice(Math.min(d.slot.i, n[z].length), 0, d.k);
+    later(() => apply(n));
+  } else if (d.from.classList.contains('it')) later(() => remove(d.k));   // dragged out of the bar: gone
+}
+document.addEventListener('pointerup', ev => endDrag(ev, false));
+document.addEventListener('pointercancel', ev => endDrag(ev, true));
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') { if (drag) endDrag(ev, true); else call('toolbar.done'); }
+  if (ev.key === 'Enter' && !drag) call('toolbar.done');
+});
+$('#done').onclick = () => call('toolbar.done');
+$$('#width button').forEach(b => b.onclick = async () => { S.width = +b.dataset.v; render(); await call('toolbar.width', {v: S.width}); });
+$$('#dl button').forEach(b => b.onclick = async () => { S.dlAlways = b.dataset.v === '1'; render(); await call('toolbar.dlalways', {on: S.dlAlways}); });
+$('#reset').onclick = async () => { const s = await call('toolbar.reset'); flip(() => { load(s); }); };
+
+function load(s) {
+  S = s; cat = {}; for (const c of s.catalog) cat[c.k] = c;
+  layout = s.layout;
+  document.documentElement.style.setProperty('--lock', `url("${s.lock}")`);
+  render();
+}
+call('toolbar.get').then(load);
+</script>
+</body>
+</html>

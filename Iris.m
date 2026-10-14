@@ -96,22 +96,76 @@ static NSString *const kAddrWidth     = @"addressBarWidth";      // 0 full, 1 me
 static NSString *const kShelfNoHover  = @"shelfNoHover";         // Monolith: the bottom edge doesn't bring the tabs up
 static NSString *const kShelfNoHint   = @"shelfNoHint";          // Monolith: no handle at the bottom of the page
 static NSString *const kExtPinned     = @"pinnedExtensions";     // ids; missing = everything pinned
-static NSArray<NSString *> *OptInButtons(void) { return @[@"home", @"newtab", @"reader", @"share", @"dlalways"]; }
+// The toolbar is three groups, each an ordered list you arrange in Customise Toolbar:
+//   left (one capsule), address (inside the address bar, at its right end), right (each on its own, Lens always last).
+static NSString *const kToolbarLayout = @"toolbarLayout";
+// key, name, SF Symbol, which groups it may live in (L, A, R), its home group when added, a line about it
+static NSArray<NSArray *> *ToolbarCatalog(void) {
+    static NSArray *c;
+    if (!c) c = @[
+        @[@"back", @"Back", @"chevron.left", @"LAR", @"L", @"The page before"],
+        @[@"forward", @"Forward", @"chevron.right", @"LAR", @"L", @"The page after"],
+        @[@"reload", @"Reload", @"arrow.clockwise", @"LAR", @"L", @"Stops a page while it loads"],
+        @[@"home", @"Home", @"house", @"LAR", @"L", @"Your new-tab page"],
+        @[@"newtab", @"New Tab", @"plus", @"LAR", @"L", @"Same as ⌘T"],
+        @[@"star", @"Bookmark", @"star", @"LAR", @"A", @"Save or edit this page"],
+        @[@"pip", @"Picture in Picture", @"pip.enter", @"LAR", @"A", @"Appears while a video plays"],
+        @[@"reader", @"Reader", @"doc.plaintext", @"LAR", @"A", @"Just the article"],
+        @[@"share", @"Share", @"square.and.arrow.up", @"LAR", @"A", @"Send the page somewhere"],
+        @[@"find", @"Find", @"magnifyingglass", @"LAR", @"A", @"Find on the page"],
+        @[@"shield", @"Blocking", @"checkmark.shield", @"LAR", @"R", @"With the count of what it stopped"],
+        @[@"downloads", @"Downloads", @"tray.and.arrow.down", @"LAR", @"R", @"While something downloads"],
+        @[@"split", @"Split View", @"rectangle.split.2x1", @"LAR", @"R", @"Two pages side by side"],
+        @[@"tabs", @"Tabs", @"square.on.square", @"LAR", @"R", @"Brings your tabs out"],
+        @[@"history", @"History", @"clock.arrow.circlepath", @"LAR", @"R", @"Where you've been"],
+        @[@"bookmarks", @"Bookmarks", @"book", @"LAR", @"R", @"All your bookmarks"],
+        @[@"private", @"Private Window", @"eye.slash", @"LAR", @"R", @"Nothing is kept"],
+        @[@"extensions", @"Extensions", @"puzzlepiece.extension", @"R", @"R", @"All your extensions, in a panel"],
+    ];
+    return c;
+}
+static NSArray *ToolbarItem(NSString *k) { for (NSArray *i in ToolbarCatalog()) if ([i[0] isEqualToString:k]) return i; return nil; }
+static NSDictionary *ToolbarLayoutDefault(void) {
+    return @{@"left": @[@"back", @"forward", @"reload"], @"address": @[@"pip", @"star"], @"right": @[@"shield", @"downloads", @"extensions"]};
+}
+// The stored arrangement, cleaned: known keys only, each once, and only in a group it may live in.
+static NSDictionary *ToolbarSanitize(NSDictionary *d) {
+    if (![d isKindOfClass:NSDictionary.class]) return ToolbarLayoutDefault();
+    NSMutableSet *seen = [NSMutableSet set]; NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    NSDictionary *zc = @{@"left": @"L", @"address": @"A", @"right": @"R"};
+    for (NSString *z in @[@"left", @"address", @"right"]) {
+        NSMutableArray *a = [NSMutableArray array];
+        for (id k in [d[z] isKindOfClass:NSArray.class] ? d[z] : @[]) {
+            NSArray *it = [k isKindOfClass:NSString.class] ? ToolbarItem(k) : nil;
+            if (!it || [seen containsObject:k] || ![it[3] containsString:zc[z]]) continue;
+            [seen addObject:k]; [a addObject:k];
+        }
+        out[z] = a;
+    }
+    return out;
+}
+static NSDictionary *ToolbarLayout(void) { id d = [Defaults() objectForKey:kToolbarLayout]; return d ? ToolbarSanitize(d) : ToolbarLayoutDefault(); }
+static NSString *ToolbarZoneOf(NSString *k) { NSDictionary *L = ToolbarLayout(); for (NSString *z in @[@"left", @"address", @"right"]) if ([L[z] containsObject:k]) return z; return nil; }
+static NSArray<NSString *> *OptInButtons(void) { return @[@"dlalways"]; }
 static BOOL ToolbarShows(NSString *key) {
-    if ([OptInButtons() containsObject:key]) return [[Defaults() arrayForKey:kShowExtra] containsObject:key];
-    return ![[Defaults() arrayForKey:@"hiddenToolbarButtons"] containsObject:key];
+    if ([key isEqualToString:@"dlalways"]) return [[Defaults() arrayForKey:kShowExtra] containsObject:key];
+    if ([key isEqualToString:@"sidebar"]) return NO;
+    return ToolbarZoneOf(key) != nil;
 }
 static void SetToolbarShows(NSString *key, BOOL on) {
-    BOOL opt = [OptInButtons() containsObject:key];
-    NSString *store = opt ? kShowExtra : @"hiddenToolbarButtons";
-    NSMutableArray *a = [[Defaults() arrayForKey:store] ?: @[] mutableCopy];
-    [a removeObject:key];
-    if (opt == on) [a addObject:key];
-    [Defaults() setObject:a forKey:store];
+    if ([key isEqualToString:@"dlalways"]) {
+        NSMutableArray *a = [[Defaults() arrayForKey:kShowExtra] ?: @[] mutableCopy];
+        [a removeObject:key]; if (on) [a addObject:key];
+        [Defaults() setObject:a forKey:kShowExtra]; return;
+    }
+    NSArray *it = ToolbarItem(key); if (!it) return;
+    NSMutableDictionary *L = [NSMutableDictionary dictionary];
+    for (NSString *z in @[@"left", @"address", @"right"]) { NSMutableArray *a = [ToolbarLayout()[z] mutableCopy]; [a removeObject:key]; L[z] = a; }
+    if (on) { NSString *home = @{@"L": @"left", @"A": @"address", @"R": @"right"}[it[4]]; [L[home] addObject:key]; }
+    [Defaults() setObject:L forKey:kToolbarLayout];
 }
 static BOOL ExtensionPinned(NSString *ident) {
-    NSArray *p = [Defaults() arrayForKey:kExtPinned];
-    return !p || [p containsObject:ident];
+    return [[Defaults() arrayForKey:kExtPinned] containsObject:ident];
 }
 
 // Debug log next to the source when it exists (~/Documents/Iris/iris.log).
@@ -437,6 +491,9 @@ static NSURL *StripTracking(NSURL *u) {
 
 @interface VTab : NSObject
 @property (strong) VPage *web;              // nil while asleep or on the new tab page
+@property (strong) VPage *homeBack, *homeFwd;   // Home sits in the tab's history: the page you left for it (Back), the one you came back from (Forward)
+@property BOOL homeAhead;                        // you came Back from Home to this page, so Forward from it returns there
+@property BOOL homeAnchor;                       // this page was opened from Home, so Back from its first entry returns there
 @property (copy) NSString *url, *title;
 @property (strong) NSImage *favicon;
 @property BOOL pinned, loading, isHome, noBlock, audible, muted;
@@ -595,6 +652,12 @@ static NSURL *StripTracking(NSURL *u) {
 @interface VWindow (Shelf)   // Monolith's tab strip (v4j_shelf.m)
 - (void)showShelf:(BOOL)on;
 - (void)toggleShelf;
+- (void)toggleShelfButton:(id)s;
+- (void)toggleExtensionsPanel:(id)s;
+- (void)showHomeIn:(VTab *)t keeping:(VPage *)page asForward:(BOOL)fwd;
+- (void)restorePage:(VPage *)page in:(VTab *)t anchored:(BOOL)anchored;
+- (void)showToolbarCustomiser:(id)s;
+- (void)closeToolbarCustomiser;
 - (NSRect)shelfFrame;
 - (NSRect)shelfRestFrame;
 @end
@@ -732,7 +795,12 @@ static NSArray<VTab *> *AllTabs(BOOL includePrivate) {
     for (VWindow *w in gWindows) if (includePrivate || !w.isPrivate) [a addObjectsFromArray:w.tabs];
     return a;
 }
-static VWindow *WinOfWeb(WKWebView *v) { for (VTab *t in AllTabs(YES)) if (t.web.web == v) return t.owner; return nil; }
+static char kCustomiserKey;   // a window's Customise Toolbar overlay (its view; the page inside is its first subview's web view)
+static VWindow *WinOfWeb(WKWebView *v) {
+    for (VTab *t in AllTabs(YES)) if (t.web.web == v) return t.owner;
+    for (VWindow *w in gWindows) { NSView *c = objc_getAssociatedObject(w, &kCustomiserKey); if (c && [v isDescendantOf:c]) return w; }
+    return nil;
+}
 
 @class FExtHost;
 @interface FExtHost : NSObject <WKScriptMessageHandlerWithReply, WKURLSchemeHandler>
@@ -2471,6 +2539,9 @@ static NSString *gUpdateNotes;
 @property (strong) VBadgeButton *profileBtn;
 @property BOOL capsule;                    // Monolith: floating capsules over the page instead of a bar
 @property NSRect navRect, lensRect, avatarRect, dlRect, shieldRect, extRect;   // extRect: pinned extensions, their own capsule beside Lens
+@property (strong) NSDictionary<NSString *, VButton *> *keyed;   // every toolbar item by its key (ToolbarCatalog)
+@property (strong) NSArray<NSValue *> *glassCircles, *glassCapsules;   // the glass shapes the right group sits on
+@property (copy) NSString *layoutSig;   // which items were visible at the last layout (a change re-lays the bar)
 - (void)layoutBar;
 - (NSView *)extensionButtonFor:(NSString *)ident;
 @end
@@ -2504,8 +2575,17 @@ static NSString *gUpdateNotes;
     self.addTabBtn = [VButton symbol:@"plus" size:14 tip:@"New tab (⌘T)" target:w action:@selector(newTabAction:)];
     self.readerBtn = [VButton symbol:@"doc.plaintext" size:13 tip:@"Reader (⌃⌘R)" target:w action:@selector(toggleReader:)];
     self.shareBtn = [VButton symbol:@"square.and.arrow.up" size:13 tip:@"Share" target:w action:@selector(sharePage:)];
-    self.extMenuBtn = [VButton symbol:@"puzzlepiece.extension" size:13 tip:@"Extensions" target:self action:@selector(extensionsMenu:)];
+    self.extMenuBtn = [VButton symbol:@"puzzlepiece.extension" size:13 tip:@"Extensions" target:w action:@selector(toggleExtensionsPanel:)];
     for (NSView *v in @[self.homeBtn, self.addTabBtn, self.readerBtn, self.shareBtn, self.extMenuBtn]) [self addSubview:v];
+    // the rest of what Customise Toolbar offers
+    VButton *split = [VButton symbol:@"rectangle.split.2x1" size:13 tip:@"Split View" target:w action:@selector(toggleSplit:)];
+    VButton *tabs = [VButton symbol:@"square.on.square" size:13 tip:@"Tabs" target:w action:@selector(toggleShelfButton:)];
+    VButton *hist = [VButton symbol:@"clock.arrow.circlepath" size:13 tip:@"History (⌘Y)" target:w action:@selector(showHistory:)];
+    VButton *bms = [VButton symbol:@"book" size:13 tip:@"Bookmarks" target:w action:@selector(showBookmarks:)];
+    VButton *priv = [VButton symbol:@"eye.slash" size:13 tip:@"New Private Window (⇧⌘N)" target:nil action:@selector(newPrivateWindow:)];
+    VButton *find = [VButton symbol:@"magnifyingglass" size:13 tip:@"Find on Page (⌘F)" target:w action:@selector(showFind:)];
+    for (VButton *b in @[split, tabs, hist, bms, priv, find]) { b.hidden = YES; [self addSubview:b]; }
+    self.keyed = @{@"split": split, @"tabs": tabs, @"history": hist, @"bookmarks": bms, @"private": priv, @"find": find};
     self.dlRing = [[VRing alloc] initWithFrame:NSMakeRect(0, 0, 30, 28)]; self.dlRing.value = -1;
     self.dlRing.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [self.dlBtn addSubview:self.dlRing]; [self addSubview:self.dlBtn];
@@ -2549,6 +2629,10 @@ static NSString *gUpdateNotes;
     [self addSubview:self.infoBtn]; [self addSubview:self.starBtn];
     self.pipBtn = [VButton symbol:@"pip.enter" size:13 tip:@"Picture in Picture (⌃⌘P)" target:w action:@selector(pictureInPicture:)];
     self.pipBtn.hidden = YES; [self addSubview:self.pipBtn];
+    NSMutableDictionary *k = [self.keyed mutableCopy];
+    [k addEntriesFromDictionary:@{@"back": self.backBtn, @"forward": self.fwdBtn, @"reload": self.reloadBtn, @"home": self.homeBtn, @"newtab": self.addTabBtn,
+                                  @"star": self.starBtn, @"pip": self.pipBtn, @"reader": self.readerBtn, @"share": self.shareBtn, @"shield": self.shieldBtn, @"downloads": self.dlBtn}];
+    self.keyed = k;
     self.leftInset = 78;
     // one button per extension with a popup (Proton Pass…), Chrome-style, left of the shield
     self.extBtns = [NSMutableArray array];
@@ -2580,29 +2664,46 @@ static NSString *gUpdateNotes;
 // Everything between them belongs to the page (clicks pass straight through).
 - (NSString *)shieldCount { return self.blocked > 0 ? (self.blocked > 999 ? @"999+" : [NSString stringWithFormat:@"%ld", (long)self.blocked]) : @""; }
 - (CGFloat)shieldWidthFor:(NSString *)n { return n.length ? 23 + ceil([n sizeWithAttributes:@{NSFontAttributeName: MMono(11, NSFontWeightMedium)}].width) + 11 : 28; }
+// Whether an item that's in the layout shows right now (some only make sense sometimes).
+- (BOOL)itemLive:(NSString *)k {
+    VTab *t = WinFor(self).current;
+    if ([k isEqualToString:@"pip"]) return t.web && (t.hasVideo || t.inPiP);
+    if ([k isEqualToString:@"star"]) return !t.isHome;
+    if ([k isEqualToString:@"downloads"]) return VDownloads.shared.worthShowing || ToolbarShows(@"dlalways");
+    if ([k isEqualToString:@"extensions"]) return FExtHost.shared.extensions.count > 0;
+    return YES;
+}
+- (NSString *)liveSignature {
+    NSMutableString *s = [NSMutableString string]; NSDictionary *L = ToolbarLayout();
+    for (NSString *z in @[@"left", @"address", @"right"]) { [s appendFormat:@"%@:", z]; for (NSString *k in L[z]) if ([self itemLive:k]) [s appendFormat:@"%@,", k]; }
+    [s appendFormat:@"|%@|%d|%.0f", [self shieldCount], gUpdateReady * 2 + gUpdating, NSWidth(self.bounds)];
+    return s;
+}
 - (void)layoutCapsule {
     CGFloat W = NSWidth(self.bounds), y = 4;   // slim: 28-point capsules in a 36-point band
     self.sideBtn.hidden = YES; self.extMenuBtn.hidden = YES;   // no sidebar any more; extensions live in Lens
-    NSMutableArray *navBtns = [NSMutableArray array];
-    for (NSArray *b in @[@[@"back", self.backBtn], @[@"forward", self.fwdBtn], @[@"reload", self.reloadBtn], @[@"home", self.homeBtn], @[@"newtab", self.addTabBtn]]) {
-        VButton *v = b[1]; v.hidden = !ToolbarShows(b[0]);
-        if (!v.hidden) { [navBtns addObject:v]; v.symbolSize = v == self.reloadBtn ? 12 : 12.5; }
-    }
-    self.readerBtn.hidden = !ToolbarShows(@"reader"); self.shareBtn.hidden = !ToolbarShows(@"share");
     self.privateBadge = NSZeroRect; self.profileRect = NSZeroRect;
     self.avatarRect = NSZeroRect; self.profileBtn.hidden = YES;   // your profile lives in Lens
-    for (VButton *b in @[self.reloadBtn, self.shieldBtn, self.shareBtn, self.readerBtn, self.pipBtn, self.starBtn, self.infoBtn, self.menuBtn, self.dlBtn, self.backBtn, self.fwdBtn, self.homeBtn, self.addTabBtn]) b.round = YES;
+    NSDictionary *L = ToolbarLayout();
+    for (VButton *b in self.keyed.allValues) { b.hidden = YES; b.round = YES; b.bare = NO; }
+    self.infoBtn.round = YES; self.menuBtn.round = YES;
+    NSMutableArray *circles = [NSMutableArray array], *capsules = [NSMutableArray array];
+    NSString *count = [self shieldCount];
+    self.shieldRect = NSZeroRect; self.dlRect = NSZeroRect; self.extRect = NSZeroRect;
+    self.shieldBtn.badge = count; self.shieldBtn.symbolShift = 0;
+    // the width an item takes in a group (the shield grows with its count)
+    CGFloat (^widthOf)(NSString *, CGFloat) = ^CGFloat(NSString *k, CGFloat base) {
+        if ([k isEqualToString:@"shield"] && count.length) return [self shieldWidthFor:count] - 28 + base;
+        return base;
+    };
+    void (^shieldShift)(CGFloat) = ^(CGFloat w) { self.shieldBtn.symbolShift = count.length ? round(14 - w / 2) : 0; };
 
-    // the right group, laid out from the corner inward
+    // the right group, from the corner inward: Lens, then a waiting update, then your items in reverse
     CGFloat r = W - 12;
     self.lensRect = NSMakeRect(r - 28, y, 28, 28); self.menuBtn.frame = self.lensRect; r -= 28 + 6;
+    [circles addObject:[NSValue valueWithRect:self.lensRect]];
     self.menuBtn.symbolName = @"camera.aperture"; self.menuBtn.symbolSize = 13; self.menuBtn.aperture = YES; self.menuBtn.toolTip = @"Lens: this page, extensions, zoom and settings";
-    self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);   // Lens: the browser; the shield: blocking; the lock: this site
-    NSMutableArray<NSButton *> *exts = [NSMutableArray array];
-    for (NSButton *b in self.extBtns) { b.hidden = !ExtensionPinned(b.identifier); if (!b.hidden) [exts addObject:b]; }
-    CGFloat extW = exts.count ? 6 + exts.count * 28 : 0;
-    if (extW) { self.extRect = NSMakeRect(r - extW, y, extW, 28); r -= extW + 6; } else self.extRect = NSZeroRect;
-    for (NSUInteger i = 0; i < exts.count; i++) exts[i].frame = NSMakeRect(NSMinX(self.extRect) + 3 + i * 28, y + 5, 28, 18);
+    self.menuBtn.action = @selector(toggleLens:); self.shieldBtn.action = @selector(toggleShieldPanel:); self.infoBtn.action = @selector(toggleSitePanel:);
     self.updateBtn.hidden = !gUpdateReady;
     if (gUpdateReady) {
         CGFloat upW = gUpdating ? 78 : 64;
@@ -2610,22 +2711,45 @@ static NSString *gUpdateNotes;
         self.updateBtn.toolTip = gUpdateNotes.length ? [@"A newer Iris is ready. What changed:\n" stringByAppendingString:gUpdateNotes] : @"A newer Iris is ready: click to switch to it (your tabs come back).";
         self.updateBtn.needsDisplay = YES;
     }
-    BOOL dl = VDownloads.shared.worthShowing || ToolbarShows(@"dlalways");
-    self.dlBtn.hidden = !dl;
-    if (dl) { self.dlRect = NSMakeRect(r - 28, y, 28, 28); self.dlBtn.frame = self.dlRect; self.dlBtn.symbolSize = 11.5; r -= 28 + 6; } else self.dlRect = NSZeroRect;
-    self.shieldBtn.hidden = !ToolbarShows(@"shield");
-    if (!self.shieldBtn.hidden) {
-        NSString *n = [self shieldCount]; CGFloat sw = [self shieldWidthFor:n];
-        self.shieldRect = NSMakeRect(r - sw, y, sw, 28); r -= sw + 6;
-        self.shieldBtn.frame = self.shieldRect; self.shieldBtn.symbolSize = 11.5; self.shieldBtn.bare = YES;
-        self.shieldBtn.symbolShift = n.length ? round(14 - sw / 2) : 0;
-        if (![self.shieldBtn.badge ?: @"" isEqualToString:n]) self.shieldBtn.badge = n;
-        self.shieldBtn.needsDisplay = YES;
-    } else self.shieldRect = NSZeroRect;
-    CGFloat rightEdge = r;   // the left and centre groups stay clear of this
+    NSMutableArray<NSButton *> *exts = [NSMutableArray array];
+    for (NSButton *b in self.extBtns) { b.hidden = YES; if (ExtensionPinned(b.identifier)) [exts addObject:b]; }
+    for (NSString *k in [L[@"right"] reverseObjectEnumerator]) {
+        if (![self itemLive:k]) continue;
+        if ([k isEqualToString:@"extensions"]) {   // the puzzle (all of them, in a panel); any you've pinned sit just left of it
+            self.extMenuBtn.hidden = NO; self.extMenuBtn.round = YES; self.extMenuBtn.symbolSize = 12.5;
+            self.extMenuBtn.frame = NSMakeRect(r - 28, y, 28, 28); r -= 28 + 6;
+            [circles addObject:[NSValue valueWithRect:self.extMenuBtn.frame]];
+            if (exts.count) {
+                CGFloat extW = 6 + exts.count * 28;
+                self.extRect = NSMakeRect(r - extW, y, extW, 28); r -= extW + 6;
+                for (NSUInteger i = 0; i < exts.count; i++) { exts[i].hidden = NO; exts[i].frame = NSMakeRect(NSMinX(self.extRect) + 3 + i * 28, y + 5, 28, 18); }
+                [capsules addObject:[NSValue valueWithRect:self.extRect]];
+            }
+            continue;
+        }
+        VButton *b = self.keyed[k]; b.hidden = NO;
+        if ([k isEqualToString:@"shield"] && count.length) {
+            CGFloat sw = [self shieldWidthFor:count];
+            b.frame = NSMakeRect(r - sw, y, sw, 28); b.bare = YES; shieldShift(sw); r -= sw + 6;
+            [capsules addObject:[NSValue valueWithRect:b.frame]];
+        } else {
+            b.frame = NSMakeRect(r - 28, y, 28, 28); r -= 28 + 6;
+            [circles addObject:[NSValue valueWithRect:b.frame]];
+        }
+        b.symbolSize = 12;
+        if ([k isEqualToString:@"shield"]) self.shieldRect = b.frame;
+        if ([k isEqualToString:@"downloads"]) self.dlRect = b.frame;
+    }
+    CGFloat rightEdge = r;
 
-    // the left and centre groups, centred in the window (and pushed left if the right group needs the room)
-    CGFloat navW = navBtns.count ? 6 + navBtns.count * 29 : 0;
+    // the left group: one capsule
+    NSMutableArray *left = [NSMutableArray array];
+    for (NSString *k in L[@"left"]) if ([self itemLive:k]) [left addObject:k];
+    CGFloat navW = 0; for (NSString *k in left) navW += widthOf(k, 29); if (left.count) navW += 6;
+    // the address group: inside the bar, at its right end
+    NSMutableArray *addr = [NSMutableArray array];
+    for (NSString *k in L[@"address"]) if ([self itemLive:k]) [addr addObject:k];
+
     NSInteger widthMode = [Defaults() integerForKey:kAddrWidth];   // Full, Medium, Compact
     CGFloat maxPill = widthMode == 2 ? 420 : widthMode == 1 ? 560 : 720;
     CGFloat avail = rightEdge - self.leftInset - 8 - (navW ? navW + 6 : 0);
@@ -2633,19 +2757,37 @@ static NSString *gUpdateNotes;
     CGFloat total = (navW ? navW + 6 : 0) + pillW;
     CGFloat x = MAX(self.leftInset, MIN(round((W - total) / 2), rightEdge - total));
     self.navRect = navW ? NSMakeRect(x, y, navW, 28) : NSZeroRect;
-    for (NSUInteger i = 0; i < navBtns.count; i++) ((NSView *)navBtns[i]).frame = NSMakeRect(x + 3 + i * 29, y, 29, 28);
+    CGFloat nx = x + 3;
+    for (NSString *k in left) {
+        VButton *b = self.keyed[k]; b.hidden = NO; CGFloat bw = widthOf(k, 29);
+        b.frame = NSMakeRect(nx, y, bw, 28); b.symbolSize = [k isEqualToString:@"reload"] ? 12 : 12.5; nx += bw;
+        if ([k isEqualToString:@"shield"]) { b.bare = YES; shieldShift(bw); self.shieldRect = b.frame; }
+        if ([k isEqualToString:@"downloads"]) self.dlRect = NSZeroRect;   // inside the capsule, not a circle of its own
+    }
     if (navW) x += navW + 6;
     self.pill = NSMakeRect(x, y, pillW, 28);
     self.infoBtn.frame = NSMakeRect(x + 7, y + 3, 22, 22);
-    [self placePillButtons];
+    CGFloat pr = NSMaxX(self.pill) - 6;
+    for (NSString *k in [addr reverseObjectEnumerator]) {
+        VButton *b = self.keyed[k]; b.hidden = NO; CGFloat bw = [k isEqualToString:@"shield"] && count.length ? [self shieldWidthFor:count] - 4 : 24;
+        b.frame = NSMakeRect(pr - bw, y + 3, bw, 22); b.symbolSize = 11.5; pr -= bw + 1;
+        if ([k isEqualToString:@"shield"]) { b.symbolShift = count.length ? round(13 - bw / 2) : 0; self.shieldRect = b.frame; }
+    }
+    CGFloat fx = NSMaxX(self.infoBtn.frame) + 4;
+    self.field.frame = NSMakeRect(fx, y + 6, MAX(60, pr - fx - 6), 17);
+    self.dlRing.frame = self.dlBtn.bounds;
+    self.glassCircles = circles; self.glassCapsules = capsules;
+    self.layoutSig = [self liveSignature];
+    for (VButton *b in self.keyed.allValues) b.needsDisplay = YES;
     self.needsDisplay = YES;
 }
 - (NSView *)hitTest:(NSPoint)p {
     if (!self.capsule || self.hidden) return [super hitTest:p];
     NSPoint q = [self convertPoint:p fromView:self.superview];
     NSRect up = self.updateBtn.hidden ? NSZeroRect : self.updateBtn.frame;
-    for (NSValue *v in @[[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill], [NSValue valueWithRect:self.dlRect], [NSValue valueWithRect:self.lensRect], [NSValue valueWithRect:self.avatarRect], [NSValue valueWithRect:self.extRect], [NSValue valueWithRect:self.shieldRect], [NSValue valueWithRect:up]])
-        if (NSPointInRect(q, v.rectValue)) return [super hitTest:p];
+    NSMutableArray *shapes = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.navRect], [NSValue valueWithRect:self.pill], [NSValue valueWithRect:up], nil];
+    [shapes addObjectsFromArray:self.glassCircles ?: @[]]; [shapes addObjectsFromArray:self.glassCapsules ?: @[]];
+    for (NSValue *v in shapes) if (NSPointInRect(q, v.rectValue)) return [super hitTest:p];
     return nil;   // the page underneath gets it
 }
 - (void)layoutBar {
@@ -2712,17 +2854,7 @@ static NSString *gUpdateNotes;
 // the right end of the address bar: the star, and the picture-in-picture button when the page has a video
 - (void)placePillButtons {
     if (self.capsule) {
-        if (!self.shieldBtn.hidden) {   // the count changed width: lay the right group out again
-            NSString *n = [self shieldCount];
-            if (fabs([self shieldWidthFor:n] - NSWidth(self.shieldRect)) > 0.5) { [self layoutCapsule]; return; }
-            if (![self.shieldBtn.badge ?: @"" isEqualToString:n]) { self.shieldBtn.badge = n; self.shieldBtn.needsDisplay = YES; }
-        }
-        CGFloat y = NSMinY(self.pill), r = NSMaxX(self.pill) - 6;
-        for (VButton *b in @[self.shareBtn, self.readerBtn]) if (!b.hidden) { b.frame = NSMakeRect(r - 24, y + 3, 24, 22); b.symbolSize = 11.5; r -= 25; }
-        if (!self.pipBtn.hidden) { self.pipBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.pipBtn.symbolSize = 11.5; r -= 25; }
-        if (!self.starBtn.hidden) { self.starBtn.frame = NSMakeRect(r - 24, y + 3, 24, 22); self.starBtn.symbolSize = 11.5; r -= 25; }
-        CGFloat fx = NSMaxX(self.infoBtn.frame) + 4;
-        self.field.frame = NSMakeRect(fx, y + 6, MAX(60, r - fx - 6), 17);
+        if (![[self liveSignature] isEqualToString:self.layoutSig ?: @""]) [self layoutCapsule];
         return;
     }
     CGFloat y = NSMinY(self.pill), r = NSMaxX(self.pill) - 3;
@@ -2743,7 +2875,9 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
 
 - (NSMenu *)menuForEvent:(NSEvent *)e {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil];
-    if (NSPointInRect(p, self.pill)) return nil;   // the address bar has its own menu
+    NSString *itemKey = nil;
+    for (NSString *k in self.keyed) { VButton *b = self.keyed[k]; if (!b.hidden && NSPointInRect(p, b.frame)) { itemKey = k; break; } }
+    if (!itemKey && NSPointInRect(p, self.pill)) return nil;   // the address itself has its own menu
     NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
     NSView *hit = [self hitTest:[self.superview convertPoint:e.locationInWindow fromView:nil]];
     while (hit && hit.superview != self) hit = hit.superview;
@@ -2754,16 +2888,29 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         NSMenuItem *u = [m addItemWithTitle:@"Unpin from Toolbar" action:@selector(togglePin:) keyEquivalent:@""]; u.target = self; u.representedObject = ident;
         NSMenuItem *mg = [m addItemWithTitle:@"Manage Extensions…" action:@selector(manageExtensions:) keyEquivalent:@""]; mg.target = self;
         [m addItem:NSMenuItem.separatorItem];
+    } else if (itemKey) {   // an item: move it between the groups, or take it off
+        NSArray *it = ToolbarItem(itemKey); NSString *zone = ToolbarZoneOf(itemKey);
+        NSMenuItem *h = [m addItemWithTitle:it[1] action:nil keyEquivalent:@""]; h.enabled = NO;
+        NSArray *zones = @[@[@"left", @"L", @"Move to the Left"], @[@"address", @"A", @"Move into the Address Bar"], @[@"right", @"R", @"Move to the Right"]];
+        for (NSArray *z in zones) {
+            if ([zone isEqualToString:z[0]] || ![it[3] containsString:z[1]]) continue;
+            NSMenuItem *mv = [m addItemWithTitle:z[2] action:@selector(moveItem:) keyEquivalent:@""]; mv.target = self; mv.representedObject = @[itemKey, z[0]];
+        }
+        NSMenuItem *rm = [m addItemWithTitle:@"Remove from Toolbar" action:@selector(toggleShown:) keyEquivalent:@""]; rm.target = self; rm.representedObject = itemKey;
+        [m addItem:NSMenuItem.separatorItem];
     }
-    NSMenuItem *head = [m addItemWithTitle:@"Show in Toolbar" action:nil keyEquivalent:@""]; head.enabled = NO;
-    NSArray *items = @[@[@"back", @"Back"], @[@"forward", @"Forward"], @[@"home", @"Home"], @[@"newtab", @"New Tab"], @[@"reload", @"Reload"],
-                       @[@"star", @"Bookmark Star"], @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"shield", @"Ad Blocking Shield"], @[@"dlalways", @"Downloads (always)"]];
-    for (NSArray *it in items) {
-        NSMenuItem *mi = [m addItemWithTitle:it[1] action:@selector(toggleShown:) keyEquivalent:@""];
-        mi.target = self; mi.representedObject = it[0]; mi.state = ToolbarShows(it[0]) ? NSControlStateValueOn : NSControlStateValueOff;
-        mi.indentationLevel = 1;
+    NSMenuItem *cz = [m addItemWithTitle:@"Customise Toolbar…" action:@selector(showToolbarCustomiser:) keyEquivalent:@""]; cz.target = WinFor(self);
+    cz.image = Tinted(Symbol(@"slider.horizontal.3", 13, NSFontWeightMedium), vText);
+    // what isn't in the bar yet, one click away
+    NSMenuItem *addI = [m addItemWithTitle:@"Add to Toolbar" action:nil keyEquivalent:@""];
+    NSMenu *am = [[NSMenu alloc] initWithTitle:@""];
+    for (NSArray *it in ToolbarCatalog()) {
+        if (ToolbarZoneOf(it[0])) continue;
+        NSMenuItem *x = [am addItemWithTitle:it[1] action:@selector(toggleShown:) keyEquivalent:@""]; x.target = self; x.representedObject = it[0];
+        x.image = Tinted(Symbol(it[2], 12, NSFontWeightMedium), vText);
     }
-    [m addItem:NSMenuItem.separatorItem];
+    if (!am.numberOfItems) { NSMenuItem *none = [am addItemWithTitle:@"Everything is in the bar" action:nil keyEquivalent:@""]; none.enabled = NO; }
+    addI.submenu = am;
     NSMenuItem *wi = [m addItemWithTitle:@"Address Bar Width" action:nil keyEquivalent:@""];
     NSMenu *wm = [[NSMenu alloc] initWithTitle:@""];
     NSArray *widths = @[@"Full", @"Medium", @"Compact"];
@@ -2772,15 +2919,23 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         x.target = self; x.tag = (NSInteger)i; x.state = [Defaults() integerForKey:kAddrWidth] == (NSInteger)i ? NSControlStateValueOn : NSControlStateValueOff;
     }
     wi.submenu = wm;
+    NSMenuItem *dla = [m addItemWithTitle:@"Always Show Downloads" action:@selector(toggleShown:) keyEquivalent:@""]; dla.target = self; dla.representedObject = @"dlalways";
+    dla.state = ToolbarShows(@"dlalways") ? NSControlStateValueOn : NSControlStateValueOff;
     [m addItem:NSMenuItem.separatorItem];
     NSMenuItem *rs = [m addItemWithTitle:@"Reset Toolbar" action:@selector(resetToolbar:) keyEquivalent:@""]; rs.target = self;
-    NSMenuItem *more = [m addItemWithTitle:@"Customise in Settings…" action:@selector(showSettings:) keyEquivalent:@""]; more.target = gApp;
     return m;
+}
+- (void)moveItem:(NSMenuItem *)i {
+    NSString *k = i.representedObject[0], *to = i.representedObject[1];
+    NSMutableDictionary *L = [NSMutableDictionary dictionary];
+    for (NSString *z in @[@"left", @"address", @"right"]) { NSMutableArray *a = [ToolbarLayout()[z] mutableCopy]; [a removeObject:k]; L[z] = a; }
+    [L[to] addObject:k];
+    [Defaults() setObject:ToolbarSanitize(L) forKey:kToolbarLayout]; RelayoutToolbars();
 }
 - (void)toggleShown:(NSMenuItem *)i { SetToolbarShows(i.representedObject, !ToolbarShows(i.representedObject)); RelayoutToolbars(); }
 - (void)setAddressWidth:(NSMenuItem *)i { [Defaults() setInteger:i.tag forKey:kAddrWidth]; RelayoutToolbars(); }
 - (void)resetToolbar:(id)s {
-    for (NSString *k in @[@"hiddenToolbarButtons", kShowExtra, kAddrWidth, kExtPinned]) [Defaults() removeObjectForKey:k];
+    for (NSString *k in @[@"hiddenToolbarButtons", kShowExtra, kAddrWidth, kExtPinned, kToolbarLayout]) [Defaults() removeObjectForKey:k];
     RelayoutToolbars();
 }
 - (void)manageExtensions:(id)s { [gApp performSelector:@selector(showSettingsSection:) withObject:@7]; }
@@ -2809,11 +2964,9 @@ static void RelayoutToolbars(void) { for (VWindow *w in gWindows) { [w.toolbar l
         VWindow *ow = WinFor(self);
         NSMutableArray *round = [NSMutableArray arrayWithObject:[NSValue valueWithRect:self.pill]];
         if (!NSIsEmptyRect(self.navRect)) [round addObject:[NSValue valueWithRect:self.navRect]];
-        if (!NSIsEmptyRect(self.extRect)) [round addObject:[NSValue valueWithRect:self.extRect]];
-        if (!NSIsEmptyRect(self.shieldRect) && !self.shieldBtn.hidden) [round addObject:[NSValue valueWithRect:self.shieldRect]];
-        NSMutableArray *circles = [NSMutableArray arrayWithObjects:[NSValue valueWithRect:self.lensRect], nil];
+        [round addObjectsFromArray:self.glassCapsules ?: @[]];
+        NSMutableArray *circles = [NSMutableArray arrayWithArray:self.glassCircles ?: @[[NSValue valueWithRect:self.lensRect]]];
         if (!NSIsEmptyRect(self.avatarRect)) [circles addObject:[NSValue valueWithRect:self.avatarRect]];
-        if (!NSIsEmptyRect(self.dlRect)) [circles addObject:[NSValue valueWithRect:self.dlRect]];
         MShadowed(^{
             for (NSValue *v in round) RoundRect(v.rectValue, 14, MGlass());
             for (NSValue *v in circles) { [MGlass() setFill]; [[NSBezierPath bezierPathWithOvalInRect:v.rectValue] fill]; }
@@ -8133,6 +8286,62 @@ static NSDictionary *DLInfo(VDownload *x) {
     }
     return d;
 }
+// Customise Toolbar (iris://toolbar, shown over the window): the catalog, the arrangement, and changes applied live.
+static NSString *SymbolDataURL(NSString *name, CGFloat pt) {
+    static NSCache *cache; if (!cache) cache = [NSCache new];
+    NSString *key = [NSString stringWithFormat:@"%@@%.1f", name, pt];
+    NSString *hit = [cache objectForKey:key]; if (hit) return hit;
+    NSImage *im = Tinted(Symbol(name, pt, NSFontWeightMedium), NSColor.whiteColor);
+    if (!im) return @"";
+    NSInteger W = (NSInteger)ceil(im.size.width * 2), H = (NSInteger)ceil(im.size.height * 2);
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:W pixelsHigh:H bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    rep.size = im.size;
+    [NSGraphicsContext saveGraphicsState];
+    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    [im drawInRect:NSMakeRect(0, 0, im.size.width, im.size.height)];
+    [NSGraphicsContext restoreGraphicsState];
+    NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    NSString *url = [@"data:image/png;base64," stringByAppendingString:[png base64EncodedStringWithOptions:0]];
+    [cache setObject:url forKey:key];
+    return url;
+}
+static NSString *ImageDataURL(NSImage *im, CGFloat side) {
+    if (!im) return @"";
+    NSImage *sized = [NSImage imageWithSize:NSMakeSize(side, side) flipped:NO drawingHandler:^BOOL(NSRect r) { [im drawInRect:r]; return YES; }];
+    CGImageRef cg = [sized CGImageForProposedRect:NULL context:nil hints:nil];
+    NSData *png = cg ? [[[NSBitmapImageRep alloc] initWithCGImage:cg] representationUsingType:NSBitmapImageFileTypePNG properties:@{}] : nil;
+    return png ? [@"data:image/png;base64," stringByAppendingString:[png base64EncodedStringWithOptions:0]] : @"";
+}
+static NSDictionary *ToolbarState(void) {
+    NSMutableArray *cat = [NSMutableArray array];
+    for (NSArray *i in ToolbarCatalog())
+        [cat addObject:@{@"k": i[0], @"title": i[1], @"icon": SymbolDataURL(i[2], 15), @"zones": i[3], @"home": i[4], @"desc": i[5]}];
+    NSMutableArray *exts = [NSMutableArray array];
+    for (id e in FExtHost.shared.extensions) if (ExtensionPinned([e valueForKey:@"ident"]))
+        [exts addObject:@{@"name": [e valueForKey:@"name"] ?: @"", @"icon": ImageDataURL([FExtHost.shared iconFor:e], 32)}];
+    return @{@"layout": ToolbarLayout(), @"catalog": cat, @"exts": exts, @"width": @([Defaults() integerForKey:kAddrWidth]), @"dlAlways": @(ToolbarShows(@"dlalways")),
+             @"lens": SymbolDataURL(@"camera.aperture", 15), @"lock": SymbolDataURL(@"lock.fill", 11), @"isDefault": @([Defaults() objectForKey:kToolbarLayout] == nil)};
+}
+static void ToolbarOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *)) {
+    if ([op isEqualToString:@"toolbar.get"]) {
+        NSMutableDictionary *st = [ToolbarState() mutableCopy]; st[@"blocked"] = @(win.current.blocked); st[@"puzzle"] = SymbolDataURL(@"puzzlepiece.extension", 15);
+        reply(st, nil); return;
+    }
+    if ([op isEqualToString:@"toolbar.set"]) {
+        NSDictionary *L = ToolbarSanitize(b[@"layout"]);
+        [Defaults() setObject:L forKey:kToolbarLayout]; RelayoutToolbars();
+        reply(L, nil); return;
+    }
+    if ([op isEqualToString:@"toolbar.width"]) { [Defaults() setInteger:MAX(0, MIN(2, [b[@"v"] integerValue])) forKey:kAddrWidth]; RelayoutToolbars(); reply(@YES, nil); return; }
+    if ([op isEqualToString:@"toolbar.dlalways"]) { SetToolbarShows(@"dlalways", [b[@"on"] boolValue]); RelayoutToolbars(); reply(@YES, nil); return; }
+    if ([op isEqualToString:@"toolbar.reset"]) {
+        for (NSString *k in @[kToolbarLayout, kAddrWidth]) [Defaults() removeObjectForKey:k];
+        SetToolbarShows(@"dlalways", NO); RelayoutToolbars(); reply(ToolbarState(), nil); return;
+    }
+    if ([op isEqualToString:@"toolbar.done"]) { [win closeToolbarCustomiser]; reply(@YES, nil); return; }
+    reply(nil, @"unknown op");
+}
+
 static void DownloadOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *)) {
     VDownloads *D = VDownloads.shared; FAccel *A = FAccel.shared;
     VDownload *x = [b[@"id"] isKindOfClass:NSString.class] ? [D byId:b[@"id"]] : nil;
@@ -8206,6 +8415,7 @@ static NSURL *WebURL(id s) {
 
     if ([op hasPrefix:@"dl."]) { DownloadOp(op, b, win, reply); return; }
     if ([op hasPrefix:@"settings."]) { SettingsOp(op, b, win, reply); return; }
+    if ([op hasPrefix:@"toolbar."]) { ToolbarOp(op, b, win, reply); return; }
     if ([op isEqualToString:@"history.list"]) {
         NSMutableArray *out = [NSMutableArray array];
         for (NSDictionary *e in [VHistory.shared all]) [out addObject:@{@"u": e[@"u"] ?: @"", @"ti": e[@"ti"] ?: @"", @"t": e[@"t"] ?: @0, @"c": e[@"c"] ?: @1}];
@@ -8335,11 +8545,68 @@ static void IrisInternalInstall(WKWebViewConfiguration *c, WKUserContentControll
     if (ucc && ![done containsObject:ucc]) { [done addObject:ucc]; [ucc addScriptMessageHandlerWithReply:VInternal.shared contentWorld:WKContentWorld.pageWorld name:@"irisInternal"]; }
 }
 
+static void PageHearsMouse(VWindow *w, BOOL hears);
+// The shade behind Customise Toolbar: covers the page (not the bar), closes the editor when clicked.
+@interface VCustomiserDim : NSView
+@property (weak) VWindow *owner;
+@property (strong) NSView *box;
+- (void)placeBox;
+@end
+@implementation VCustomiserDim
+- (void)placeBox {
+    NSRect b = self.bounds; CGFloat top = 44;
+    CGFloat w = MIN(900, NSWidth(b) - 40), h = MIN(640, NSHeight(b) - top - 28);
+    BOOL flipped = self.isFlipped;
+    CGFloat y = flipped ? top + 6 : NSHeight(b) - top - 6 - h;
+    self.box.frame = NSMakeRect(round((NSWidth(b) - w) / 2), y, w, h);
+    self.box.subviews.firstObject.frame = self.box.bounds;
+}
+- (void)resizeSubviewsWithOldSize:(NSSize)s { [self placeBox]; }
+- (void)mouseDown:(NSEvent *)e { if (!NSPointInRect([self convertPoint:e.locationInWindow fromView:nil], self.box.frame)) [self.owner closeToolbarCustomiser]; }
+- (void)scrollWheel:(NSEvent *)e {}
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+@end
+
 @implementation VWindow (Internal)
 - (void)openInternal:(NSString *)name {
     NSString *prefix = [NSString stringWithFormat:@"iris://%@", name];
     for (VTab *t in self.tabs) if ([t.url hasPrefix:prefix]) { [self selectTab:t]; return; }
     [self newTab:[NSURL URLWithString:prefix] select:YES];
+}
+// Customise Toolbar: the editor floats over the page, below the bar, so the bar itself is the live preview.
+- (void)showToolbarCustomiser:(id)s {
+    NSView *root = self.window.contentView;
+    if (objc_getAssociatedObject(self, &kCustomiserKey)) return;
+    [self closePanels];
+    VCustomiserDim *dim = [[VCustomiserDim alloc] initWithFrame:root.bounds];
+    dim.owner = self; dim.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    dim.wantsLayer = YES; dim.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:ThemeIsLight() ? 0.16 : 0.42].CGColor;
+    WKWebViewConfiguration *cfg = [WKWebViewConfiguration new];
+    IrisInternalInstall(cfg, cfg.userContentController);
+    NSView *box = [[NSView alloc] initWithFrame:NSZeroRect];
+    box.wantsLayer = YES; box.layer.cornerRadius = 20; box.layer.masksToBounds = YES;
+    box.layer.borderWidth = 1; box.layer.borderColor = (ThemeIsLight() ? HexA(0x000000, 0.1) : HexA(0xffffff, 0.09)).CGColor;
+    WKWebView *web = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:cfg];
+    [web setValue:@NO forKey:@"drawsBackground"];
+    web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [box addSubview:web]; [dim addSubview:box]; dim.box = box;
+    [dim placeBox];
+    [root addSubview:dim positioned:NSWindowAbove relativeTo:nil];
+    [root addSubview:self.toolbar positioned:NSWindowAbove relativeTo:nil];   // the bar stays on top, lit: it's the preview
+    objc_setAssociatedObject(self, &kCustomiserKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    PageHearsMouse(self, NO);   // pages under the shade still get pointer moves (tracking areas ignore what covers them) and would fight over the cursor
+    [web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"iris://toolbar"]]];
+    dim.alphaValue = 0; box.layer.transform = CATransform3DMakeTranslation(0, -8, 0);
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.2; dim.animator.alphaValue = 1; }];
+    [self.window makeFirstResponder:web];
+}
+- (void)closeToolbarCustomiser {
+    NSView *dim = objc_getAssociatedObject(self, &kCustomiserKey);
+    if (!dim) return;
+    objc_setAssociatedObject(self, &kCustomiserKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    PageHearsMouse(self, YES);
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.16; dim.animator.alphaValue = 0; } completionHandler:^{ [dim removeFromSuperview]; }];
+    [self.window makeFirstResponder:self.current.web.web];
 }
 - (void)showHistory:(id)s { [self openInternal:@"history"]; }
 - (void)showBookmarks:(id)s { [self openInternal:@"bookmarks"]; }
@@ -9141,6 +9408,7 @@ static NSInteger gShelfGen; static BOOL gShelfIn; static CFTimeInterval gShelfSi
 static __weak VWindow *gMuted;
 static void PageHearsMouse(VWindow *w, BOOL hears) {
     if (!w) return;
+    if (hears && objc_getAssociatedObject(w, &kCustomiserKey)) hears = NO;   // Customise Toolbar is open: the pages under it stay out of the pointer's way
     NSMutableArray<WKWebView *> *webs = [NSMutableArray array];
     for (VTab *t in w.tabs) if (t.web.web) [webs addObject:t.web.web];
     SEL a = NSSelectorFromString(@"_setIgnoresMouseMoveEvents:"), b = NSSelectorFromString(@"_setIgnoresNonWheelEvents:");
@@ -9303,6 +9571,7 @@ static void InstallShelfMonitor(void) {
         }];
     }
 }
+- (void)toggleShelfButton:(id)s { [self toggleShelf]; }
 - (void)toggleShelf {
     VTabShelf *s = (VTabShelf *)self.shelf;
     if (s.shown) { [self showShelf:NO]; return; }
@@ -9448,6 +9717,8 @@ typedef NS_ENUM(NSInteger, VPKind) { VPLabel, VPRow, VPToggle, VPChip, VPTile, V
 @property BOOL on;
 @property (copy) void (^act)(NSEvent *e, NSRect r);
 @property (copy) NSMenu *(^menu)(void);   // right-click: what you can do with this item
+@property (strong) NSMutableDictionary *node;   // a bookmark (or folder) you can drag to rearrange
+@property (weak) NSMutableArray *list;          // the list it sits in
 @end
 @implementation VPItem
 @end
@@ -9457,7 +9728,9 @@ typedef NS_ENUM(NSInteger, VPKind) { VPLabel, VPRow, VPToggle, VPChip, VPTile, V
 @property (strong) NSMutableArray<VPItem *> *items;
 @property NSInteger hover;
 @property BOOL shown;
-@property CGFloat irisX;   // where the button that opened it sits, across the panel: it opens from there like an iris (<0: just fades in)
+@property CGFloat irisX;
+@property NSInteger dragItem, dropItem, dropMode;   // dragging a bookmark: which, onto which, and 0 before / 1 after / 2 into a folder
+@property NSPoint dragAt;   // where the button that opened it sits, across the panel: it opens from there like an iris (<0: just fades in)
 - (void)build;   // subclasses: fill the items and set the height
 - (VPItem *)add:(VPKind)k rect:(NSRect)r title:(NSString *)t;
 - (void)present:(NSRect)frame;
@@ -9486,7 +9759,7 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
 - (void)scrollWheel:(NSEvent *)e {}   // the page behind a panel stays put
 - (instancetype)initWithFrame:(NSRect)r {
     if (!(self = [super initWithFrame:r])) return nil;
-    self.items = [NSMutableArray array]; self.hover = -1; self.hidden = YES; self.irisX = -1;
+    self.items = [NSMutableArray array]; self.hover = -1; self.hidden = YES; self.irisX = -1; self.dragItem = -1; self.dropItem = -1;
     self.wantsLayer = YES;
     self.layer.shadowColor = NSColor.blackColor.CGColor; self.layer.shadowOpacity = ThemeIsLight() ? 0.14 : 0.45;
     self.layer.shadowRadius = 30; self.layer.shadowOffset = CGSizeMake(0, -14);
@@ -9518,10 +9791,62 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
     }
 }
 - (void)mouseDown:(NSEvent *)e {
-    NSInteger i = [self itemAt:[self convertPoint:e.locationInWindow fromView:nil]];
+    NSPoint start = [self convertPoint:e.locationInWindow fromView:nil];
+    NSInteger i = [self itemAt:start];
     if (i < 0) return;
     VPItem *it = self.items[(NSUInteger)i];
-    it.act(e, [self convertRect:it.r toView:nil]);
+    if (!it.node) { it.act(e, [self convertRect:it.r toView:nil]); return; }
+    // a bookmark: a click opens it; a drag rearranges (between others, or into a folder)
+    BOOL dragging = NO; self.dropItem = -1;
+    while (YES) {
+        NSEvent *n = [self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp];
+        NSPoint q = [self convertPoint:n.locationInWindow fromView:nil];
+        if (n.type == NSEventTypeLeftMouseUp) {
+            if (!dragging) { it.act(e, [self convertRect:it.r toView:nil]); return; }
+            [self dropDragged]; return;
+        }
+        if (!dragging && hypot(q.x - start.x, q.y - start.y) > 4) { dragging = YES; self.dragItem = i; [NSCursor.closedHandCursor push]; }
+        if (dragging) { self.dragAt = q; [self findDropFor:q]; self.needsDisplay = YES; }
+    }
+}
+- (void)findDropFor:(NSPoint)q {
+    VPItem *src = self.items[(NSUInteger)self.dragItem];
+    self.dropItem = -1;
+    // right on an item: a folder's middle takes it in; otherwise before or after, by which half you're over
+    for (NSInteger j = 0; j < (NSInteger)self.items.count; j++) {
+        VPItem *t = self.items[(NSUInteger)j];
+        if (!t.node || j == self.dragItem || !NSPointInRect(q, NSInsetRect(t.r, -4, -4))) continue;
+        BOOL folder = [t.node[@"children"] isKindOfClass:NSArray.class];
+        CGFloat f = (q.x - NSMinX(t.r)) / MAX(1, NSWidth(t.r));
+        if (folder && f > 0.22 && f < 0.78 && !BMContains(src.node, t.node)) { self.dropItem = j; self.dropMode = 2; return; }
+        self.dropItem = j; self.dropMode = f < 0.5 ? 0 : 1; return;
+    }
+    // in the gaps (or past the last one in a row): the nearest item, before or after it in reading order
+    CGFloat best = 60; NSInteger bj = -1;
+    for (NSInteger j = 0; j < (NSInteger)self.items.count; j++) {
+        VPItem *t = self.items[(NSUInteger)j];
+        if (!t.node || j == self.dragItem) continue;
+        CGFloat dx = MAX(0, MAX(NSMinX(t.r) - q.x, q.x - NSMaxX(t.r))), dy = MAX(0, MAX(NSMinY(t.r) - q.y, q.y - NSMaxY(t.r)));
+        CGFloat d = hypot(dx, dy * 1.5);
+        if (d < best) { best = d; bj = j; }
+    }
+    if (bj < 0) return;
+    NSRect r = self.items[(NSUInteger)bj].r;
+    self.dropItem = bj;
+    self.dropMode = q.y < NSMinY(r) ? 0 : q.y > NSMaxY(r) ? 1 : (q.x < NSMidX(r) ? 0 : 1);
+}
+- (void)dropDragged {
+    [NSCursor pop];
+    VPItem *src = self.dragItem >= 0 && self.dragItem < (NSInteger)self.items.count ? self.items[(NSUInteger)self.dragItem] : nil;
+    VPItem *dst = self.dropItem >= 0 ? self.items[(NSUInteger)self.dropItem] : nil;
+    self.dragItem = -1; self.dropItem = -1;
+    if (src && dst) {
+        if (self.dropMode == 2) BMPlace(src.node, BMChildren(dst.node), NSNotFound);
+        else if (dst.list) { NSUInteger at = [dst.list indexOfObjectIdenticalTo:dst.node]; if (at != NSNotFound) BMPlace(src.node, dst.list, at + (self.dropMode == 1 ? 1 : 0)); }
+        BookmarksChanged();
+    }
+    if ([self respondsToSelector:@selector(rebuildKeepingWidth)]) [self performSelector:@selector(rebuildKeepingWidth)]; else { [self build]; }
+    self.needsDisplay = YES;
 }
 - (void)present:(NSRect)frame {
     self.shown = YES;
@@ -9570,6 +9895,39 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
     self.shown = NO; self.hover = -1;
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.1; self.animator.alphaValue = 0; }
                        completionHandler:^{ if (!self.shown) self.hidden = YES; }];
+}
+// While a bookmark is dragged: its place dims, an Aperture marker shows where it lands (a line between, a ring around a
+// folder it would go into), and a chip with its name follows the pointer.
+- (void)drawDragOverlay {
+    if (self.dragItem < 0 || self.dragItem >= (NSInteger)self.items.count) return;
+    VPItem *src = self.items[(NSUInteger)self.dragItem];
+    RoundRect(src.r, 11, [(ThemeIsLight() ? Hex(0xf7f7f5) : Hex(0x121316)) colorWithAlphaComponent:0.7]);
+    if (self.dropItem >= 0) {
+        NSRect t = self.items[(NSUInteger)self.dropItem].r;
+        if (self.dropMode == 2) ApertureStroke(NSInsetRect(t, -2, -2), 13, 2);
+        else {
+            CGFloat lx = self.dropMode == 0 ? NSMinX(t) - 4 : NSMaxX(t) + 2;
+            NSRect line = NSMakeRect(round(lx), NSMinY(t) + 4, 3, NSHeight(t) - 8);
+            [NSGraphicsContext saveGraphicsState];
+            NSShadow *g = [NSShadow new]; g.shadowBlurRadius = 8; g.shadowOffset = NSZeroSize; g.shadowColor = [ApBlue() colorWithAlphaComponent:0.7]; [g set];
+            [ApertureGradient(1) drawInBezierPath:[NSBezierPath bezierPathWithRoundedRect:line xRadius:1.5 yRadius:1.5] angle:90];
+            [NSGraphicsContext restoreGraphicsState];
+        }
+    }
+    NSString *title = src.title ?: @"";
+    if (title.length > 32) title = [[title substringToIndex:31] stringByAppendingString:@"…"];
+    NSDictionary *a = @{NSFontAttributeName: UIFont(12.5, NSFontWeightMedium), NSForegroundColorAttributeName: vText};
+    CGFloat w = ceil([title sizeWithAttributes:a].width) + (src.icon || src.symbol ? 44 : 24);
+    NSRect chip = NSMakeRect(self.dragAt.x + 14, self.dragAt.y + (self.isFlipped ? 10 : -40), w, 30);
+    [NSGraphicsContext saveGraphicsState];
+    NSShadow *sh = [NSShadow new]; sh.shadowBlurRadius = 16; sh.shadowOffset = NSMakeSize(0, -6); sh.shadowColor = [NSColor colorWithWhite:0 alpha:0.4]; [sh set];
+    RoundRect(chip, 15, ThemeIsLight() ? Hex(0xffffff) : Hex(0x24262c));
+    [NSGraphicsContext restoreGraphicsState];
+    ApertureStroke(chip, 15, 1);
+    CGFloat tx = NSMinX(chip) + 12;
+    NSImage *ic = src.icon ?: (src.symbol ? Tinted(Symbol(src.symbol, 12, NSFontWeightMedium), vDim) : nil);
+    if (ic) { DrawImage(ic, NSMakeRect(tx, NSMidY(chip) - 8, 16, 16)); tx += 22; }
+    [title drawAtPoint:NSMakePoint(tx, NSMidY(chip) - 8) withAttributes:a];
 }
 - (void)drawRect:(NSRect)dirty {
     NSRect b = NSInsetRect(self.bounds, 0.5, 0.5);
@@ -9685,6 +10043,7 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
             }
         }
     }
+    [self drawDragOverlay];
 }
 @end
 
@@ -9709,6 +10068,41 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
     NSString *host = web ? HostOf(u) : @"";
     NSString *site = [host hasPrefix:@"www."] ? [host substringFromIndex:4] : host;
 
+    if (self.mode == 3) {   // ---- the puzzle: your extensions ----
+        NSArray *exts = FExtHost.shared.extensions;
+        VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:@"Extensions"];
+        h.icon = Tinted(Symbol(@"puzzlepiece.extension", 16, NSFontWeightMedium), vText);
+        h.meta = w.isPrivate ? @"They don't run in private windows" : [NSString stringWithFormat:@"%lu installed · pin one to keep it beside this button", (unsigned long)exts.count];
+        y += 40 + 14;
+        for (id e in exts) {
+            NSString *ident = [e valueForKey:@"ident"];
+            BOOL pinned = ExtensionPinned(ident), opts = [FExtHost.shared hasOptionsForID:ident];
+            NSString *name = [e valueForKey:@"name"] ?: @"Extension";
+            NSRange cut = [name rangeOfString:@" - "]; if (cut.location == NSNotFound) cut = [name rangeOfString:@": "];
+            VPItem *row = [self add:VPRow rect:NSMakeRect(x - 8, y, cw - (opts ? 104 : 64), 36) title:cut.location != NSNotFound ? [name substringToIndex:cut.location] : name];
+            row.icon = [FExtHost.shared iconFor:e];
+            if (!w.isPrivate) row.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [FExtHost.shared openPopup:e from:ww.toolbar.extMenuBtn]; };
+            if (opts) { VPItem *o = [self add:VPPill rect:NSMakeRect(x + cw - 100, y + 5, 32, 26) title:@""]; o.symbol = @"gearshape";
+                        o.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [FExtHost.shared openOptionsForID:ident]; }; }
+            VPItem *pin = [self add:VPPill rect:NSMakeRect(x + cw - 64, y + 5, 64, 26) title:pinned ? @"Pinned" : @"Pin"]; pin.on = pinned; pin.symbol = pinned ? @"pin.fill" : @"pin";
+            pin.act = ^(NSEvent *ev, NSRect r) {
+                NSMutableArray *p = [[Defaults() arrayForKey:kExtPinned] ?: @[] mutableCopy];
+                if ([p containsObject:ident]) [p removeObject:ident]; else [p addObject:ident];
+                [Defaults() setObject:p forKey:kExtPinned];
+                for (VWindow *o in gWindows) { [o.toolbar layoutBar]; [o refreshChrome]; }
+                [ws rebuild];
+            };
+            y += 38;
+        }
+        y += 10;
+        CGFloat half = (cw - 8) / 2;
+        VPItem *mg = [self add:VPPill rect:NSMakeRect(x, y, half, 30) title:@"Manage"]; mg.symbol = @"slider.horizontal.3";
+        mg.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [ww showSettingsSection:@"extensions"]; };
+        VPItem *more = [self add:VPPill rect:NSMakeRect(x + half + 8, y, half, 30) title:@"Get more"]; more.symbol = @"bag";
+        more.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [ww newTab:[NSURL URLWithString:@"https://chromewebstore.google.com/"] select:YES]; };
+        y += 30 + P;
+        [self setFrameSize:NSMakeSize(W, y)]; self.needsDisplay = YES; return;
+    }
     if (self.mode == 1) {   // ---- the lock: this site ----
         VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:web ? host : (t.isHome ? @"New Tab" : t.title ?: @"Iris")];
         h.icon = t.favicon;
@@ -9803,28 +10197,6 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         ch.act = profiles;
     }
     y += 40 + 16;
-
-    NSArray *exts = FExtHost.shared.extensions;
-    if (exts.count && !w.isPrivate) {
-        VPItem *el = [self add:VPLabel rect:NSMakeRect(x, y, cw, 14) title:@"EXTENSIONS"]; el.meta = [NSString stringWithFormat:@"%lu installed", (unsigned long)exts.count]; y += 20;
-        for (id e in exts) {
-            NSString *ident = [e valueForKey:@"ident"];
-            BOOL pinned = ExtensionPinned(ident);
-            VPItem *row = [self add:VPRow rect:NSMakeRect(x - 8, y, cw - 64, 36) title:[e valueForKey:@"name"]];
-            row.icon = [FExtHost.shared iconFor:e];
-            row.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [FExtHost.shared openPopup:e from:ww.toolbar.menuBtn]; };
-            VPItem *pin = [self add:VPPill rect:NSMakeRect(x + cw - 64, y + 5, 64, 26) title:pinned ? @"Pinned" : @"Pin"]; pin.on = pinned; pin.symbol = pinned ? @"pin.fill" : @"pin";
-            pin.act = ^(NSEvent *ev, NSRect r) {
-                NSMutableArray *p = [[Defaults() arrayForKey:kExtPinned] ?: [FExtHost.shared.extensions valueForKey:@"ident"] mutableCopy];
-                if ([p containsObject:ident]) [p removeObject:ident]; else [p addObject:ident];
-                [Defaults() setObject:p forKey:kExtPinned];
-                for (VWindow *o in gWindows) { [o.toolbar layoutBar]; [o refreshChrome]; }
-                [ws rebuild];
-            };
-            y += 38;
-        }
-        y += 12;
-    }
 
     if (t.web) {
         [self add:VPLabel rect:NSMakeRect(x, y + 9, 60, 14) title:@"ZOOM"];
@@ -9985,6 +10357,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         if (cx + wid > x + cw) { cx = x; y += 36; }
         VPItem *c = [self add:VPChip rect:NSMakeRect(cx, y, wid, 30) title:name]; c.symbol = @"folder"; c.meta = count; c.on = openTop == f;
         c.menu = ^NSMenu *{ return [ws menuForBookmark:f]; };
+        c.node = (NSMutableDictionary *)f; c.list = VBookmarks.shared.bar;
         c.act = ^(NSEvent *e, NSRect r) { if (ws.path.firstObject == f) [ws.path removeAllObjects]; else { [ws.path removeAllObjects]; [ws.path addObject:f]; } [ws rebuildKeepingWidth]; };
         cx += wid + 6;
     }
@@ -10006,6 +10379,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
             NSString *name = [b[@"name"] length] ? b[@"name"] : (HostOf([NSURL URLWithString:b[@"url"] ?: @""]) ?: @"");
             VPItem *row = [self add:VPRow rect:NSMakeRect(x - 6 + (i % 2) * (colW + 8), y + (i / 2) * 40, colW + 6, 38) title:name];
             row.menu = ^NSMenu *{ return [ws menuForBookmark:b]; };
+            row.node = (NSMutableDictionary *)b; row.list = BMChildren((NSMutableDictionary *)cur);
             if (isFolder) { row.symbol = @"folder"; row.meta = [NSString stringWithFormat:@"%lu", (unsigned long)[b[@"children"] count]];
                 row.act = ^(NSEvent *e, NSRect r) { [ws.path addObject:b]; [ws rebuildKeepingWidth]; }; }
             else { row.icon = [VFavicons.shared iconForURL:b[@"url"]]; row.meta = HostOf([NSURL URLWithString:b[@"url"] ?: @""]);
@@ -10027,6 +10401,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
             tile.icon = [VFavicons.shared iconForURL:b[@"url"]];
             NSString *url = b[@"url"]; tile.act = ^(NSEvent *e, NSRect r) { [ws open:url event:e]; };
             tile.menu = ^NSMenu *{ return [ws menuForBookmark:b]; };
+            tile.node = (NSMutableDictionary *)b; tile.list = VBookmarks.shared.bar;
             i++;
             if (i >= (NSUInteger)cols * 2) break;
         }
@@ -10093,6 +10468,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
 - (void)toggleLens:(id)s { [self openLensMode:0 under:self.toolbar.lensRect]; }
 - (void)toggleSitePanel:(id)s { [self openLensMode:1 under:self.toolbar.infoBtn.frame]; }
 - (void)toggleShieldPanel:(id)s { [self openLensMode:2 under:self.toolbar.shieldBtn.frame]; }
+- (void)toggleExtensionsPanel:(id)s { [self openLensMode:3 under:self.toolbar.extMenuBtn.frame]; }
 - (void)showAddressPanel {
     VAddressPanel *p = [self addressPopup];
     NSView *root = self.window.contentView; VToolbar *tb = self.toolbar;
@@ -10482,6 +10858,7 @@ static NSString *CreateProfile(NSString *name) {
         if (self.closed.count > 25) [self.closed removeObjectAtIndex:0];
     }
     [FExtHost.shared tab:t event:@"removed"];
+    [t.homeBack close]; [t.homeFwd close]; t.homeBack = nil; t.homeFwd = nil;
     VTab *partner = nil;   // closing half of a split leaves the other half in front
     if ([self.splitPair containsObject:t]) { partner = self.splitPair[0] == t ? self.splitPair[1] : self.splitPair[0]; [self endSplit]; }
     [t.web close]; t.web = nil;
@@ -10654,13 +11031,28 @@ static NSString *CreateProfile(NSString *name) {
 - (void)menuMoveToWindow:(NSMenuItem *)i { [self moveTabToNewWindow:i.representedObject]; }
 - (void)moveCurrentToNewWindow:(id)s { [self moveTabToNewWindow:self.current]; }
 // Home: this tab goes back to the new tab page (its web page closes, like opening a new tab in place).
-- (void)goHome:(id)s {
-    VTab *t = self.current; if (!t || t.isHome) { [self focusAddress]; return; }
-    if (t.url) [self.closed addObject:@{@"url": t.url, @"title": t.title ?: @""}];
-    [t.web removeFromSuperview]; [t.web close]; t.web = nil;
-    t.isHome = YES; t.url = nil; t.title = nil; t.favicon = nil; t.savedState = nil; t.loading = NO;
+// Home is a step in the tab's history, not the end of it: the page you leave is kept (paused), so Back brings it
+// straight back, and a page you open from Home goes Back to Home.
+static void PausePage(VPage *p) { [p.web evaluateJavaScript:@"document.querySelectorAll('video,audio').forEach(m=>{try{m.pause()}catch(e){}})" completionHandler:nil]; }
+- (void)showHomeIn:(VTab *)t keeping:(VPage *)page asForward:(BOOL)fwd {
+    if (page) { [page removeFromSuperview]; PausePage(page); }
+    if (fwd) { if (t.homeFwd != page) [t.homeFwd close]; t.homeFwd = page; }
+    else { if (t.homeBack && t.homeBack != page) [t.homeBack close]; t.homeBack = page; if (!t.homeAhead) { [t.homeFwd close]; t.homeFwd = nil; } }
+    t.web = nil; t.isHome = YES; t.homeAnchor = NO; t.homeAhead = NO;
+    t.url = nil; t.title = nil; t.favicon = nil; t.savedState = nil; t.loading = NO;
     [self selectTab:t];
     [self scheduleSave];
+}
+- (void)restorePage:(VPage *)page in:(VTab *)t anchored:(BOOL)anchored {
+    t.web = page; t.isHome = NO; t.homeAnchor = anchored; t.homeAhead = NO;
+    t.url = page.web.URL.absoluteString ?: t.url; t.title = page.web.title; t.loading = page.web.isLoading;
+    [self selectTab:t];
+    [self refreshChrome]; [self scheduleSave];
+}
+- (void)goHome:(id)s {
+    VTab *t = self.current; if (!t || t.isHome) { [self focusAddress]; return; }
+    t.homeAhead = NO;   // pressing Home starts a new way forward
+    [self showHomeIn:t keeping:t.web asForward:NO];
 }
 
 #pragma mark Layout and chrome
@@ -10826,13 +11218,14 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
         NSString *extName = [u.scheme isEqualToString:@"chrome-extension"] ? [FExtHost.shared nameForID:u.host] : nil;
         tb.field.attributedStringValue = [self identityFor:t url:u extension:extName];
     }
-    tb.backBtn.enabled = w.canGoBack; tb.fwdBtn.enabled = w.canGoForward;
+    tb.backBtn.enabled = t.isHome ? t.homeBack != nil : (w.canGoBack || t.homeAnchor);
+    tb.fwdBtn.enabled = t.isHome ? t.homeFwd != nil : (w.canGoForward || t.homeAhead);
     tb.reloadBtn.symbolName = w.loading ? @"xmark" : @"arrow.clockwise";
     tb.reloadBtn.toolTip = w.loading ? @"Stop" : @"Reload (⌘R)";
     NSString *scheme = [NSURL URLWithString:t.url ?: @""].scheme;
     tb.infoBtn.symbolName = t.isHome ? @"magnifyingglass" : [scheme isEqualToString:@"chrome-extension"] ? @"puzzlepiece.extension" : [scheme isEqualToString:@"iris"] ? @"sparkle" : [scheme isEqualToString:@"https"] ? @"lock.fill" : @"exclamationmark.triangle";
     tb.starBtn.hidden = t.isHome || !ToolbarShows(@"star");
-    tb.pipBtn.hidden = !(t.web && (t.hasVideo || t.inPiP));
+    tb.pipBtn.hidden = !ToolbarShows(@"pip") || !(t.web && (t.hasVideo || t.inPiP));
     tb.pipBtn.symbolName = t.inPiP ? @"pip.exit" : @"pip.enter";
     tb.pipBtn.toolTip = t.inPiP ? @"Return video to the page (⌃⌘P)" : @"Picture in Picture (⌃⌘P)";
     tb.pipBtn.active = t.inPiP; tb.pipBtn.needsDisplay = YES;
@@ -10876,7 +11269,10 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     VTab *t = self.current;
     if ([Defaults() boolForKey:kStrip]) { NSURL *clean = StripTracking(u); if (clean) u = clean; }
     if (!t.web) {
+        BOOL fromHome = t.isHome;
+        if (fromHome) { [t.homeFwd close]; t.homeFwd = nil; }   // a new way forward from Home replaces the old one
         VPage *p = [self makePage:t];
+        t.homeAnchor = fromHome && t.homeBack != nil;
         [self placePages];
         [p open:u.absoluteString record:NO];
     } else {
@@ -11117,8 +11513,18 @@ static NSArray *MatchCommands(NSString *q, NSUInteger limit) {
 
 #pragma mark Toolbar and menu actions
 
-- (void)goBack:(id)s { [self.current.web goBack]; }
-- (void)goForward:(id)s { [self.current.web goForward]; }
+- (void)goBack:(id)s {
+    VTab *t = self.current;
+    if (t.isHome) { if (t.homeBack) { VPage *p = t.homeBack; t.homeBack = nil; [self restorePage:p in:t anchored:NO]; t.homeAhead = YES; [self refreshChrome]; } return; }
+    if (!t.web.canGoBack && t.homeAnchor) { [self showHomeIn:t keeping:t.web asForward:YES]; return; }   // back to the Home you came from
+    [t.web goBack];
+}
+- (void)goForward:(id)s {
+    VTab *t = self.current;
+    if (t.isHome) { if (t.homeFwd) { VPage *p = t.homeFwd; t.homeFwd = nil; [self restorePage:p in:t anchored:YES]; } return; }
+    if (!t.web.canGoForward && t.homeAhead) { [self showHomeIn:t keeping:t.web asForward:NO]; return; }   // forward to the Home you went back from
+    [t.web goForward];
+}
 - (void)reloadOrStop:(id)s { VPage *w = self.current.web; if (w.loading) [w stop]; else [w reload]; }
 - (void)hardReload:(id)s { [self.current.web hardReload]; }
 - (void)printPage:(id)s { [self.current.web print]; }
@@ -12367,7 +12773,7 @@ static void CtlOut(NSString *s) {
         else if ([cmd isEqualToString:@"reload"]) [w reload];
         else if ([cmd isEqualToString:@"scroll"]) [w runJS:[NSString stringWithFormat:@"window.scrollBy(0,%f)", arg.doubleValue]];
         else if ([cmd isEqualToString:@"top"]) [w runJS:@"window.scrollTo(0,0)"];
-        else if ([cmd isEqualToString:@"act"] && [@[@"toggleSplit:", @"swapSplit:", @"toggleReader:", @"showFind:", @"closePeek:", @"toggleSidebar:", @"toggleLens:", @"toggleShieldPanel:", @"toggleSitePanel:", @"closePanels"] containsObject:arg]) {
+        else if ([cmd isEqualToString:@"act"] && [@[@"toggleSplit:", @"swapSplit:", @"toggleReader:", @"showFind:", @"closePeek:", @"toggleSidebar:", @"toggleLens:", @"toggleShieldPanel:", @"toggleSitePanel:", @"closePanels", @"showToolbarCustomiser:", @"closeToolbarCustomiser"] containsObject:arg]) {
             [NSApp sendAction:NSSelectorFromString(arg) to:self from:nil];
             CtlOut([NSString stringWithFormat:@"act %@ split=%lu", arg, (unsigned long)self.splitPair.count]);
         }
@@ -12419,6 +12825,41 @@ static void CtlOut(NSString *s) {
             NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithData:im.TIFFRepresentation];
             [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[dir stringByAppendingPathComponent:@"ring.png"] atomically:YES];
             CtlOut(@"ringshot");
+        }
+        else if ([cmd isEqualToString:@"czdrag"] || [cmd isEqualToString:@"czclick"]) {   // dev: real mouse events into Customise Toolbar, "czdrag SRC|DST" by CSS selector
+            NSView *dim = objc_getAssociatedObject(self, &kCustomiserKey);
+            WKWebView *v = (WKWebView *)[[dim.subviews.firstObject subviews] firstObject];
+            NSArray *sel = [arg componentsSeparatedByString:@"|"];
+            NSString *(^JSONString)(NSString *) = ^NSString *(NSString *x) { NSString *j = [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:@[x] options:0 error:nil] encoding:NSUTF8StringEncoding]; return [j substringWithRange:NSMakeRange(1, j.length - 2)]; };
+            NSString *js = [NSString stringWithFormat:@"(()=>{const r=s=>{const e=document.querySelector(s);if(!e)return null;const b=e.getBoundingClientRect();return [b.left+b.width/2,b.top+b.height/2]};return JSON.stringify([r(%@),r(%@)])})()",
+                            JSONString(sel.firstObject ?: @""), JSONString(sel.lastObject ?: @"")];
+            BOOL click = [cmd isEqualToString:@"czclick"];
+            [v evaluateJavaScript:js completionHandler:^(id res, NSError *err) {
+                NSArray *pts = [res isKindOfClass:NSString.class] ? [NSJSONSerialization JSONObjectWithData:[res dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil] : nil;
+                if (pts.count != 2 || [pts[0] isKindOfClass:NSNull.class] || [pts[1] isKindOfClass:NSNull.class]) { CtlOut([NSString stringWithFormat:@"%@ missing %@", cmd, res]); return; }
+                NSPoint (^win)(NSArray *) = ^NSPoint(NSArray *q) { return [v convertPoint:NSMakePoint([q[0] doubleValue], [q[1] doubleValue]) toView:nil]; };
+                NSPoint a = win(pts[0]), b = win(pts[1]); NSInteger wn = self.window.windowNumber;
+                NSEvent *(^ev)(NSEventType, NSPoint) = ^NSEvent *(NSEventType t, NSPoint p) {
+                    return [NSEvent mouseEventWithType:t location:p modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:wn context:nil eventNumber:0 clickCount:1 pressure:t == NSEventTypeLeftMouseUp ? 0 : 1];
+                };
+                [self.window sendEvent:ev(NSEventTypeLeftMouseDown, a)];
+                __block int i = 0; int steps = click ? 0 : 12;
+                __block void (^step)(void);
+                step = ^{
+                    if (i < steps) { i++; CGFloat f = (CGFloat)i / steps; [self.window sendEvent:ev(NSEventTypeLeftMouseDragged, NSMakePoint(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f))];
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_MSEC), dispatch_get_main_queue(), step); return; }
+                    [self.window sendEvent:ev(NSEventTypeLeftMouseUp, click ? a : b)];
+                    CtlOut([NSString stringWithFormat:@"%@ %@ -> %@", cmd, NSStringFromPoint(a), NSStringFromPoint(b)]);
+                    step = nil;
+                };
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_MSEC), dispatch_get_main_queue(), step);
+            }];
+        }
+        else if ([cmd isEqualToString:@"czjs"]) {   // dev: run script in the Customise Toolbar page
+            NSView *dim = objc_getAssociatedObject(self, &kCustomiserKey);
+            WKWebView *v = (WKWebView *)[[dim.subviews.firstObject subviews] firstObject];
+            if ([v isKindOfClass:WKWebView.class]) [v evaluateJavaScript:arg completionHandler:^(id r, NSError *e) { CtlOut([NSString stringWithFormat:@"czjs %@", e ? e.localizedDescription : r]); }];
+            else CtlOut(@"czjs no customiser");
         }
         else if ([cmd isEqualToString:@"slowmo"]) gSlowMo = MAX(1, MIN(20, arg.doubleValue));   // dev: "slowmo 8" stretches panel animations, "slowmo 1" back
         else if ([cmd isEqualToString:@"hover"]) { VButton *b = self.toolbar.menuBtn; b.hovered = [arg isEqualToString:@"lens"]; b.needsDisplay = YES; }   // dev: Lens as if under the pointer
@@ -13333,6 +13774,7 @@ static NSArray *SettingsSchema(VWindow *win) {
     accentRow[@"options"] = accents; accentRow[@"value"] = @([Defaults() integerForKey:kAccent]);
     gSSet[@"accent"] = ^(id v) { [Defaults() setInteger:[v integerValue] forKey:kAccent]; IrisApplyTheme(); };
     NSMutableArray *tb = [NSMutableArray array];
+    [tb addObject:SButton(@"tbCustomise", @"Arrange the toolbar", @"Drag items between the left, the address bar and the right.", @"Customise…", ^(NSDictionary *a, void (^done)(NSString *)) { [win showToolbarCustomiser:nil]; done(nil); })];
     for (NSArray *b in @[@[@"back", @"Back"], @[@"forward", @"Forward"], @[@"home", @"Home"], @[@"newtab", @"New tab"], @[@"reload", @"Reload"], @[@"star", @"Bookmark star"],
                           @[@"reader", @"Reader"], @[@"share", @"Share"], @[@"shield", @"Ad blocking shield"], @[@"dlalways", @"Downloads, always"]]) {
         NSString *k = b[0];
