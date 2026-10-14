@@ -5,8 +5,8 @@
 <h1 align="center">Iris</h1>
 
 <p align="center">
-  A calm, minimal web browser for macOS.<br>
-  Native AppKit interface, Safari's engine underneath, no Chromium.
+  A quiet, native browser for the Mac: the messenger between you and the web.<br>
+  AppKit interface, Safari's engine underneath, Chrome extensions on its own layer.
 </p>
 
 <p align="center">
@@ -22,57 +22,70 @@
 
 ## The design
 
-Iris gives the page the whole window. There is no tab bar and no sidebar: back, forward and the address float as small capsules in a thin band above the page, and everything else stays out of sight until you reach for it.
+Iris gives the page the whole window. There is no tab bar and no sidebar: back, forward and the address float as small capsules in a thin band above the page, and everything else waits at the edges until you reach for it.
 
-- **Tabs come up from the bottom edge.** Move the pointer to the bottom of the window (or press ⌘S) and your tabs rise as a timeline of page previews, the one you're on at the right end. Pinned tabs sit first, the same size as the rest; a New tab card closes the row.
-- **Bookmarks live under the address.** Click the address and it's selected, ready to type over, with your bookmarks underneath: folders open in place, no dropdown menus, and your other open tabs below them.
-- **Each button does one job.** The lock is this site (connection, cookies, JavaScript, location, camera and microphone, clear data). The shield is blocking (what was blocked here, on or off for this site, block an element). **Lens** (⌘.) is the browser itself: profile, extensions, zoom, and the rest of the menu.
+- **Tabs come out of an edge.** A quiet map of your tabs (one dot each, the one you're on a longer bar) sits on the bottom edge, or down the left or right side if you prefer. As the pointer comes near, the map leans out to meet it; slow down at the edge and your tabs slide out as cards with live previews. Passing by on the way to the Dock doesn't count: Iris waits for the pointer to settle.
+- **Aperture.** Pages load with a line that opens from the centre of the window outward, like an iris widening, in teal, blue and violet that flow out from the middle. A soft core breathes while the page works; when it arrives, the line reaches both edges, blooms once and fades.
+- **Bookmarks live under the address.** Click the address and it's selected, ready to type over, with your bookmarks and open tabs underneath; right-click any of them for more.
+- **Each button does one job.** The lock is this site (connection, cookies, JavaScript, location, camera, microphone). The shield is blocking (what was blocked here, on or off for this site, block an element). **Lens** (⌘.) is the browser itself: profile, extensions, zoom and the rest of the menu.
+
+<p align="center">
+  <img src="assets/aperture.png" alt="Aperture: the loading line opening from the centre" width="900">
+</p>
 
 ## Features
 
+**Tabs**
+- Tabs along the bottom, or down the left or right side (Settings → General → Tabs)
+- Cards with page previews, ⌘1–9 badges, pin and close; drag to reorder, arrows and Return to move between them, type to find one
+- Recency shows as brightness, not position: every tab stays where your hand remembers it
+- Background tabs sleep after a set idle time and wake instantly
+
 **Browsing**
-- Split view (two tabs side by side), private windows, reader mode, tab sleep after a set idle time
-- Location, camera and microphone for sites that ask, decided once per site
-- Profiles, each with its own sign-ins, cookies, history and tabs, marked by a colour (separate website data needs macOS 14)
-- Address suggestions from history, bookmarks and open tabs; built-in pages at `iris://settings`, `iris://downloads`, `iris://history`, `iris://bookmarks`
-- Bookmark import from Helium
+- Split view, private windows, reader mode, profiles (each with its own sign-ins, history and tabs)
+- A built-in code viewer for View Source: the source as sent, or the live page after its scripts ran, laid out and highlighted, with find across the whole file
+- Iris's own right-click menus, with icons and quick actions
+- Built-in pages at `iris://settings`, `iris://history`, `iris://bookmarks`, `iris://downloads`; bookmark import from Helium
 
 **Privacy**
-- Built-in content blocker with filter lists, cosmetic filtering and an element picker
+- Built-in content blocker with EasyList, EasyPrivacy and other lists, element hiding and an element picker
+- The lists compile in a separate helper process, so the browser never carries the memory peak
 - Cookie banners declined automatically (never accepted)
 - Tracking parameters stripped from links, Global Privacy Control, optional HTTPS-only
 
 **Video**
-- Picture in picture from the address bar, and automatically when you switch away from a playing tab
-- Videos resume where you left off after a restart, a reopened tab or a sleeping tab waking
-- The tab restored at launch comes back paused
-- Codec forcing (e.g. H.264 instead of VP9/AV1) for cooler playback on Intel Macs
+- Picture in picture from the address bar, and optionally whenever you switch away from a playing tab
+- A small player for whatever's playing in another tab, shown only while something is actually playing or paused part-way
+- Videos resume where you left off; codec forcing (H.264 instead of VP9/AV1) for cooler playback on Intel Macs
 
 **Downloads**
-- Segmented downloads over up to 8 connections, and a finished connection takes over half of the largest segment still downloading
-- Pause, resume, retry, queue limit and speed limit; finished files are quarantined like Safari's
+- Segmented downloads over up to 8 connections, pause, resume, retry, queue and speed limits; finished files are quarantined like Safari's
 
 **Extensions**
-- Installs Chrome Web Store extensions through its own extension layer, built against the Chrome APIs rather than any one extension: runtime messaging, storage, tabs, scripting (with frame targeting and registered content scripts), context menus, user scripts and declarativeNetRequest (translated to WebKit content rules). Proton Pass, SponsorBlock and Enhancer for YouTube run on it.
+- Installs Chrome Web Store extensions through its own extension layer, built against the Chrome APIs rather than any one extension: runtime messaging, storage, tabs, scripting, context menus, user scripts and declarativeNetRequest (translated to WebKit content rules). Proton Pass, SponsorBlock and Enhancer for YouTube run on it.
 
-**Performance**
-- One rule: background pages share a quarter of the Mac's processor on battery and 40% plugged in, averaged over 10 seconds. Short bursts run at full speed; the page on screen, anything that played sound in the last 90 seconds and Picture in Picture are never slowed.
-- Background tab throttling that adapts to battery or power
+**Performance and reliability**
+- Background pages share a quarter of the Mac's processor on battery and 40% plugged in, averaged over 10 seconds; the page on screen, anything that played sound recently and Picture in Picture are never slowed (Settings → Performance, or switch it off)
+- Its own crash reporter: crashes and page-engine failures are written to `crashes/` beside the app, never to Apple
 
 ## Screenshots
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/tabs.png" alt="Tabs rising from the bottom edge"><p align="center"><sub>Tabs, from the bottom edge</sub></p></td>
+    <td width="50%"><img src="assets/tabs.png" alt="Tabs along the bottom edge"><p align="center"><sub>Tabs, out of the bottom edge</sub></p></td>
+    <td width="50%"><img src="assets/side.png" alt="Tabs down the left side"><p align="center"><sub>Or down a side</sub></p></td>
+  </tr>
+  <tr>
     <td width="50%"><img src="assets/lens.png" alt="Lens"><p align="center"><sub>Lens: the browser in one panel</sub></p></td>
-  </tr>
-  <tr>
     <td width="50%"><img src="assets/shield.png" alt="Blocking panel"><p align="center"><sub>The shield: blocking, for this site or everywhere</sub></p></td>
-    <td width="50%"><img src="assets/split.png" alt="Split view"><p align="center"><sub>Split view</sub></p></td>
   </tr>
   <tr>
+    <td width="50%"><img src="assets/split.png" alt="Split view"><p align="center"><sub>Split view</sub></p></td>
     <td width="50%"><img src="assets/reader.png" alt="Reader mode"><p align="center"><sub>Reader mode</sub></p></td>
-    <td width="50%"><img src="assets/settings.png" alt="Settings"><p align="center"><sub>Settings</sub></p></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/source.png" alt="Code viewer"><p align="center"><sub>View Source, in Iris's own code viewer</sub></p></td>
+    <td width="50%"><img src="assets/about.png" alt="About Iris"><p align="center"><sub>About Iris</sub></p></td>
   </tr>
 </table>
 
@@ -89,19 +102,21 @@ Iris gives the page the whole window. There is no tab bar and no sidebar: back, 
 ./iris stop     # quit Iris
 ```
 
-The script compiles `Iris.m` with clang and bundles `ext-shim.js`, `pages/` and `Iris.icns` into `Iris.app`. It signs with a local identity named "Iris Local Signing" if one exists in your keychain (so macOS permissions persist between builds), otherwise ad hoc.
+The script compiles `Iris.m` with clang and bundles `ext-shim.js`, `pages/` and `Iris.icns` into `Iris.app`. It signs with a local identity if one exists in your keychain (so macOS permissions persist between builds), otherwise ad hoc.
 
 ## Development
 
-While Iris is open it watches its own source. A change is built in the background into `.staged/`, and an **Update** pill appears beside the address; click it when you're ready and Iris restarts into the new build with your tabs restored. Nothing restarts on its own.
+While Iris is open it watches its own source. A change is built in the background, and an **Update** pill appears beside the address; click it when you're ready and Iris restarts into the new build with your tabs restored. Nothing restarts on its own.
+
+Crash reports and the event log land in `crashes/` beside the app (ignored by git).
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `Iris.m` | The whole app: window, capsules, tab strip, panels, blocker, downloads, extensions, settings |
+| `Iris.m` | The whole app: window, capsules, tabs, panels, blocker, downloads, extensions, settings |
 | `ext-shim.js` | The Chrome extension API layer, injected into extension pages |
-| `pages/` | Built-in pages served at `iris://` |
+| `pages/` | Built-in pages served at `iris://`, including the code viewer |
 | `iris` | Build, sign and update script |
 | `Iris.icns` | App icon |
 | `assets/` | Images for this page |

@@ -12201,6 +12201,17 @@ static void CtlOut(NSString *s) {
             for (NSDictionary *d in [Defaults() dictionaryForKey:kTabsState][@"tabs"]) CtlOut([NSString stringWithFormat:@"media saved url=%@ key=%@ time=%@", d[@"url"], d[@"mediaKey"] ?: @"-", d[@"mediaTime"] ?: @"-"]);
         }
         else if ([cmd isEqualToString:@"find"]) [w find:arg forward:YES next:NO];
+        else if ([cmd isEqualToString:@"shelf"]) {   // dev: tabs out (and held) or away, for screenshots
+            if ([arg isEqualToString:@"on"]) { [self showShelf:YES]; ((VTabShelf *)self.shelf).sticky = YES; } else [self showShelf:NO];
+        }
+        else if ([cmd isEqualToString:@"side"]) {   // dev: where the tabs live, 0 bottom, 1 left, 2 right
+            [Defaults() setInteger:MAX(0, MIN(2, arg.integerValue)) forKey:kShelfSide];
+            for (VWindow *x in gWindows) { [x showShelf:NO]; [(VTabShelf *)x.shelf reload]; [x layout]; x.shelfHandle.needsDisplay = YES; [x.shelfHandle updateTrackingAreas]; }
+        }
+        else if ([cmd isEqualToString:@"loadline"]) {   // dev: hold the loading line at a point ("loadline 0.55"), or "loadline off"
+            VLoadLine *ll = (VLoadLine *)self.loadLine;
+            if ([arg isEqualToString:@"off"]) [ll loading:NO progress:1]; else [ll loading:YES progress:arg.doubleValue];
+        }
         else if ([cmd isEqualToString:@"zoom"]) [w setZoomLevel:arg.doubleValue];
         else if ([cmd isEqualToString:@"block"]) { BOOL on = [arg isEqualToString:@"on"]; if (on != [Defaults() boolForKey:kBlock]) [self performSelector:@selector(toggleBlockingGlobal:) withObject:nil]; }
         else if ([cmd isEqualToString:@"size"]) { NSArray *a = [arg componentsSeparatedByString:@" "]; if (a.count == 2) { NSRect f = self.window.frame; f.size = NSMakeSize([a[0] doubleValue], [a[1] doubleValue]); [self.window setFrame:f display:YES]; } }
