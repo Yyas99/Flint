@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Install App</title>
+<style>
+/*THEME*/
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+html{background:transparent;color:var(--text);font:13px/1.4 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;-webkit-font-smoothing:antialiased;-webkit-user-select:none;user-select:none}
+body{background:color-mix(in srgb,var(--bg) 96%,transparent);position:relative;isolation:isolate;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:26px 30px}
+button{font:inherit;color:inherit}
+.aura{position:absolute;inset:-20% -10% auto;height:70%;z-index:-1;pointer-events:none;filter:blur(70px);opacity:var(--ap-glow,.2);
+  background:radial-gradient(35% 45% at 28% 50%,var(--ap-t),transparent),radial-gradient(35% 45% at 52% 40%,var(--ap-b),transparent),radial-gradient(35% 45% at 76% 55%,var(--ap-v),transparent)}
+.view{width:100%;display:none;flex-direction:column;align-items:center;text-align:center;animation:in .35s cubic-bezier(.2,.8,.2,1)}
+.view.on{display:flex}
+@keyframes in{from{opacity:0;transform:translateY(6px)}}
+.icon{width:108px;height:108px;display:block;filter:drop-shadow(0 16px 26px rgba(0,0,0,.35)) drop-shadow(0 2px 4px rgba(0,0,0,.2));animation:float 7s ease-in-out infinite}
+@keyframes float{50%{transform:translateY(-4px)}}
+.kicker{margin-top:16px;font:600 10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.14em;color:var(--faint);text-transform:uppercase}
+.name{margin-top:8px;width:100%;max-width:360px;border:1px solid transparent;background:transparent;border-radius:10px;padding:4px 10px;text-align:center;color:var(--text);
+  font:700 26px/1.2 -apple-system,system-ui;letter-spacing:-.025em;outline:none;transition:border-color .15s,background .15s}
+.name:hover{border-color:var(--border)}
+.name:focus{border-color:color-mix(in srgb,var(--ap-b) 55%,transparent);background:color-mix(in srgb,var(--text) 4%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--ap-b) 14%,transparent)}
+.host{margin-top:6px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--faint)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:16px}
+.chips span{padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:color-mix(in srgb,var(--card) 70%,transparent);color:var(--dim);font-size:11.5px}
+.opt{margin-top:16px;width:100%;max-width:400px;display:flex;align-items:center;gap:12px;padding:11px 14px;border-radius:14px;border:1px solid var(--border);background:color-mix(in srgb,var(--card) 80%,transparent);text-align:left;cursor:pointer}
+.opt span{flex:1}
+.opt b{display:block;font-size:12.5px;font-weight:600}
+.opt small{color:var(--faint);font-size:11px}
+.sw{appearance:none;-webkit-appearance:none;width:34px;height:20px;border-radius:999px;background:var(--hover);position:relative;flex:none;cursor:pointer;transition:background .2s;margin:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s cubic-bezier(.2,.8,.2,1)}
+.sw:checked{background:linear-gradient(90deg,var(--ap-t),var(--ap-b),var(--ap-v))!important}
+.sw:checked::after{transform:translateX(14px)}
+.note{margin-top:12px;max-width:400px;color:var(--faint);font-size:11.5px}
+.acts{display:flex;gap:10px;margin-top:22px}
+.btn{height:34px;padding:0 18px;border-radius:999px;border:1px solid var(--border);background:var(--pill);color:var(--dim);cursor:pointer;font-weight:550}
+.btn:hover{color:var(--text);background:var(--hover)}
+.go{height:34px;padding:0 22px;border:0;border-radius:999px;cursor:pointer;font-weight:650;color:#0b0d16;display:inline-flex;align-items:center;gap:8px;
+  background:linear-gradient(90deg,var(--ap-t),var(--ap-b),var(--ap-v),var(--ap-b),var(--ap-t));background-size:300% 100%;animation:flow 6s linear infinite;
+  box-shadow:0 0 18px color-mix(in srgb,var(--ap-b) 40%,transparent),inset 0 1px 0 rgba(255,255,255,.35);transition:transform .15s,opacity .15s}
+.go:active{transform:scale(.97)}
+.go[disabled]{opacity:.7;cursor:default}
+@keyframes flow{to{background-position:300% 0}}
+.spin{width:13px;height:13px;border-radius:50%;border:2px solid rgba(11,13,22,.25);border-top-color:#0b0d16;animation:spin .8s linear infinite;display:none}
+.go.busy .spin{display:block}
+@keyframes spin{to{transform:rotate(360deg)}}
+.done-ring{position:relative;width:108px;height:108px}
+.done-ring .icon{animation:none}
+.tick{position:absolute;right:-6px;bottom:-6px;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--ap-t),var(--ap-b),var(--ap-v));box-shadow:0 0 0 3px var(--bg),0 6px 16px rgba(0,0,0,.3);animation:pop .45s cubic-bezier(.2,1.4,.3,1) .1s both}
+.tick svg{width:16px;height:16px;fill:none;stroke:#0b0d16;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+@keyframes pop{from{transform:scale(0)}}
+h1{margin:18px 0 0;font:700 22px/1.2 -apple-system,system-ui;letter-spacing:-.02em}
+.sub{margin:6px 0 0;color:var(--dim);max-width:380px}
+.err{margin-top:12px;color:#f08a8a;font-size:12px;max-width:400px}
+@media (prefers-reduced-motion:reduce){.icon,.go{animation:none}}
+</style>
+</head>
+<body>
+<div class="aura" aria-hidden="true"></div>
+
+<section class="view on" id="ask">
+  <img class="icon" id="icon" alt="">
+  <div class="kicker" id="kicker">Install as an app</div>
+  <input class="name" id="name" spellcheck="false" autocomplete="off" aria-label="App name">
+  <div class="host" id="host"></div>
+  <div class="chips"><span>Its own window</span><span>A Dock icon</span><span>Other sites open in Iris</span></div>
+  <label class="opt"><span><b>Bring over your sign-in</b><small>Copies this site's cookies into the app once, so you stay signed in</small></span><input type="checkbox" class="sw" id="cookies" checked></label>
+  <div class="note" id="note"></div>
+  <div class="err" id="err"></div>
+  <div class="acts"><button class="btn" id="cancel">Cancel</button><button class="go" id="go"><i class="spin"></i><span id="goText">Install</span></button></div>
+</section>
+
+<section class="view" id="done">
+  <div class="done-ring"><img class="icon" id="icon2" alt=""><div class="tick"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div></div>
+  <h1 id="doneTitle"></h1>
+  <p class="sub">It's in your Applications, in Iris Apps. Drag it to the Dock to keep it there.</p>
+  <div class="acts"><button class="btn" id="reveal">Show in Finder</button><button class="go" id="open"><span id="openText">Open</span></button></div>
+</section>
+
+<script nonce="{{NONCE}}">
+const call = (op, args) => window.webkit.messageHandlers.irisInternal.postMessage(Object.assign({op}, args || {}));
+const $ = s => document.querySelector(s);
+let S = null, path = null, busy = false;
+
+function show(id) { document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === id)); }
+
+async function install() {
+  if (busy || !S) return;
+  busy = true; $('#err').textContent = '';
+  $('#go').classList.add('busy'); $('#go').disabled = true; $('#goText').textContent = 'Installing…';
+  let r = null;
+  try { r = await call('install.go', {name: $('#name').value.trim(), cookies: $('#cookies').checked}); } catch (e) { r = {error: String(e)}; }
+  busy = false; $('#go').classList.remove('busy'); $('#go').disabled = false; $('#goText').textContent = S.again ? 'Install again' : 'Install';
+  if (!r || r.error) { $('#err').textContent = (r && r.error) || 'Something went wrong'; return; }
+  path = r.path;
+  $('#icon2').src = S.icon; $('#doneTitle').textContent = `${r.name} is installed`; $('#openText').textContent = `Open ${r.name}`;
+  show('done'); $('#open').focus();
+}
+
+$('#go').onclick = install;
+$('#cancel').onclick = () => call('install.done');
+$('#open').onclick = () => call('install.open', {path});
+$('#reveal').onclick = () => call('install.reveal', {path});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') call('install.done');
+  if (e.key === 'Enter' && $('#ask').classList.contains('on')) { e.preventDefault(); install(); }
+  else if (e.key === 'Enter' && $('#done').classList.contains('on')) { e.preventDefault(); call('install.open', {path}); }
+});
+
+call('install.get').then(s => {
+  if (!s || s.error) { $('#err').textContent = (s && s.error) || 'Nothing to install'; $('#go').disabled = true; return; }
+  S = s;
+  $('#icon').src = s.icon; $('#name').value = s.name; $('#host').textContent = s.host;
+  $('#kicker').textContent = s.again ? 'Already installed · install again to update it' : 'Install as an app';
+  $('#goText').textContent = s.again ? 'Install again' : 'Install';
+  if (!s.manifest) $('#note').textContent = "This site doesn't describe itself as an app, so Iris makes one from its name and icon.";
+  $('#name').focus(); $('#name').select();
+});
+</script>
+</body>
+</html>

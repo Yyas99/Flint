@@ -108,6 +108,7 @@ static NSArray<NSArray *> *ToolbarCatalog(void) {
         @[@"reload", @"Reload", @"arrow.clockwise", @"LAR", @"L", @"Stops a page while it loads"],
         @[@"home", @"Home", @"house", @"LAR", @"L", @"Your new-tab page"],
         @[@"newtab", @"New Tab", @"plus", @"LAR", @"L", @"Same as ⌘T"],
+        @[@"install", @"Install App", @"arrow.down.app", @"LAR", @"A", @"Appears on sites you can install"],
         @[@"star", @"Bookmark", @"star", @"LAR", @"A", @"Save or edit this page"],
         @[@"pip", @"Picture in Picture", @"pip.enter", @"LAR", @"A", @"Appears while a video plays"],
         @[@"reader", @"Reader", @"doc.plaintext", @"LAR", @"A", @"Just the article"],
@@ -126,7 +127,7 @@ static NSArray<NSArray *> *ToolbarCatalog(void) {
 }
 static NSArray *ToolbarItem(NSString *k) { for (NSArray *i in ToolbarCatalog()) if ([i[0] isEqualToString:k]) return i; return nil; }
 static NSDictionary *ToolbarLayoutDefault(void) {
-    return @{@"left": @[@"back", @"forward", @"reload"], @"address": @[@"pip", @"star"], @"right": @[@"shield", @"downloads", @"extensions"]};
+    return @{@"left": @[@"back", @"forward", @"reload"], @"address": @[@"install", @"pip", @"star"], @"right": @[@"shield", @"downloads", @"extensions"]};
 }
 // The stored arrangement, cleaned: known keys only, each once, and only in a group it may live in.
 static NSDictionary *ToolbarSanitize(NSDictionary *d) {
@@ -491,6 +492,7 @@ static NSURL *StripTracking(NSURL *u) {
 
 @interface VTab : NSObject
 @property (strong) VPage *web;              // nil while asleep or on the new tab page
+@property BOOL installable;   // the page offers itself as an app (it has a web app manifest)
 @property (strong) VPage *homeBack, *homeFwd;   // Home sits in the tab's history: the page you left for it (Back), the one you came back from (Forward)
 @property BOOL homeAhead;                        // you came Back from Home to this page, so Forward from it returns there
 @property BOOL homeAnchor;                       // this page was opened from Home, so Back from its first entry returns there
@@ -658,6 +660,14 @@ static NSURL *StripTracking(NSURL *u) {
 - (void)restorePage:(VPage *)page in:(VTab *)t anchored:(BOOL)anchored;
 - (void)showToolbarCustomiser:(id)s;
 - (void)closeToolbarCustomiser;
+- (void)showOverlay:(NSString *)page size:(NSSize)size;
+- (void)installWebApp:(id)s;
+- (void)openInstalledApp:(id)s;
+- (void)layoutWebApp;
+- (void)frameContent;
+- (NSView *)appBar;
+- (void)updateEmber;
+- (void)refreshWebAppBar;
 - (NSRect)shelfFrame;
 - (NSRect)shelfRestFrame;
 @end
@@ -779,8 +789,30 @@ static WKWebsiteDataStore *ProfileStore(NSString *pid) {
     return s;
 }
 @class VWindow;
+// Installed web apps (PWAs). Each has a small .app of its own in ~/Applications/Iris Apps that runs this same code;
+// in that process gWebApp holds the app's description (from its Info.plist) and Iris shows the app instead of the browser.
+static NSDictionary *gWebApp;
+static NSURL *WebAppScopeURL(void) { return [NSURL URLWithString:gWebApp[@"scope"] ?: gWebApp[@"start"] ?: @""]; }
+// In the app: the same site (scheme, host and port) as its scope. Anything else opens in Iris.
+static BOOL WebAppInScope(NSURL *u) {
+    if (!gWebApp || !u) return YES;
+    NSString *sc = u.scheme.lowercaseString ?: @"";
+    if (![sc hasPrefix:@"http"]) return [@[@"about", @"blob", @"data", @"iris"] containsObject:sc];
+    NSURL *s = WebAppScopeURL();
+    return [u.host.lowercaseString isEqualToString:s.host.lowercaseString] && [sc isEqualToString:s.scheme.lowercaseString] && [(u.port ?: @0) isEqual:(s.port ?: @0)];
+}
+static NSDictionary *WebAppFor(NSURL *u);
+static VWindow *WebAppOpenWindow(NSURL *u);   // in the app: a new window of it   // the installed app for a page's site, if any (defined with the rest of the web-app code)
+static void OpenInIris(NSURL *u) {
+    if (!u) return;
+    NSString *main = gWebApp[@"mainApp"];
+    if (main.length && [NSFileManager.defaultManager fileExistsAtPath:main])
+        [NSWorkspace.sharedWorkspace openURLs:@[u] withApplicationAtURL:[NSURL fileURLWithPath:main] configuration:[NSWorkspaceOpenConfiguration configuration] completionHandler:nil];
+    else [NSWorkspace.sharedWorkspace openURL:u];
+}
 static BOOL gQuitting;   // set once Iris has decided to quit: windows closing now must not overwrite the saved tabs
-static void SettingsOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *));   // at launch, restored tabs wait until the extensions are up (then load)
+static void SettingsOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *));
+static void WebAppOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *));   // installed web apps: the Install page and Settings   // at launch, restored tabs wait until the extensions are up (then load)
 static NSMutableArray<VWindow *> *gWindows;  // every open browser window, oldest first
 
 // The browser window a view, window or tab belongs to; falls back to the active one.
@@ -866,7 +898,7 @@ static NSMutableDictionary<NSString *, VHistory *> *gHistories;
 }
 
 - (void)flush {
-    if (!self.dirty) return;
+    if (!self.dirty || gWebApp) return;   // an installed app reads Iris's history but never writes it (Iris may be running too)
     self.dirty = NO;
     NSArray *all = [self.byURL.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         return [b[@"t"] compare:a[@"t"]];
@@ -1010,6 +1042,7 @@ static NSMutableDictionary *ConvertChromeNode(NSDictionary *n) {
 
 - (void)save {
     gBmVersion++;
+    if (gWebApp) return;   // bookmarks belong to Iris; an app only reads them
     NSData *d = [NSJSONSerialization dataWithJSONObject:self.bar options:NSJSONWritingPrettyPrinted error:nil];
     [d writeToFile:SupportFile(@"bookmarks.json") atomically:YES];
 }
@@ -1278,6 +1311,7 @@ static NSString *ListDir(void) {
 }
 
 - (void)updateLists:(BOOL)force done:(void (^)(void))done {
+    if (gWebApp) { if (done) done(); return; }   // Iris keeps the lists fresh; an installed app uses what's there
     if (done) [self.waiters addObject:[done copy]];
     if (self.busy) return;
     self.busy = YES;
@@ -2584,8 +2618,9 @@ static NSString *gUpdateNotes;
     VButton *bms = [VButton symbol:@"book" size:13 tip:@"Bookmarks" target:w action:@selector(showBookmarks:)];
     VButton *priv = [VButton symbol:@"eye.slash" size:13 tip:@"New Private Window (⇧⌘N)" target:nil action:@selector(newPrivateWindow:)];
     VButton *find = [VButton symbol:@"magnifyingglass" size:13 tip:@"Find on Page (⌘F)" target:w action:@selector(showFind:)];
-    for (VButton *b in @[split, tabs, hist, bms, priv, find]) { b.hidden = YES; [self addSubview:b]; }
-    self.keyed = @{@"split": split, @"tabs": tabs, @"history": hist, @"bookmarks": bms, @"private": priv, @"find": find};
+    VButton *inst = [VButton symbol:@"arrow.down.app" size:13 tip:@"Install this site as an app" target:w action:@selector(installWebApp:)];
+    for (VButton *b in @[split, tabs, hist, bms, priv, find, inst]) { b.hidden = YES; [self addSubview:b]; }
+    self.keyed = @{@"split": split, @"tabs": tabs, @"history": hist, @"bookmarks": bms, @"private": priv, @"find": find, @"install": inst};
     self.dlRing = [[VRing alloc] initWithFrame:NSMakeRect(0, 0, 30, 28)]; self.dlRing.value = -1;
     self.dlRing.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [self.dlBtn addSubview:self.dlRing]; [self addSubview:self.dlBtn];
@@ -2668,6 +2703,7 @@ static NSString *gUpdateNotes;
 - (BOOL)itemLive:(NSString *)k {
     VTab *t = WinFor(self).current;
     if ([k isEqualToString:@"pip"]) return t.web && (t.hasVideo || t.inPiP);
+    if ([k isEqualToString:@"install"]) return !gWebApp && !WinFor(self).isPrivate && t.web && [t.url hasPrefix:@"http"] && (t.installable || WebAppFor([NSURL URLWithString:t.url]) != nil);
     if ([k isEqualToString:@"star"]) return !t.isHome;
     if ([k isEqualToString:@"downloads"]) return VDownloads.shared.worthShowing || ToolbarShows(@"dlalways");
     if ([k isEqualToString:@"extensions"]) return FExtHost.shared.extensions.count > 0;
@@ -5602,6 +5638,11 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
 - (void)webView:(WKWebView *)w decidePolicyForNavigationAction:(WKNavigationAction *)a preferences:(WKWebpagePreferences *)prefs decisionHandler:(void (^)(WKNavigationActionPolicy, WKWebpagePreferences *))decide {
     NSURL *u = a.request.URL;
     _lastMethod = a.request.HTTPMethod ?: @"GET";
+    // An installed app: a link you click to another site opens in Iris. Redirects and forms still go through
+    // (signing in often passes through another site and comes back), and the app's bar shows where you are.
+    if (gWebApp && a.targetFrame.isMainFrame && a.navigationType == WKNavigationTypeLinkActivated && [u.scheme hasPrefix:@"http"] && !WebAppInScope(u) && WebAppInScope(w.URL)) {
+        OpenInIris(u); decide(WKNavigationActionPolicyCancel, prefs); return;
+    }
     // JavaScript: on everywhere unless you turned it off globally or for this site
     if (a.targetFrame.isMainFrame) {
         NSString *h = HostOf(u);
@@ -5703,7 +5744,7 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
     dispatch_async(dispatch_get_main_queue(), ^{ if (t && [PW.tabs containsObject:t]) [PW closeTab:t]; });
 }
 
-- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { self.blocked = 0; self.tab.blocked = 0; _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; }
+- (void)webView:(WKWebView *)w didCommitNavigation:(WKNavigation *)n { self.blocked = 0; self.tab.blocked = 0; self.tab.installable = NO; _httpsUpgradeOf = nil; if (![HostOf(w.URL) isEqualToString:_certErrorFor ?: @""] && ![w.URL.host.lowercaseString isEqualToString:_certErrorFor ?: @""]) _certErrorFor = nil; [FExtHost.shared tab:self.tab event:@"loading"]; [self holdLaunchPlayback]; }
 // The tab you had open at launch comes back paused, and stays paused until you click or press a key on it.
 // Playback is refused the way a browser's autoplay block refuses it (the page's play() is turned down with
 // "not allowed"), so YouTube shows its play button instead of starting and being stopped a moment later.
@@ -5720,6 +5761,13 @@ static NSMutableSet<NSString *> *gHTTPAllowed;   // hosts you chose to open over
 }
 - (void)webView:(WKWebView *)w didFinishNavigation:(WKNavigation *)n {
     [self sampleHeaderColor];
+    if (!gWebApp && [w.URL.scheme hasPrefix:@"http"]) {   // does the site offer itself as an app? (the address bar's install button)
+        __weak VPage *ws = self;
+        [w evaluateJavaScript:@"!!document.querySelector('link[rel~=\"manifest\"]')" completionHandler:^(id r, NSError *e) {
+            VPage *p = ws; BOOL v = [r respondsToSelector:@selector(boolValue)] && [r boolValue];
+            if (p && p.tab.installable != v) { p.tab.installable = v; [PW refreshChrome]; }
+        }];
+    }
     if (!w.isLoading && self.loading) { self.loading = NO; self.progress = 1; [PW pageChanged:self]; }
     [self checkVideo];
     [self resumeMedia];
@@ -5969,6 +6017,7 @@ static NSString *MediaKey(NSURL *u) {
 #pragma mark WKUIDelegate: popups become tabs (window.opener keeps working), dialogs, file pickers
 
 - (WKWebView *)webView:(WKWebView *)w createWebViewWithConfiguration:(WKWebViewConfiguration *)c forNavigationAction:(WKNavigationAction *)a windowFeatures:(WKWindowFeatures *)f {
+    if (gWebApp && a.navigationType == WKNavigationTypeLinkActivated && [a.request.URL.scheme hasPrefix:@"http"] && !WebAppInScope(a.request.URL)) { OpenInIris(a.request.URL); return nil; }
     FWebView *nw = [[FWebView alloc] initWithFrame:self.bounds configuration:c];
     VPage *p = [[VPage alloc] initWithFrame:self.bounds web:nw];
     [PW newTabWithPage:p url:a.request.URL select:YES];
@@ -8416,6 +8465,7 @@ static NSURL *WebURL(id s) {
     if ([op hasPrefix:@"dl."]) { DownloadOp(op, b, win, reply); return; }
     if ([op hasPrefix:@"settings."]) { SettingsOp(op, b, win, reply); return; }
     if ([op hasPrefix:@"toolbar."]) { ToolbarOp(op, b, win, reply); return; }
+    if ([op hasPrefix:@"install."] || [op hasPrefix:@"apps."]) { WebAppOp(op, b, win, reply); return; }
     if ([op isEqualToString:@"history.list"]) {
         NSMutableArray *out = [NSMutableArray array];
         for (NSDictionary *e in [VHistory.shared all]) [out addObject:@{@"u": e[@"u"] ?: @"", @"ti": e[@"ti"] ?: @"", @"t": e[@"t"] ?: @0, @"c": e[@"c"] ?: @1}];
@@ -8550,12 +8600,13 @@ static void PageHearsMouse(VWindow *w, BOOL hears);
 @interface VCustomiserDim : NSView
 @property (weak) VWindow *owner;
 @property (strong) NSView *box;
+@property NSSize want;   // the editor's size, when the window has room for it
 - (void)placeBox;
 @end
 @implementation VCustomiserDim
 - (void)placeBox {
     NSRect b = self.bounds; CGFloat top = 44;
-    CGFloat w = MIN(900, NSWidth(b) - 40), h = MIN(640, NSHeight(b) - top - 28);
+    CGFloat w = MIN(self.want.width ?: 900, NSWidth(b) - 40), h = MIN(self.want.height ?: 640, NSHeight(b) - top - 28);
     BOOL flipped = self.isFlipped;
     CGFloat y = flipped ? top + 6 : NSHeight(b) - top - 6 - h;
     self.box.frame = NSMakeRect(round((NSWidth(b) - w) / 2), y, w, h);
@@ -8574,11 +8625,14 @@ static void PageHearsMouse(VWindow *w, BOOL hears);
     [self newTab:[NSURL URLWithString:prefix] select:YES];
 }
 // Customise Toolbar: the editor floats over the page, below the bar, so the bar itself is the live preview.
-- (void)showToolbarCustomiser:(id)s {
+- (void)showToolbarCustomiser:(id)s { [self showOverlay:@"toolbar" size:NSMakeSize(900, 640)]; }
+// An iris:// page floating over the window (Customise Toolbar, Install App): the page under it is shaded and quiet.
+- (void)showOverlay:(NSString *)page size:(NSSize)size {
     NSView *root = self.window.contentView;
     if (objc_getAssociatedObject(self, &kCustomiserKey)) return;
     [self closePanels];
     VCustomiserDim *dim = [[VCustomiserDim alloc] initWithFrame:root.bounds];
+    dim.want = size;
     dim.owner = self; dim.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     dim.wantsLayer = YES; dim.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:ThemeIsLight() ? 0.16 : 0.42].CGColor;
     WKWebViewConfiguration *cfg = [WKWebViewConfiguration new];
@@ -8595,7 +8649,7 @@ static void PageHearsMouse(VWindow *w, BOOL hears);
     [root addSubview:self.toolbar positioned:NSWindowAbove relativeTo:nil];   // the bar stays on top, lit: it's the preview
     objc_setAssociatedObject(self, &kCustomiserKey, dim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     PageHearsMouse(self, NO);   // pages under the shade still get pointer moves (tracking areas ignore what covers them) and would fight over the cursor
-    [web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"iris://toolbar"]]];
+    [web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[@"iris://" stringByAppendingString:page]]]];
     dim.alphaValue = 0; box.layer.transform = CATransform3DMakeTranslation(0, -8, 0);
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.2; dim.animator.alphaValue = 1; }];
     [self.window makeFirstResponder:web];
@@ -9408,7 +9462,7 @@ static NSInteger gShelfGen; static BOOL gShelfIn; static CFTimeInterval gShelfSi
 static __weak VWindow *gMuted;
 static void PageHearsMouse(VWindow *w, BOOL hears) {
     if (!w) return;
-    if (hears && objc_getAssociatedObject(w, &kCustomiserKey)) hears = NO;   // Customise Toolbar is open: the pages under it stay out of the pointer's way
+    if (hears && (objc_getAssociatedObject(w, &kCustomiserKey) || [w panelOpen] || gMuted == w)) hears = NO;   // something of Iris's is over the page   // Customise Toolbar is open: the pages under it stay out of the pointer's way
     NSMutableArray<WKWebView *> *webs = [NSMutableArray array];
     for (VTab *t in w.tabs) if (t.web.web) [webs addObject:t.web.web];
     SEL a = NSSelectorFromString(@"_setIgnoresMouseMoveEvents:"), b = NSSelectorFromString(@"_setIgnoresNonWheelEvents:");
@@ -9421,8 +9475,8 @@ static void PageHearsMouse(VWindow *w, BOOL hears) {
 static void ShelfMuteFor(VWindow *w) {   // w: the window whose widget is under the pointer, or nil
     VWindow *cur = gMuted;
     if (cur == w) { if (w) [NSCursor.arrowCursor set]; return; }
+    gMuted = w;   // first, so un-muting the old window isn't refused because it still looks muted
     if (cur) PageHearsMouse(cur, YES);
-    gMuted = w;
     if (w) PageHearsMouse(w, NO);
 }
 static void ShelfTrack(NSPoint screen) {
@@ -9536,6 +9590,7 @@ static void InstallShelfMonitor(void) {
     return side == 1 ? NSOffsetRect(f, -16, 0) : side == 2 ? NSOffsetRect(f, 16, 0) : NSOffsetRect(f, 0, 14);
 }
 - (void)showShelf:(BOOL)on {
+    if (gWebApp && on) return;   // an installed app has no tabs to show
     VTabShelf *s = (VTabShelf *)self.shelf;
     if (!s || s.shown == on) return;
     if (on && [[self valueForKey:@"pageFull"] boolValue]) return;
@@ -9850,6 +9905,7 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
 }
 - (void)present:(NSRect)frame {
     self.shown = YES;
+    PageHearsMouse(self.owner, NO);   // the page under a panel keeps getting pointer moves (tracking areas ignore what covers them): it mustn't set the cursor
     if (self.superview) [self.superview addSubview:self positioned:NSWindowAbove relativeTo:nil];
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     self.frame = NSOffsetRect(frame, 0, -6); self.alphaValue = 0; self.hidden = NO;
@@ -9893,6 +9949,7 @@ static NSImage *PanelLetter(NSString *s, CGFloat size) {
     if (!self.shown) return;
     if (self.layer.mask) self.layer.mask = nil;
     self.shown = NO; self.hover = -1;
+    PageHearsMouse(self.owner, YES);
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.1; self.animator.alphaValue = 0; }
                        completionHandler:^{ if (!self.shown) self.hidden = YES; }];
 }
@@ -10778,6 +10835,11 @@ static NSString *CreateProfile(NSString *name) {
 #pragma mark Tabs
 
 - (void)newTab:(NSURL *)u select:(BOOL)sel {
+    if (gWebApp && self.tabs.count) {   // an app window holds one page: more of the app is a new window, anything else opens in Iris
+        if (!u) u = [NSURL URLWithString:gWebApp[@"start"]];
+        if (WebAppInScope(u)) WebAppOpenWindow(u); else OpenInIris(u);
+        return;
+    }
     VTab *t = [VTab new]; t.owner = self;
     t.isHome = (u == nil);
     [self.tabs addObject:t];   // new tabs arrive at the right end of the strip; they stay where you put them
@@ -10848,6 +10910,7 @@ static NSString *CreateProfile(NSString *name) {
 
 - (void)closeTab:(VTab *)t {
     NSUInteger i = [self.tabs indexOfObject:t]; if (i == NSNotFound) return;
+    if (gWebApp && self.tabs.count <= 1) { [self.window close]; return; }   // an app window is its page
     if (t.url && !t.isHome) {   // remembered with its back/forward history, so reopening brings all of it back
         NSMutableDictionary *d = [@{@"url": t.url, @"title": t.title ?: @""} mutableCopy];
         id st = t.web ? [t.web sessionState] : t.savedState;
@@ -10970,7 +11033,7 @@ static NSString *CreateProfile(NSString *name) {
 }
 // Every normal window is saved (the first as the main one); private windows never are.
 - (void)saveSession {
-    if (gQuitting) return;   // the quit already saved; nothing after it may replace that
+    if (gQuitting || gWebApp) return;   // an installed app doesn't keep Iris's tabs   // the quit already saved; nothing after it may replace that
     NSMutableArray *normal = [NSMutableArray array];
     for (VWindow *w in gWindows) if (!w.isPrivate) [normal addObject:[w sessionDict]];
     if (!normal.count) { [Defaults() setObject:@{@"tabs": @[], @"current": @0} forKey:kTabsState]; DLog(@"session: no windows left, nothing saved"); return; }
@@ -11081,8 +11144,10 @@ static void PausePage(VPage *p) { [p.web evaluateJavaScript:@"document.querySele
         [self showShelf:NO];
         self.content.frame = root.bounds; [self placePages];
         self.content.layer.borderWidth = 0; self.content.layer.cornerRadius = 0; self.capTL.hidden = self.capBR.hidden = YES;
+        if (gWebApp) self.appBar.hidden = YES;
         return;
     }
+    if (gWebApp) { self.appBar.hidden = NO; [self layoutWebApp]; return; }   // an installed app: its own bar instead of the browser's
     // The capsules float in their own band of the window's ground, so they never cover the page;
     // the page fills everything below it, edge to edge.
     CGFloat top = 36;   // slim band
@@ -11247,11 +11312,19 @@ static void RedrawTree(NSView *v) { v.needsDisplay = YES; for (NSView *s in v.su
     self.sidebar.needsDisplay = YES;
     self.shelfHandle.needsDisplay = YES;   // the tab map at the bottom edge
     self.window.title = t.title.length ? t.title : @"Iris";
+    if (gWebApp) [self refreshWebAppBar];
+    else {   // the install button: install the site, or open the app it already is
+        VButton *ib = tb.keyed[@"install"];
+        BOOL have = WebAppFor([NSURL URLWithString:t.url ?: @""]) != nil;
+        NSString *sym = have ? @"arrow.up.forward.app" : @"arrow.down.app";
+        if (![ib.symbolName isEqualToString:sym]) { ib.symbolName = sym; ib.toolTip = have ? @"Open in its app" : @"Install this site as an app"; ib.needsDisplay = YES; }
+    }
 }
 
 #pragma mark Address bar
 
 - (void)focusAddress {
+    if (gWebApp) return;   // an installed app has no address bar
     if (!self.window.isKeyWindow) [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.toolbar.field];
 }
@@ -11801,6 +11874,14 @@ static BOOL RemoveNode(NSMutableArray *list, id n) {
     [(VShelfHandle *)self.shelfHandle flashNewTab];
 }
 - (void)newTabWithPage:(VPage *)p url:(NSURL *)u select:(BOOL)sel {
+    if (gWebApp && self.tabs.count) {   // a window the page opened (a sign-in popup): its own window, still talking to its opener
+        VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"empty": @YES}];
+        NSRect f = self.window.frame; NSSize s = NSMakeSize(MIN(560, NSWidth(f)), MIN(720, NSHeight(f)));
+        [w.window setFrame:NSMakeRect(NSMidX(f) - s.width / 2, NSMidY(f) - s.height / 2, s.width, s.height) display:NO];
+        [w newTabWithPage:p url:u select:YES];
+        [w showWindow:nil]; [w windowDidResize:nil]; [w.window makeKeyAndOrderFront:nil];
+        return;
+    }
     VTab *t = [VTab new]; t.owner = self;
     t.url = u.absoluteString; t.title = u.host ?: @"New Tab";
     p.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -12700,6 +12781,598 @@ static volatile BOOL gGovRunning;
 }
 + (void)stop { gGovRunning = NO; GovResumeAll(); }
 @end
+#pragma mark - Web apps (installed PWAs)
+
+// A site installed as an app gets a real .app in ~/Applications/Iris Apps: its own name, icon, Dock tile and windows.
+// The .app carries a copy of Iris itself plus an IrisWebApp entry in its Info.plist; started that way, Iris runs as the
+// app (gWebApp is set) with a slim bar of the site's colour instead of the browser's controls. Pages outside the app's
+// site open in Iris. The app keeps its own website data, so your sign-in is carried over once, at install.
+
+static NSString *WebAppsDir(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/Iris Apps"]; }
+static NSString *WebAppDataDir(NSString *ident) {
+    NSString *d = SupportFile([@"WebApps" stringByAppendingPathComponent:ident ?: @"_"]);
+    [NSFileManager.defaultManager createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+    return d;
+}
+static NSMutableArray<NSDictionary *> *WebAppRegistry(void) {
+    NSData *d = [NSData dataWithContentsOfFile:SupportFile(@"webapps.json")];
+    NSArray *a = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+    NSMutableArray *out = [NSMutableArray array];
+    for (id x in [a isKindOfClass:NSArray.class] ? a : @[]) if ([x isKindOfClass:NSDictionary.class] && [x[@"id"] isKindOfClass:NSString.class]) [out addObject:x];
+    return out;
+}
+static void WebAppSaveRegistry(NSArray *a) {
+    NSData *d = [NSJSONSerialization dataWithJSONObject:a ?: @[] options:NSJSONWritingPrettyPrinted error:nil];
+    [d writeToFile:SupportFile(@"webapps.json") atomically:YES];
+}
+static NSString *OriginOf(NSURL *u) {
+    if (!u.host) return @"";
+    return [NSString stringWithFormat:@"%@://%@%@", u.scheme.lowercaseString, u.host.lowercaseString, u.port ? [NSString stringWithFormat:@":%@", u.port] : @""];
+}
+// The installed app for a page (same site as its scope), if its .app is still there.
+static NSDictionary *WebAppFor(NSURL *u) {
+    if (gWebApp || ![u.scheme hasPrefix:@"http"]) return nil;
+    static NSArray *cache; static NSTimeInterval at;
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    if (!cache || now - at > 5) { cache = WebAppRegistry(); at = now; }
+    NSString *o = OriginOf(u);
+    for (NSDictionary *a in cache) if ([OriginOf([NSURL URLWithString:a[@"scope"] ?: a[@"start"] ?: @""]) isEqualToString:o] && [NSFileManager.defaultManager fileExistsAtPath:a[@"path"] ?: @""]) return a;
+    return nil;
+}
+static void WebAppRegistryChanged(void) {   // the cache above, and every window's install button
+    for (VWindow *w in gWindows) { [w.toolbar layoutBar]; [w refreshChrome]; }
+}
+
+#pragma mark Icons
+
+// PNG bytes of an image drawn at exactly `px` pixels square.
+static NSData *PNGAt(NSImage *im, NSInteger px) {
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:px pixelsHigh:px bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                                                                 colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    rep.size = NSMakeSize(px, px);
+    [NSGraphicsContext saveGraphicsState];
+    NSGraphicsContext *g = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    g.imageInterpolation = NSImageInterpolationHigh;
+    NSGraphicsContext.currentContext = g;
+    [im drawInRect:NSMakeRect(0, 0, px, px) fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+    [NSGraphicsContext restoreGraphicsState];
+    return [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+}
+// An .icns written by hand (PNG entries), so no extra framework is needed.
+static BOOL WriteICNS(NSImage *im, NSString *path) {
+    NSArray *entries = @[@[@"icp4", @16], @[@"icp5", @32], @[@"icp6", @64], @[@"ic07", @128], @[@"ic08", @256], @[@"ic09", @512], @[@"ic10", @1024],
+                         @[@"ic11", @32], @[@"ic12", @64], @[@"ic13", @256], @[@"ic14", @512]];
+    NSMutableData *body = [NSMutableData data];
+    for (NSArray *e in entries) {
+        NSData *png = PNGAt(im, [e[1] integerValue]); if (!png) continue;
+        uint32_t len = CFSwapInt32HostToBig((uint32_t)png.length + 8);
+        [body appendData:[e[0] dataUsingEncoding:NSASCIIStringEncoding]]; [body appendBytes:&len length:4]; [body appendData:png];
+    }
+    NSMutableData *file = [NSMutableData dataWithData:[@"icns" dataUsingEncoding:NSASCIIStringEncoding]];
+    uint32_t total = CFSwapInt32HostToBig((uint32_t)body.length + 8);
+    [file appendBytes:&total length:4]; [file appendData:body];
+    return [file writeToFile:path atomically:YES];
+}
+static BOOL ImageHasClearCorners(NSImage *im) {
+    NSData *png = PNGAt(im, 64);
+    NSBitmapImageRep *r = png ? [[NSBitmapImageRep alloc] initWithData:png] : nil;
+    if (!r) return NO;
+    NSInteger clear = 0;
+    for (NSArray *p in @[@[@1, @1], @[@62, @1], @[@1, @62], @[@62, @62]]) if ([r colorAtX:[p[0] integerValue] y:[p[1] integerValue]].alphaComponent < 0.6) clear++;
+    return clear >= 2;
+}
+static NSColor *ColorFromCSS(NSString *s) {
+    s = [Trim(s ?: @"") lowercaseString];
+    if ([s hasPrefix:@"#"]) {
+        NSString *h = [s substringFromIndex:1];
+        if (h.length == 3) h = [NSString stringWithFormat:@"%C%C%C%C%C%C", [h characterAtIndex:0], [h characterAtIndex:0], [h characterAtIndex:1], [h characterAtIndex:1], [h characterAtIndex:2], [h characterAtIndex:2]];
+        if (h.length >= 6) { unsigned v = 0; [[NSScanner scannerWithString:[h substringToIndex:6]] scanHexInt:&v]; return Hex(v); }
+    }
+    if ([s hasPrefix:@"rgb"]) {
+        NSArray *n = [[[s componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"rgba() "]] componentsJoinedByString:@""] componentsSeparatedByString:@","];
+        if (n.count >= 3) return [NSColor colorWithSRGBRed:[n[0] doubleValue] / 255 green:[n[1] doubleValue] / 255 blue:[n[2] doubleValue] / 255 alpha:1];
+    }
+    NSDictionary *named = @{@"white": @0xffffff, @"black": @0x000000};
+    if (named[s]) return Hex([named[s] unsignedIntValue]);
+    return nil;
+}
+static BOOL ColorIsLight(NSColor *c) {
+    NSColor *s = [c colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    return s && (0.299 * s.redComponent + 0.587 * s.greenComponent + 0.114 * s.blueComponent) > 0.6;
+}
+// The app's Dock icon, shaped like a Mac app: a full-bleed icon fills the rounded square; one with clear corners
+// (most "any" icons and favicons) sits in the middle of a tile in the site's background colour.
+static NSImage *WebAppIcon(NSImage *src, BOOL maskable, NSColor *bg) {
+    BOOL fill = src && (maskable || !ImageHasClearCorners(src));
+    NSColor *tile = bg ?: NSColor.whiteColor;
+    return [NSImage imageWithSize:NSMakeSize(1024, 1024) flipped:NO drawingHandler:^BOOL(NSRect r) {
+        NSRect sq = NSMakeRect(100, 100, 824, 824);
+        NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:sq xRadius:185 yRadius:185];
+        [NSGraphicsContext saveGraphicsState];
+        NSShadow *sh = [NSShadow new]; sh.shadowBlurRadius = 24; sh.shadowOffset = NSMakeSize(0, -10); sh.shadowColor = [NSColor colorWithWhite:0 alpha:0.28]; [sh set];
+        [tile setFill]; [p fill];
+        [NSGraphicsContext restoreGraphicsState];
+        [NSGraphicsContext saveGraphicsState];
+        [p addClip];
+        if (fill) {
+            NSSize s = src.size; CGFloat k = MAX(824 / MAX(1, s.width), 824 / MAX(1, s.height)) * (maskable ? 1.0 : 1.0);
+            NSRect d = NSMakeRect(512 - s.width * k / 2, 512 - s.height * k / 2, s.width * k, s.height * k);
+            [src drawInRect:d fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+        } else if (src) {
+            NSSize s = src.size; CGFloat side = MAX(s.width, s.height) >= 128 ? 560 : 420, k = side / MAX(1, MAX(s.width, s.height));
+            [src drawInRect:NSMakeRect(512 - s.width * k / 2, 512 - s.height * k / 2, s.width * k, s.height * k) fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+        }
+        [NSGraphicsContext restoreGraphicsState];
+        NSBezierPath *edge = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(sq, 0.75, 0.75) xRadius:184 yRadius:184]; edge.lineWidth = 1.5;
+        [[NSColor colorWithWhite:0 alpha:ColorIsLight(tile) || fill ? 0.10 : 0.0] setStroke]; [edge stroke];
+        return YES;
+    }];
+}
+static NSString *ImageDataURLOf(NSImage *im, NSInteger px) {
+    NSData *png = PNGAt(im, px);
+    return png ? [@"data:image/png;base64," stringByAppendingString:[png base64EncodedStringWithOptions:0]] : @"";
+}
+
+#pragma mark Reading the site
+
+static char kPendingInstallKey;
+// Everything the page says about itself as an app: its manifest, its icons, its colour.
+static NSString *const kManifestJS =
+    @"const abs=h=>{try{return new URL(h,document.baseURI).href}catch(e){return null}};"
+    "const ml=document.querySelector('link[rel~=\"manifest\"]');let m=null,mu=null;"
+    "if(ml){mu=abs(ml.getAttribute('href'));try{const r=await fetch(mu,{credentials:ml.crossOrigin==='use-credentials'?'include':'same-origin'});m=await r.json()}catch(e){}}"
+    "const icons=[...document.querySelectorAll('link[rel~=\"icon\"],link[rel=\"apple-touch-icon\"],link[rel=\"apple-touch-icon-precomposed\"],link[rel=\"mask-icon\"]')]"
+    ".map(l=>({src:abs(l.getAttribute('href')),sizes:l.getAttribute('sizes')||'',rel:l.rel,type:l.type||''}));"
+    "const meta=n=>{const e=document.querySelector('meta[name=\"'+n+'\"]');return e?e.content:''};"
+    "return JSON.stringify({m,mu,title:document.title,appName:meta('application-name'),apple:meta('apple-mobile-web-app-title'),theme:meta('theme-color'),icons,url:location.href})";
+
+static CGFloat IconSizeOf(NSString *sizes) {
+    CGFloat best = 0;
+    for (NSString *s in [sizes.lowercaseString componentsSeparatedByString:@" "]) {
+        if ([s isEqualToString:@"any"]) best = MAX(best, 1024);
+        NSArray *p = [s componentsSeparatedByString:@"x"]; if (p.count == 2) best = MAX(best, MIN([p[0] doubleValue], [p[1] doubleValue]));
+    }
+    return best;
+}
+// What would be installed: name, start page, scope, colours, and the icon candidates best first.
+static NSDictionary *WebAppDescribe(NSDictionary *j) {
+    NSURL *page = [NSURL URLWithString:j[@"url"] ?: @""];
+    NSDictionary *m = [j[@"m"] isKindOfClass:NSDictionary.class] ? j[@"m"] : nil;
+    NSURL *mu = [j[@"mu"] isKindOfClass:NSString.class] ? [NSURL URLWithString:j[@"mu"]] : page;
+    NSURL *(^rel)(id) = ^NSURL *(id s) { return [s isKindOfClass:NSString.class] && [s length] ? [NSURL URLWithString:s relativeToURL:mu].absoluteURL : nil; };
+    NSString *(^str)(id) = ^NSString *(id s) { return [s isKindOfClass:NSString.class] ? Trim(s) : @""; };
+    NSString *name = str(m[@"name"]), *shortName = str(m[@"short_name"]);
+    if (shortName.length && (name.length > 24 || !name.length)) name = shortName;
+    for (NSString *alt in @[str(j[@"apple"]), str(j[@"appName"]), str(j[@"title"]), HostOf(page) ?: @"App"]) if (!name.length) name = alt;
+    name = [[name componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/:\\\n\r\t"]] componentsJoinedByString:@" "];
+    if (name.length > 40) name = [name substringToIndex:40];
+    NSURL *start = rel(m[@"start_url"]);
+    if (!start || ![OriginOf(start) isEqualToString:OriginOf(page)]) start = m ? [NSURL URLWithString:@"/" relativeToURL:page].absoluteURL : page;
+    NSURL *scope = rel(m[@"scope"]);
+    if (!scope || ![OriginOf(scope) isEqualToString:OriginOf(start)]) scope = [NSURL URLWithString:@"/" relativeToURL:start].absoluteURL;
+    NSMutableArray *cands = [NSMutableArray array];
+    for (NSDictionary *i in [m[@"icons"] isKindOfClass:NSArray.class] ? m[@"icons"] : @[]) {
+        if (![i isKindOfClass:NSDictionary.class]) continue;
+        NSURL *u = rel(i[@"src"]); if (!u) continue;
+        NSString *purpose = str(i[@"purpose"]).lowercaseString, *type = str(i[@"type"]).lowercaseString;
+        BOOL svg = [type containsString:@"svg"] || [u.path.lowercaseString hasSuffix:@".svg"];
+        BOOL maskable = [purpose containsString:@"maskable"], any = !purpose.length || [purpose containsString:@"any"];
+        CGFloat size = IconSizeOf(str(i[@"sizes"]));
+        CGFloat score = MIN(size, 1024) + (any ? 300 : 0) + (maskable && !any ? 120 : 0) - (svg ? 2000 : 0) - ([purpose containsString:@"monochrome"] ? 3000 : 0);
+        [cands addObject:@{@"url": u.absoluteString, @"score": @(score), @"maskable": @(maskable && !any)}];
+    }
+    for (NSDictionary *i in [j[@"icons"] isKindOfClass:NSArray.class] ? j[@"icons"] : @[]) {
+        NSString *src = str(i[@"src"]); if (!src.length) continue;
+        NSString *relName = str(i[@"rel"]).lowercaseString;
+        BOOL apple = [relName containsString:@"apple-touch"]; BOOL svg = [str(i[@"type"]) containsString:@"svg"] || [src.lowercaseString hasSuffix:@".svg"] || [relName containsString:@"mask-icon"];
+        CGFloat size = IconSizeOf(str(i[@"sizes"])); if (!size) size = apple ? 180 : 32;
+        [cands addObject:@{@"url": src, @"score": @(size + (apple ? 100 : 0) - (svg ? 2000 : 0) - 400), @"maskable": @NO}];
+    }
+    if (page.host) [cands addObject:@{@"url": [NSURL URLWithString:@"/favicon.ico" relativeToURL:page].absoluteURL.absoluteString, @"score": @(-1000), @"maskable": @NO}];
+    [cands sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [b[@"score"] compare:a[@"score"]]; }];
+    NSMutableDictionary *d = [@{@"name": name, @"start": start.absoluteString ?: page.absoluteString, @"scope": scope.absoluteString ?: @"", @"host": HostOf(start) ?: @"",
+                                @"icons": cands, @"manifest": @(m != nil)} mutableCopy];
+    NSString *theme = str(m[@"theme_color"]); if (!theme.length) theme = str(j[@"theme"]);
+    if (ColorFromCSS(theme)) d[@"theme"] = theme;
+    if (ColorFromCSS(str(m[@"background_color"]))) d[@"bg"] = str(m[@"background_color"]);
+    return d;
+}
+// Fetch icon candidates in order until one is a real image of a useful size.
+static void WebAppFetchIcon(NSArray *cands, NSUInteger i, NSImage *fallback, void (^done)(NSImage *, BOOL maskable)) {
+    if (i >= cands.count || i >= 6) { done(fallback, NO); return; }
+    NSDictionary *c = cands[i];
+    NSURL *u = [NSURL URLWithString:c[@"url"]];
+    if (!u) { WebAppFetchIcon(cands, i + 1, fallback, done); return; }
+    NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:u cachePolicy:NSURLRequestReturnCacheDataElseLoad timeoutInterval:12];
+    [[NSURLSession.sharedSession dataTaskWithRequest:rq completionHandler:^(NSData *data, NSURLResponse *r, NSError *e) {
+        NSImage *im = data.length ? [[NSImage alloc] initWithData:data] : nil;
+        CGFloat px = 0; for (NSImageRep *rep in im.representations) px = MAX(px, MIN(rep.pixelsWide, rep.pixelsHigh));
+        if (!px && im) px = MIN(im.size.width, im.size.height);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (im && px >= 48) { im.size = NSMakeSize(px, px); done(im, [c[@"maskable"] boolValue]); }
+            else WebAppFetchIcon(cands, i + 1, (!fallback && im && px >= 16) ? im : fallback, done);
+        });
+    }] resume];
+}
+
+#pragma mark Making the app
+
+static NSString *WebAppIdentFor(NSString *scope) {   // stable for a site, so installing again replaces the same app
+    for (NSDictionary *a in WebAppRegistry()) if ([OriginOf([NSURL URLWithString:a[@"scope"] ?: @""]) isEqualToString:OriginOf([NSURL URLWithString:scope])]) return a[@"id"];
+    return [[NSUUID.UUID.UUIDString stringByReplacingOccurrencesOfString:@"-" withString:@""] substringToIndex:12].lowercaseString;
+}
+static BOOL RunTool(NSString *path, NSArray *args) {
+    NSTask *t = [NSTask new]; t.executableURL = [NSURL fileURLWithPath:path]; t.arguments = args;
+    t.standardOutput = NSFileHandle.fileHandleWithNullDevice; t.standardError = NSFileHandle.fileHandleWithNullDevice;
+    if (![t launchAndReturnError:nil]) return NO;
+    [t waitUntilExit];
+    return t.terminationStatus == 0;
+}
+static void SignApp(NSString *app) {   // the local identity when there is one (macOS then keeps camera/microphone answers), else ad hoc
+    if (!RunTool(@"/usr/bin/codesign", @[@"--force", @"--sign", @"Iris Local Signing", app])) RunTool(@"/usr/bin/codesign", @[@"--force", @"--sign", @"-", app]);
+}
+static NSDictionary *WebAppInfoPlist(NSDictionary *app) {
+    NSDictionary *mainInfo = NSBundle.mainBundle.infoDictionary;
+    NSMutableDictionary *p = [@{
+        @"CFBundleName": app[@"name"], @"CFBundleDisplayName": app[@"name"],
+        @"CFBundleIdentifier": [@"com.y.iris.app." stringByAppendingString:app[@"id"]],
+        @"CFBundleExecutable": @"Iris", @"CFBundlePackageType": @"APPL", @"CFBundleIconFile": @"app",
+        @"CFBundleShortVersionString": @"1.0", @"CFBundleVersion": @"1", @"LSMinimumSystemVersion": @"12.3",
+        @"NSHighResolutionCapable": @YES, @"NSSupportsAutomaticGraphicsSwitching": @YES,
+        @"LSApplicationCategoryType": @"public.app-category.productivity",
+        @"IrisWebApp": @{@"id": app[@"id"], @"name": app[@"name"], @"start": app[@"start"], @"scope": app[@"scope"], @"host": app[@"host"] ?: @"",
+                         @"theme": app[@"theme"] ?: @"", @"mainApp": NSBundle.mainBundle.bundlePath}} mutableCopy];
+    for (NSString *k in @[@"NSCameraUsageDescription", @"NSMicrophoneUsageDescription", @"NSLocationUsageDescription", @"NSLocationWhenInUseUsageDescription", @"NSAppTransportSecurity"])
+        if (mainInfo[k]) p[k] = mainInfo[k];
+    return p;
+}
+// Puts the .app together next to its final place, then swaps it in. Runs off the main thread.
+static NSString *WebAppWriteBundle(NSDictionary *app, NSImage *icon) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm createDirectoryAtPath:WebAppsDir() withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *dest = app[@"path"];
+    NSString *tmp = [WebAppsDir() stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.building.app", app[@"id"]]];
+    [fm removeItemAtPath:tmp error:nil];
+    NSString *contents = [tmp stringByAppendingPathComponent:@"Contents"];
+    NSString *macos = [contents stringByAppendingPathComponent:@"MacOS"], *res = [contents stringByAppendingPathComponent:@"Resources"];
+    for (NSString *d in @[macos, res]) if (![fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil]) return @"Couldn't create the app's folder";
+    NSError *err = nil;
+    if (![fm copyItemAtPath:NSBundle.mainBundle.executablePath toPath:[macos stringByAppendingPathComponent:@"Iris"] error:&err]) return err.localizedDescription ?: @"Couldn't copy Iris into the app";
+    if (![WebAppInfoPlist(app) writeToURL:[NSURL fileURLWithPath:[contents stringByAppendingPathComponent:@"Info.plist"]] error:&err]) return err.localizedDescription ?: @"Couldn't write the app's description";
+    [@"APPL????" writeToFile:[contents stringByAppendingPathComponent:@"PkgInfo"] atomically:YES encoding:NSASCIIStringEncoding error:nil];
+    if (!WriteICNS(icon, [res stringByAppendingPathComponent:@"app.icns"])) return @"Couldn't write the icon";
+    NSString *mainRes = NSBundle.mainBundle.resourcePath;   // the built-in pages and the extension layer stay Iris's own, always current
+    for (NSString *f in @[@"pages", @"ext-shim.js"]) [fm createSymbolicLinkAtPath:[res stringByAppendingPathComponent:f] withDestinationPath:[mainRes stringByAppendingPathComponent:f] error:nil];
+    SignApp(tmp);
+    if ([fm fileExistsAtPath:dest]) {
+        NSURL *out = nil;
+        if (![fm replaceItemAtURL:[NSURL fileURLWithPath:dest] withItemAtURL:[NSURL fileURLWithPath:tmp] backupItemName:nil options:0 resultingItemURL:&out error:&err]) { [fm removeItemAtPath:tmp error:nil]; return err.localizedDescription ?: @"Couldn't replace the old app"; }
+    } else if (![fm moveItemAtPath:tmp toPath:dest error:&err]) { [fm removeItemAtPath:tmp error:nil]; return err.localizedDescription ?: @"Couldn't put the app in place"; }
+    LSRegisterURL((__bridge CFURLRef)[NSURL fileURLWithPath:dest], true);
+    return nil;
+}
+// Your sign-in for the site, handed to the app once (it keeps its own website data from then on).
+static void WebAppExportCookies(VWindow *win, NSString *host, NSString *ident, void (^done)(NSUInteger)) {
+    WKHTTPCookieStore *store = win.pageConfig.websiteDataStore.httpCookieStore;
+    NSArray *parts = [host.lowercaseString componentsSeparatedByString:@"."];
+    NSString *site = parts.count >= 2 ? [[parts subarrayWithRange:NSMakeRange(parts.count - 2, 2)] componentsJoinedByString:@"."] : host;
+    if (parts.count >= 3 && [parts[parts.count - 2] length] <= 3) site = [[parts subarrayWithRange:NSMakeRange(parts.count - 3, 3)] componentsJoinedByString:@"."];   // co.uk, com.au
+    [store getAllCookies:^(NSArray<NSHTTPCookie *> *all) {
+        NSMutableArray *keep = [NSMutableArray array];
+        for (NSHTTPCookie *c in all) {
+            NSString *d = [c.domain.lowercaseString hasPrefix:@"."] ? [c.domain.lowercaseString substringFromIndex:1] : c.domain.lowercaseString;
+            if (![d isEqualToString:site] && ![d hasSuffix:[@"." stringByAppendingString:site]]) continue;
+            NSMutableDictionary *p = [NSMutableDictionary dictionary];
+            [c.properties enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) { if ([v isKindOfClass:NSString.class] || [v isKindOfClass:NSDate.class] || [v isKindOfClass:NSNumber.class]) p[k] = v; }];
+            [keep addObject:p];
+        }
+        NSString *file = [WebAppDataDir(ident) stringByAppendingPathComponent:@"cookies.plist"];
+        NSData *d = keep.count ? [NSPropertyListSerialization dataWithPropertyList:keep format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil] : nil;
+        if (d) { [d writeToFile:file atomically:YES]; chmod(file.fileSystemRepresentation, 0600); }
+        done(keep.count);
+    }];
+}
+// After Iris itself changes (a new build), every installed app gets the new Iris inside it.
+static void WebAppRefreshShims(void) {
+    NSString *me = NSBundle.mainBundle.executablePath;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *fm = NSFileManager.defaultManager;
+        for (NSDictionary *a in WebAppRegistry()) {
+            NSString *exe = [a[@"path"] stringByAppendingPathComponent:@"Contents/MacOS/Iris"];
+            if (![fm fileExistsAtPath:exe] || [fm contentsEqualAtPath:exe andPath:me]) continue;
+            NSString *next = [exe stringByAppendingString:@".new"];
+            [fm removeItemAtPath:next error:nil];
+            if (![fm copyItemAtPath:me toPath:next error:nil]) continue;
+            rename(next.fileSystemRepresentation, exe.fileSystemRepresentation);   // a running app keeps the copy it started with
+            NSMutableDictionary *info = [NSMutableDictionary dictionaryWithContentsOfFile:[a[@"path"] stringByAppendingPathComponent:@"Contents/Info.plist"]];
+            if (info) { NSMutableDictionary *w = [info[@"IrisWebApp"] mutableCopy]; w[@"mainApp"] = NSBundle.mainBundle.bundlePath; info[@"IrisWebApp"] = w;
+                        [info writeToFile:[a[@"path"] stringByAppendingPathComponent:@"Contents/Info.plist"] atomically:YES]; }
+            SignApp(a[@"path"]);
+            DLog(@"apps: %@ now runs this build of Iris", a[@"name"]);
+        }
+    });
+}
+
+#pragma mark The Install page (iris://install) and Settings
+
+static void WebAppOp(NSString *op, NSDictionary *b, VWindow *win, void (^reply)(id, NSString *)) {
+    NSMutableDictionary *pending = objc_getAssociatedObject(win, &kPendingInstallKey);
+    if ([op isEqualToString:@"install.get"]) {
+        if (!pending) { reply(@{@"error": @"Nothing to install"}, nil); return; }
+        NSDictionary *existing = nil; for (NSDictionary *a in WebAppRegistry()) if ([a[@"id"] isEqualToString:pending[@"id"]]) existing = a;
+        reply(@{@"name": pending[@"name"], @"host": pending[@"host"] ?: @"", @"start": pending[@"start"], @"icon": pending[@"iconURL"] ?: @"",
+                @"manifest": pending[@"manifest"] ?: @NO, @"theme": pending[@"theme"] ?: @"", @"again": @(existing != nil), @"cookies": pending[@"cookieCount"] ?: @0}, nil);
+        return;
+    }
+    if ([op isEqualToString:@"install.go"]) {
+        if (!pending || !pending[@"icon"]) { reply(@{@"error": @"Nothing to install"}, nil); return; }
+        NSString *name = [b[@"name"] isKindOfClass:NSString.class] ? Trim(b[@"name"]) : @"";
+        name = [[name componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/:\\\n\r\t"]] componentsJoinedByString:@" "];
+        if (!name.length) name = pending[@"name"];
+        BOOL cookies = [b[@"cookies"] boolValue];
+        NSMutableDictionary *app = [pending mutableCopy]; app[@"name"] = name;
+        [app removeObjectsForKeys:@[@"icon", @"iconURL", @"icons", @"cookieCount"]];
+        NSString *path = nil;   // the same app reinstalled keeps its place; a new one gets a name not already taken
+        for (NSDictionary *a in WebAppRegistry()) if ([a[@"id"] isEqualToString:app[@"id"]] && [a[@"path"] length]) path = a[@"path"];
+        if (path && ![path.lastPathComponent.stringByDeletingPathExtension isEqualToString:name]) { [NSWorkspace.sharedWorkspace recycleURLs:@[[NSURL fileURLWithPath:path]] completionHandler:nil]; path = nil; }
+        if (!path) {
+            path = [WebAppsDir() stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"app"]];
+            for (NSInteger n = 2; [NSFileManager.defaultManager fileExistsAtPath:path]; n++) path = [WebAppsDir() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@ %ld.app", name, (long)n]];
+        }
+        app[@"path"] = path; app[@"installed"] = @(NSDate.date.timeIntervalSince1970);
+        NSImage *icon = pending[@"icon"];
+        void (^build)(void) = ^{
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSString *fail = WebAppWriteBundle(app, icon);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (fail) { DLog(@"apps: install of %@ failed: %@", name, fail); reply(@{@"error": fail}, nil); return; }
+                    NSMutableArray *reg = WebAppRegistry();
+                    for (NSDictionary *a in reg.copy) if ([a[@"id"] isEqualToString:app[@"id"]]) [reg removeObject:a];
+                    [reg addObject:app]; WebAppSaveRegistry(reg); WebAppRegistryChanged();
+                    DLog(@"apps: installed %@ at %@", name, path);
+                    reply(@{@"ok": @YES, @"path": path, @"name": name}, nil);
+                });
+            });
+        };
+        if (cookies) WebAppExportCookies(win, app[@"host"], app[@"id"], ^(NSUInteger n) { dispatch_async(dispatch_get_main_queue(), build); });
+        else build();
+        return;
+    }
+    if ([op isEqualToString:@"install.open"]) {
+        NSString *path = [b[@"path"] isKindOfClass:NSString.class] ? b[@"path"] : nil;
+        if (path) [NSWorkspace.sharedWorkspace openApplicationAtURL:[NSURL fileURLWithPath:path] configuration:[NSWorkspaceOpenConfiguration configuration] completionHandler:nil];
+        [win closeToolbarCustomiser];
+        reply(@YES, nil); return;
+    }
+    if ([op isEqualToString:@"install.reveal"]) {
+        NSString *path = [b[@"path"] isKindOfClass:NSString.class] ? b[@"path"] : nil;
+        if (path) [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:path]]];
+        reply(@YES, nil); return;
+    }
+    if ([op isEqualToString:@"install.done"]) { objc_setAssociatedObject(win, &kPendingInstallKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [win closeToolbarCustomiser]; reply(@YES, nil); return; }
+    reply(nil, @"unknown op");
+}
+static void WebAppOpen(NSDictionary *a) {
+    if ([NSFileManager.defaultManager fileExistsAtPath:a[@"path"] ?: @""])
+        [NSWorkspace.sharedWorkspace openApplicationAtURL:[NSURL fileURLWithPath:a[@"path"]] configuration:[NSWorkspaceOpenConfiguration configuration] completionHandler:nil];
+}
+static void WebAppUninstall(NSDictionary *a) {
+    NSMutableArray *reg = WebAppRegistry();
+    for (NSDictionary *x in reg.copy) if ([x[@"id"] isEqualToString:a[@"id"]]) [reg removeObject:x];
+    WebAppSaveRegistry(reg);
+    for (NSRunningApplication *r in [NSRunningApplication runningApplicationsWithBundleIdentifier:[@"com.y.iris.app." stringByAppendingString:a[@"id"]]]) [r terminate];
+    if ([a[@"path"] length]) [NSWorkspace.sharedWorkspace recycleURLs:@[[NSURL fileURLWithPath:a[@"path"]]] completionHandler:nil];
+    [NSFileManager.defaultManager removeItemAtPath:WebAppDataDir(a[@"id"]) error:nil];
+    WebAppRegistryChanged();
+}
+
+#pragma mark The app's own bar
+
+static char kAppBarKey;
+@interface VAppBar : NSView
+@property (weak) VWindow *owner;
+@property (strong) VButton *back, *fwd, *reload, *openIn, *more;
+@end
+@implementation VAppBar
+- (BOOL)isFlipped { return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (instancetype)initWithOwner:(VWindow *)w {
+    if (!(self = [super initWithFrame:NSZeroRect])) return nil;
+    self.owner = w;
+    self.back = [VButton symbol:@"chevron.left" size:12.5 tip:@"Back (⌘[)" target:w action:@selector(goBack:)];
+    self.fwd = [VButton symbol:@"chevron.right" size:12.5 tip:@"Forward (⌘])" target:w action:@selector(goForward:)];
+    self.reload = [VButton symbol:@"arrow.clockwise" size:12 tip:@"Reload (⌘R)" target:w action:@selector(reloadOrStop:)];
+    self.openIn = [VButton symbol:@"safari" size:13 tip:@"Open this page in Iris" target:self action:@selector(openInIris:)];
+    self.more = [VButton symbol:@"ellipsis" size:13 tip:@"More" target:self action:@selector(showMore:)];
+    for (VButton *b in @[self.back, self.fwd, self.reload, self.openIn, self.more]) { b.round = YES; [self addSubview:b]; }
+    return self;
+}
+- (NSColor *)tint { return ColorFromCSS(gWebApp[@"theme"]); }
+- (BOOL)lightText { NSColor *t = self.tint; return t ? !ColorIsLight(t) : !ThemeIsLight(); }
+- (void)resizeSubviewsWithOldSize:(NSSize)s { [self place]; }
+- (void)place {
+    CGFloat W = NSWidth(self.bounds), y = 4;
+    BOOL fs = (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    CGFloat x = fs ? 10 : 84;
+    for (VButton *b in @[self.back, self.fwd, self.reload]) { b.frame = NSMakeRect(x, y, 29, 28); x += 29; }
+    self.more.frame = NSMakeRect(W - 12 - 28, y, 28, 28);
+    self.openIn.frame = NSMakeRect(W - 12 - 28 - 32, y, 28, 28);
+}
+- (void)drawRect:(NSRect)dirty {
+    NSColor *tint = self.tint;
+    [(tint ?: vBg) setFill]; NSRectFill(self.bounds);
+    BOOL light = self.lightText;
+    NSColor *ink = light ? [NSColor colorWithWhite:1 alpha:0.92] : [NSColor colorWithWhite:0 alpha:0.85];
+    VTab *t = self.owner.current;
+    NSURL *u = [NSURL URLWithString:t.url ?: @""];
+    BOOL away = u.host && !WebAppInScope(u);
+    NSString *title = t.title.length ? t.title : gWebApp[@"name"];
+    NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new]; ps.alignment = NSTextAlignmentCenter; ps.lineBreakMode = NSLineBreakByTruncatingTail;
+    CGFloat left = 84 + 3 * 29 + 12, right = NSWidth(self.bounds) - 12 - 60 - 12;
+    if (away) {   // somewhere outside the app (a sign-in page, say): say where, plainly
+        NSString *host = u.host ?: @"";
+        NSDictionary *ha = @{NSFontAttributeName: UIFont(12, NSFontWeightMedium), NSForegroundColorAttributeName: ink};
+        CGFloat hw = MIN(260, ceil([host sizeWithAttributes:ha].width)) + 34;
+        NSRect pill = NSMakeRect(round(NSMidX(self.bounds) - hw / 2), 6, hw, 24);
+        RoundRect(pill, 12, [ink colorWithAlphaComponent:0.10]);
+        NSImage *lock = Tinted(Symbol([u.scheme isEqualToString:@"https"] ? @"lock.fill" : @"exclamationmark.triangle", 10, NSFontWeightSemibold), [ink colorWithAlphaComponent:0.75]);
+        DrawImage(lock, NSMakeRect(NSMinX(pill) + 11, NSMidY(pill) - 6, 12, 12));
+        [host drawInRect:NSMakeRect(NSMinX(pill) + 26, NSMidY(pill) - 8, hw - 34, 16) withAttributes:@{NSFontAttributeName: UIFont(12, NSFontWeightMedium), NSForegroundColorAttributeName: ink, NSParagraphStyleAttributeName: ps}];
+    } else {
+        [title drawInRect:NSMakeRect(left, 10, MAX(40, right - left), 17)
+           withAttributes:@{NSFontAttributeName: UIFont(12.5, NSFontWeightSemibold), NSForegroundColorAttributeName: ink, NSParagraphStyleAttributeName: ps}];
+    }
+}
+- (void)openInIris:(id)s { NSURL *u = [NSURL URLWithString:self.owner.current.url ?: @""]; OpenInIris(u ?: [NSURL URLWithString:gWebApp[@"start"]]); }
+- (void)showMore:(VButton *)s {
+    VWindow *w = self.owner;
+    NSMenu *m = [[NSMenu alloc] initWithTitle:@""];
+    NSMenuItem *(^add)(NSString *, SEL, id, NSString *) = ^NSMenuItem *(NSString *t, SEL a, id target, NSString *sym) {
+        NSMenuItem *i = [m addItemWithTitle:t action:a keyEquivalent:@""]; i.target = target; if (sym) i.image = Tinted(Symbol(sym, 13, NSFontWeightMedium), vText); return i;
+    };
+    add(@"Open in Iris", @selector(openInIris:), self, @"safari");
+    add(@"Copy Link", @selector(copyLink:), self, @"link");
+    [m addItem:NSMenuItem.separatorItem];
+    add(@"Find…", @selector(showFind:), w, @"magnifyingglass");
+    add(@"Zoom In", @selector(zoomIn:), w, @"plus.magnifyingglass");
+    add(@"Zoom Out", @selector(zoomOut:), w, @"minus.magnifyingglass");
+    add(@"Actual Size", @selector(zoomReset:), w, nil);
+    add(@"Print…", @selector(printPage:), w, @"printer");
+    [m addItem:NSMenuItem.separatorItem];
+    add(@"Go to the App's Start", @selector(goStart:), self, @"house");
+    add([NSString stringWithFormat:@"Uninstall %@…", gWebApp[@"name"]], @selector(uninstallSelf:), self, @"trash");
+    PopMenu(m, NSMakePoint(NSMaxX(s.frame) - 220, NSMaxY(s.frame) + 4), self);
+}
+- (void)copyLink:(id)s { NSString *u = self.owner.current.url; if (!u) return; [NSPasteboard.generalPasteboard clearContents]; [NSPasteboard.generalPasteboard setString:u forType:NSPasteboardTypeString]; [self.owner showToast:@"Link copied"]; }
+- (void)goStart:(id)s { [self.owner openURL:[NSURL URLWithString:gWebApp[@"start"]] newTab:NO]; }
+- (void)uninstallSelf:(id)s {
+    NSAlert *a = [NSAlert new]; a.messageText = [NSString stringWithFormat:@"Uninstall %@?", gWebApp[@"name"]];
+    a.informativeText = @"The app moves to the Bin and its sign-in and website data on this Mac are removed. The site itself stays in Iris.";
+    [a addButtonWithTitle:@"Uninstall"]; [a addButtonWithTitle:@"Cancel"];
+    [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r) {
+        if (r != NSAlertFirstButtonReturn) return;
+        NSDictionary *me = @{@"id": gWebApp[@"id"] ?: @"", @"path": NSBundle.mainBundle.bundlePath};
+        [WKWebsiteDataStore.defaultDataStore removeDataOfTypes:WKWebsiteDataStore.allWebsiteDataTypes modifiedSince:NSDate.distantPast completionHandler:^{
+            NSMutableArray *reg = WebAppRegistry();
+            for (NSDictionary *x in reg.copy) if ([x[@"id"] isEqualToString:me[@"id"]]) [reg removeObject:x];
+            WebAppSaveRegistry(reg);
+            [NSWorkspace.sharedWorkspace recycleURLs:@[[NSURL fileURLWithPath:me[@"path"]]] completionHandler:^(NSDictionary *n, NSError *e) { dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; }); }];
+        }];
+    }];
+}
+- (void)mouseDown:(NSEvent *)e { if (e.clickCount == 2) [self.window performZoom:nil]; else [self.window performWindowDragWithEvent:e]; }
+- (void)refresh {
+    VTab *t = self.owner.current; VPage *p = t.web;
+    self.back.enabled = p.canGoBack; self.fwd.enabled = p.canGoForward;
+    self.reload.symbolName = p.loading ? @"xmark" : @"arrow.clockwise";
+    for (VButton *b in @[self.back, self.fwd, self.reload, self.openIn, self.more]) b.needsDisplay = YES;
+    self.needsDisplay = YES;
+}
+@end
+
+#pragma mark Running as the app
+
+// The app sees your Iris settings (theme, blocking, codecs…) as its starting point, but keeps its own state.
+static void WebAppAdoptSettings(void) {
+    NSDictionary *main = [Defaults() persistentDomainForName:@"com.y.iris"];
+    if (![main isKindOfClass:NSDictionary.class]) return;
+    NSMutableDictionary *d = [main mutableCopy];
+    for (NSString *k in main) if ([k hasPrefix:@"NSWindow Frame"] || [k hasPrefix:@"rule"] || [k hasPrefix:@"NSNavPanel"]) [d removeObjectForKey:k];
+    for (NSString *k in @[kTabsState, kToolbarLayout]) [d removeObjectForKey:k];
+    [Defaults() registerDefaults:d];
+}
+// The sign-in Iris handed over at install: set once into the app's own website data, then the file goes.
+static void WebAppImportCookies(void (^done)(void)) {
+    NSString *file = [WebAppDataDir(gWebApp[@"id"]) stringByAppendingPathComponent:@"cookies.plist"];
+    NSData *d = [NSData dataWithContentsOfFile:file];
+    NSArray *props = d ? [NSPropertyListSerialization propertyListWithData:d options:0 format:NULL error:nil] : nil;
+    if (![props isKindOfClass:NSArray.class] || !props.count) { done(); return; }
+    WKHTTPCookieStore *store = WKWebsiteDataStore.defaultDataStore.httpCookieStore;
+    dispatch_group_t g = dispatch_group_create();
+    NSUInteger n = 0;
+    for (NSDictionary *p in props) {
+        NSHTTPCookie *c = [p isKindOfClass:NSDictionary.class] ? [NSHTTPCookie cookieWithProperties:p] : nil;
+        if (!c) continue;
+        dispatch_group_enter(g); n++;
+        [store setCookie:c completionHandler:^{ dispatch_group_leave(g); }];
+    }
+    DLog(@"app: %lu cookies from Iris", (unsigned long)n);
+    dispatch_group_notify(g, dispatch_get_main_queue(), ^{ [NSFileManager.defaultManager removeItemAtPath:file error:nil]; done(); });
+}
+static VWindow *WebAppOpenWindow(NSURL *u) {
+    VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"empty": @YES}];
+    w.window.title = gWebApp[@"name"] ?: @"App";
+    if (gWindows.count > 1) {
+        VWindow *prev = gWindows[gWindows.count - 2];
+        NSRect f = prev.window.frame; [w.window setFrame:f display:NO];
+        [w.window cascadeTopLeftFromPoint:NSMakePoint(NSMinX(f) + 26, NSMaxY(f) - 26)];
+    }
+    [w newTab:u ?: [NSURL URLWithString:gWebApp[@"start"]] select:YES];
+    [w showWindow:nil]; [w windowDidResize:nil];
+    [w.window makeKeyAndOrderFront:nil];
+    return w;
+}
+
+@implementation VWindow (WebApp)
+- (VAppBar *)appBar {
+    VAppBar *b = objc_getAssociatedObject(self, &kAppBarKey);
+    if (!b) { b = [[VAppBar alloc] initWithOwner:self]; objc_setAssociatedObject(self, &kAppBarKey, b, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+    return b;
+}
+// The app's window: its own bar of the site's colour (back, forward, reload, the page's title), and the page below.
+- (void)layoutWebApp {
+    NSView *root = self.window.contentView;
+    CGFloat W = NSWidth(root.bounds), H = NSHeight(root.bounds), top = 36;
+    BOOL fs = (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    VAppBar *bar = [self appBar];
+    if (bar.superview != root) [root addSubview:bar positioned:NSWindowAbove relativeTo:self.content];
+    self.toolbar.hidden = YES; self.shelfHandle.hidden = YES; self.shelf.hidden = YES;
+    bar.frame = NSMakeRect(0, 0, W, top); [bar place];
+    self.lights.hidden = fs; self.lights.frame = NSMakeRect(12, 7, 62, 22);
+    [root addSubview:self.lights positioned:NSWindowAbove relativeTo:bar];
+    self.content.frame = NSMakeRect(0, top, W, H - top);
+    self.loadLine.hidden = NO; self.loadLine.frame = NSMakeRect(0, top - 2, W, 2);
+    [root addSubview:self.loadLine positioned:NSWindowAbove relativeTo:bar];
+    NSColor *tint = ColorFromCSS(gWebApp[@"theme"]);
+    if (tint) self.window.backgroundColor = tint;
+    self.findBar.frame = NSMakeRect(NSWidth(self.content.bounds) - 344, NSHeight(self.content.bounds) - 36 - 10, 330, 36);
+    [self frameContent];
+    [self placePages];
+    [self updateEmber];
+    [bar refresh];
+}
+- (void)refreshWebAppBar {
+    VTab *t = self.current;
+    self.window.title = t.title.length ? t.title : gWebApp[@"name"] ?: @"App";
+    [[self appBar] refresh];
+}
+
+// Install: read what the page says about itself, make the icon, and show the Install page over the window.
+- (void)installWebApp:(id)s {
+    VTab *t = self.current;
+    if (gWebApp || !t.web || ![t.url hasPrefix:@"http"]) { [self showToast:@"Open the site you want as an app first"]; return; }
+    if (self.isPrivate) { [self showToast:@"Apps can't be installed from a private window"]; return; }
+    NSDictionary *installed = WebAppFor([NSURL URLWithString:t.url]);
+    if (installed && [s isKindOfClass:VButton.class]) { WebAppOpen(installed); return; }   // the address bar's button: already an app, so open it
+    __weak VWindow *ws = self;
+    [t.web.web callAsyncJavaScript:kManifestJS arguments:@{} inFrame:nil inContentWorld:WKContentWorld.defaultClientWorld completionHandler:^(id r, NSError *e) {
+        NSDictionary *j = [r isKindOfClass:NSString.class] ? [NSJSONSerialization JSONObjectWithData:[r dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil] : nil;
+        if (![j isKindOfClass:NSDictionary.class]) j = @{@"url": t.url ?: @"", @"title": t.title ?: @""};
+        NSMutableDictionary *d = [WebAppDescribe(j) mutableCopy];
+        d[@"id"] = WebAppIdentFor(d[@"scope"]);
+        NSImage *fallback = t.favicon;
+        WebAppFetchIcon(d[@"icons"], 0, nil, ^(NSImage *im, BOOL maskable) {
+            VWindow *w = ws; if (!w) return;
+            NSImage *icon = WebAppIcon(im ?: fallback, maskable, ColorFromCSS(d[@"bg"]) ?: (im ? nil : ColorFromCSS(d[@"theme"])));
+            d[@"icon"] = icon; d[@"iconURL"] = ImageDataURLOf(icon, 256);
+            [d removeObjectForKey:@"icons"];
+            objc_setAssociatedObject(w, &kPendingInstallKey, d, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [w showOverlay:@"install" size:NSMakeSize(520, 470)];
+        });
+    }];
+}
+- (void)openInstalledApp:(id)s { NSDictionary *a = WebAppFor([NSURL URLWithString:self.current.url ?: @""]); if (a) WebAppOpen(a); }
+@end
 #pragma mark - Test harness: commands from control.txt, screenshots into shots/
 
 // Development aid. Write lines to control.txt beside Iris.app; each runs once, in order:
@@ -13262,6 +13935,13 @@ static void RunBuildScript(NSString *stamp) {
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     [Defaults() registerDefaults:@{kDLAccel: @YES, kCodec: @(MacIsAppleSilicon() ? 0 : 2), kCodec30: @NO, kBgThrottle: @1, kSingleProcess: @NO, kRestorePaused: @YES, kResumeMedia: @YES, kLazyRestore: @NO, kBlock: @YES, kStrip: @YES, kCookieReject: @YES, kAutoPiP: @YES, kSleepMins: @10, kShowBookmarks: @YES, kSearch: @0, kStartup: @0, kScripts: @YES, kAskDownload: @NO,
                                    kThrottleOn: @YES, kTheme: @1, kAccent: @0, kDensity: @1, kHTTPSOnly: @NO, kGPC: @YES, kHomeTopSites: @YES, kConfirmQuit: @NO, kSuggestNet: @YES}];
+    if (gWebApp) WebAppAdoptSettings();   // an installed app starts from your Iris settings
+    if (!gWebApp && ![Defaults() boolForKey:@"toolbarInstallV1"]) {   // the install button joins the address bar (Oct 2026)
+        id stored = [Defaults() objectForKey:kToolbarLayout];
+        if (stored) { NSMutableDictionary *L = [ToolbarSanitize(stored) mutableCopy]; NSMutableArray *a = [L[@"address"] mutableCopy];
+                      if (!ToolbarZoneOf(@"install")) { [a insertObject:@"install" atIndex:0]; L[@"address"] = a; [Defaults() setObject:L forKey:kToolbarLayout]; } }
+        [Defaults() setBool:YES forKey:@"toolbarInstallV1"];
+    }
     if (![Defaults() boolForKey:@"toolbarGroupsV2"]) {   // the bar regrouped (Oct 2026): home and new tab leave it, ⌘T and the tab strip cover them
         NSMutableArray *x = [[Defaults() arrayForKey:kShowExtra] ?: @[] mutableCopy];
         [x removeObject:@"home"]; [x removeObject:@"newtab"];
@@ -13270,7 +13950,7 @@ static void RunBuildScript(NSString *stamp) {
     InitPalette();
     NSApp.appearance = ThemeAppearance();   // the palette and the app agree from the first frame
     // the Dock keeps an old icon for ad-hoc builds; hand it the current one directly
-    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"Iris" ofType:@"icns"]];
+    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:[NSBundle.mainBundle pathForResource:gWebApp ? @"app" : @"Iris" ofType:@"icns"]];
     if (icon) NSApp.applicationIconImage = icon;
     // "Follow macOS": recolour when the system switches between light and dark
     [NSDistributedNotificationCenter.defaultCenter addObserverForName:@"AppleInterfaceThemeChangedNotification" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
@@ -13281,6 +13961,22 @@ static void RunBuildScript(NSString *stamp) {
     }];
     IrisSetBlocking([Defaults() boolForKey:kBlock]);
     IrisReloadBlocklists();
+    if (gWebApp) {   // an installed app: its window, nothing of the browser around it
+        [self buildMenu];
+        DLog(@"app: %@ starting", gWebApp[@"name"]);
+        WebAppImportCookies(^{
+            self.win = WebAppOpenWindow(nil); gWin = self.win;
+            [NSApp activateIgnoringOtherApps:YES];
+        });
+        [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(NSTimer *t) { [gApp checkPower]; }];
+        [NSTimer scheduledTimerWithTimeInterval:2.5 repeats:YES block:^(NSTimer *t) {
+            for (VWindow *w in gWindows) if (w.window.isVisible) [w.current.web checkVideo]; }];
+        [VBlocker.shared prepare:nil];
+        if ([Defaults() boolForKey:kThrottleOn]) [VGovernor start];
+        IrisCrashStarted();
+        return;
+    }
+    WebAppRefreshShims();   // installed apps pick up this build of Iris
     self.win = [VWindow new];
     [self buildMenu];
     [self.win showWindow:nil];
@@ -13351,7 +14047,10 @@ static void RunBuildScript(NSString *stamp) {
 - (void)applicationWillTerminate:(NSNotification *)n { [VGovernor stop]; if (!gQuitting) [self.win saveSession]; gQuitting = YES; [VHistory flushAll]; }
 
 - (BOOL)application:(NSApplication *)a openFile:(NSString *)f { [gWin openURL:[NSURL fileURLWithPath:f] newTab:YES]; return YES; }
-- (void)application:(NSApplication *)a openURLs:(NSArray<NSURL *> *)urls { for (NSURL *u in urls) [gWin openURL:u newTab:YES]; }
+- (void)application:(NSApplication *)a openURLs:(NSArray<NSURL *> *)urls {
+    if (gWebApp) { for (NSURL *u in urls) { if (WebAppInScope(u)) WebAppOpenWindow(u); else OpenInIris(u); } return; }
+    for (NSURL *u in urls) [gWin openURL:u newTab:YES];
+}
 
 // Settings is a page, iris://settings, in the window you're using (a new window if none is open).
 - (void)showSettings:(id)s {
@@ -13403,6 +14102,7 @@ static void RunBuildScript(NSString *stamp) {
     [self item:@"New Tab" action:@selector(newTabAction:) key:@"t" mods:C in:file target:nil];
     [self item:@"New Window" action:@selector(newWindow:) key:@"n" mods:C in:file target:self];
     [self item:@"New Private Window" action:@selector(newPrivateWindow:) key:@"n" mods:C | S in:file target:self];
+    if (!gWebApp) [self item:@"Install Site as App…" action:@selector(installWebApp:) key:@"" mods:0 in:file target:nil];
     NSMenuItem *profs = [file addItemWithTitle:@"Profiles" action:nil keyEquivalent:@""];
     NSMenu *pm = [[NSMenu alloc] initWithTitle:@"Profiles"]; pm.delegate = self; profs.submenu = pm;   // filled in each time it opens
     [self item:@"Reopen Closed Tab" action:@selector(reopenClosed:) key:@"t" mods:C | S in:file target:nil];
@@ -13553,16 +14253,17 @@ static void RunBuildScript(NSString *stamp) {
 // Clicking Iris in the Dock always brings a browser window forward: un-minimised if need be, or a new one if none is open.
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visible {
     VWindow *front = gWin && [gWindows containsObject:gWin] ? gWin : gWindows.lastObject;
+    if (gWebApp && !front) { WebAppOpenWindow(nil); return NO; }
     if (!front) { [self newWindow:nil]; return NO; }
     if (front.window.isMiniaturized) [front.window deminiaturize:nil];
     [front.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     return NO;
 }
-- (void)newWindow:(id)s { VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"profile": gWin && !gWin.isPrivate ? gWin.profile ?: @"" : @""}]; [w showWindow:nil]; [w windowDidResize:nil]; }
+- (void)newWindow:(id)s { if (gWebApp) { WebAppOpenWindow(nil); return; } VWindow *w = [[VWindow alloc] initPrivate:NO state:@{@"profile": gWin && !gWin.isPrivate ? gWin.profile ?: @"" : @""}]; [w showWindow:nil]; [w windowDidResize:nil]; }
 - (void)openProfileItem:(NSMenuItem *)i { OpenProfileWindow(i.representedObject); }
 - (void)newProfileAction:(id)s { [gWin newProfile:nil]; }
-- (void)newPrivateWindow:(id)s { VWindow *w = [[VWindow alloc] initPrivate:YES state:@{}]; [w showWindow:nil]; [w windowDidResize:nil]; }
+- (void)newPrivateWindow:(id)s { if (gWebApp) return; VWindow *w = [[VWindow alloc] initPrivate:YES state:@{}]; [w showWindow:nil]; [w windowDidResize:nil]; }
 - (NSMenu *)applicationDockMenu:(NSApplication *)a {
     NSMenu *m = [NSMenu new];
     [m addItemWithTitle:@"New Window" action:@selector(newWindow:) keyEquivalent:@""].target = self;
@@ -13667,7 +14368,9 @@ static int IrisCompileRulesHelper(const char *ident, const char *path) {
 int main(int argc, const char *argv[]) {
     if (argc >= 4 && !strcmp(argv[1], "--compile-rules")) return IrisCompileRulesHelper(argv[2], argv[3]);
     @autoreleasepool {
-        MigrateFromFlint();
+        NSDictionary *wa = NSBundle.mainBundle.infoDictionary[@"IrisWebApp"];   // started as an installed app?
+        if ([wa isKindOfClass:NSDictionary.class] && [wa[@"start"] isKindOfClass:NSString.class]) gWebApp = wa;
+        if (!gWebApp) MigrateFromFlint();
         NSApplication *app = NSApplication.sharedApplication;
         app.activationPolicy = NSApplicationActivationPolicyRegular;
         IrisCrashInstall();   // Iris's own crash reports; Apple's crash reporter never sees a crash
@@ -13926,6 +14629,18 @@ static NSArray *SettingsSchema(VWindow *win) {
         [NSTask launchedTaskWithLaunchPath:@"/bin/sh" arguments:@[@"-c", [NSString stringWithFormat:@"sleep 1.2; open \"%@\"", NSBundle.mainBundle.bundlePath]]];
         [NSApp terminate:nil]; })];
     [S addObject:SSection(@"extensions", @"Extensions", @"Chrome extensions running on Iris's own extension layer.", @"puzzle", @[ SGroup(@"Installed", exts), SGroup(@"Add", add) ])];
+    NSMutableArray *apps = [NSMutableArray array];   // sites installed as apps
+    for (NSDictionary *a in WebAppRegistry()) {
+        if (![NSFileManager.defaultManager fileExistsAtPath:a[@"path"] ?: @""]) continue;
+        [apps addObject:SButton([@"appOpen." stringByAppendingString:a[@"id"]], a[@"name"] ?: @"App", a[@"host"], @"Open", ^(NSDictionary *x, void (^done)(NSString *)) { WebAppOpen(a); done(nil); })];
+        [apps addObject:SButton([@"appRemove." stringByAppendingString:a[@"id"]], [NSString stringWithFormat:@"Uninstall %@", a[@"name"] ?: @"the app"], @"It moves to the Bin, and the sign-in and website data it kept on this Mac are removed.", @"Uninstall",
+                                ^(NSDictionary *x, void (^done)(NSString *)) { WebAppUninstall(a); done([NSString stringWithFormat:@"%@ uninstalled", a[@"name"] ?: @"App"]); })];
+    }
+    if (!apps.count) [apps addObject:SNote(@"No apps yet", @"On a site that can be installed, a button appears in the address bar. Any site works from File → Install Site as App…")];
+    NSArray *appTail = @[SButton(@"appsFolder", @"Iris Apps folder", @"Where installed apps live. Drag one to the Dock to keep it there.", @"Show", ^(NSDictionary *x, void (^done)(NSString *)) {
+        [NSFileManager.defaultManager createDirectoryAtPath:WebAppsDir() withIntermediateDirectories:YES attributes:nil error:nil];
+        [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:WebAppsDir()]]; done(nil); })];
+    [S addObject:SSection(@"apps", @"Apps", @"Sites installed as apps: each with its own window, Dock icon and sign-in.", @"apps", @[ SGroup(@"Installed", apps), SGroup(nil, appTail) ])];
 
     // ── Downloads
     NSString *dir = [Defaults() stringForKey:kDownloadDir];
