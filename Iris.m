@@ -84,6 +84,7 @@ static NSString *const kUserAgent     = @"userAgent";         // 0 Safari, 1 Chr
 static NSString *const kConfirmQuit   = @"confirmQuit";
 static NSString *const kMinFont       = @"minimumFontSize";
 static NSString *const kExtDisabled    = @"disabledExtensions";
+static NSString *const kExtPrivate     = @"privateExtensions";   // ids allowed in private windows (Chrome's "Allow in Incognito")
 static NSString *const kHomeTopSites  = @"homeTopSites";
 static NSString *const kSuggestNet    = @"searchSuggestions";
 
@@ -866,6 +867,8 @@ static VWindow *WinFor(id o) {
     id c = w.windowController;
     return [c isKindOfClass:VWindow.class] ? c : gWin;
 }
+// An extension sees private windows only when you allowed it there (off by default, as in Chrome).
+static BOOL ExtAllowedPrivate(NSString *ident) { return ident && [[Defaults() arrayForKey:kExtPrivate] containsObject:ident]; }
 static NSArray<VTab *> *AllTabs(BOOL includePrivate) {
     NSMutableArray *a = [NSMutableArray array];
     for (VWindow *w in gWindows) if (includePrivate || !w.isPrivate) [a addObjectsFromArray:w.tabs];
@@ -894,6 +897,8 @@ static VWindow *WinOfWeb(WKWebView *v) {
 - (NSImage *)iconForID:(NSString *)ident;
 - (NSArray<NSDictionary *> *)allExtensionInfo;
 - (void)setExtension:(NSString *)ident enabled:(BOOL)on;
+- (void)setExtension:(NSString *)ident private:(BOOL)on;
+- (void)installPrivate:(WKUserContentController *)ucc;
 - (void)removeExtension:(NSString *)ident;
 - (void)installFromWebStore:(NSString *)input done:(void (^)(NSString *name, NSString *error))done;
 - (BOOL)openOptionsForID:(NSString *)ident;
@@ -2338,7 +2343,8 @@ static NSString *gUpdateNotes;
     self.leftInset = 78;
     // one button per extension with a popup (Proton Pass…), Chrome-style, left of the shield
     self.extBtns = [NSMutableArray array];
-    if (!w.isPrivate) for (id e in FExtHost.shared.extensions) {
+    for (id e in FExtHost.shared.extensions) {
+        if (w.isPrivate && !ExtAllowedPrivate([e valueForKey:@"ident"])) continue;   // private windows: only extensions you allowed there
         NSImage *icon = [FExtHost.shared iconFor:e]; if (!icon) continue;
         NSButton *b = [VExtButton buttonWithImage:icon target:self action:@selector(extensionClicked:)];
         b.bordered = NO; b.imageScaling = NSImageScaleProportionallyDown; b.toolTip = [e valueForKey:@"name"];
@@ -3654,7 +3660,7 @@ static void EmberSliver(NSRect r) { RoundRect(r, MIN(NSWidth(r), NSHeight(r)) / 
         NSArray *rows = @[@[@"trash", @"Nothing is kept", @"History, cookies, site data and what you decide on sites are gone when the last private window closes."],
                           @[@"shield.lefthalf.filled", @"Links cleaned, HTTPS first", @"Tracking tags come off links, pages are upgraded to HTTPS, and fingerprinting is limited."],
                           @[@"lock", @"Locked while you're away", lockText],
-                          @[@"puzzlepiece.extension", @"No extensions, its own sign-ins", @"Extensions can't see this window, and each private window is signed in separately."]];
+                          @[@"puzzlepiece.extension", @"Only extensions you allow, its own sign-ins", @"Extensions stay out unless you allow them in Settings › Extensions, and each private window is signed in separately."]];
         CGFloat cw = MIN(500, W - 60), cx = round((W - cw) / 2), cy = NSMaxY(self.strike) + 30, rh = 58;
         NSRect card = NSMakeRect(cx, cy, cw, rows.count * rh + 12);
         RoundRect(card, 14, [vPill colorWithAlphaComponent:0.55]); ShardStroke(card, 14, vSep, 1);
@@ -4443,7 +4449,7 @@ static void MarkQuarantined(NSString *path, NSString *from) {
 
 
 static WKUserContentController *gUCC;
-static WKUserContentController *gPrivUCC;   // private windows: Iris's helpers only, no extensions
+static WKUserContentController *gPrivUCC;   // private windows: Iris's helpers, and only the extensions you allowed there
 static void IrisApplyRules(void);
 static WKProcessPool *gPool;
 static BOOL gAskNextDownload;   // "Save Image As…": ask where, once
@@ -4674,6 +4680,7 @@ static WKWebViewConfiguration *PrivateConfig(WKWebsiteDataStore *store) {
                                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:WKContentWorld.pageWorld]];
         IrisCosmeticInstall(gPrivUCC);
         IrisCodecInstall(gPrivUCC);
+        [FExtHost.shared installPrivate:gPrivUCC];
         IrisApplyRules();
     }
     c.userContentController = gPrivUCC;
@@ -4692,11 +4699,17 @@ static WKWebViewConfiguration *ProfileConfig(NSString *pid) {
 #pragma mark Extensions' blocking rules (declarativeNetRequest, compiled into WebKit content rules by v4i_dnr)
 
 static void IrisApplyRules(void) {
-    if (!gUCC) return;
-    [gUCC removeAllContentRuleLists];
-    // normal windows only, like the extensions themselves
-    for (NSArray *lists in gExtRuleLists.allValues) for (WKContentRuleList *l in lists) [gUCC addContentRuleList:l];
+    if (gUCC) {
+        [gUCC removeAllContentRuleLists];
+        for (NSArray *lists in gExtRuleLists.allValues) for (WKContentRuleList *l in lists) [gUCC addContentRuleList:l];
+    }
+    if (gPrivUCC) {   // private windows: only the extensions you allowed there
+        [gPrivUCC removeAllContentRuleLists];
+        for (NSString *ident in gExtRuleLists) if (ExtAllowedPrivate(ident)) for (WKContentRuleList *l in gExtRuleLists[ident]) [gPrivUCC addContentRuleList:l];
+    }
 }
+// An extension was allowed in (or taken out of) private windows: the private windows you open from now on are set up afresh.
+static void PrivateExtensionsChanged(void) { gPrivUCC = nil; }
 
 static NSString *IrisJSON(id obj) { NSData *d = [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil]; return d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"[]"; }
 static NSString *IrisSha(NSString *s) {
@@ -4823,7 +4836,7 @@ static NSString *MenuURLLabel(NSString *u) {
         keys(add(@"Inspect Element", @selector(irisInspect:), self, nil), @"i", NSEventModifierFlagCommand | NSEventModifierFlagOption);
         if (web && !IrisIsDefaultBrowser()) add(@"Open Page in Default Browser", @selector(openInDefaultBrowser:), W, page);
     }
-    if (!self.page.tab.owner.isPrivate) {   // extensions' own items (chrome.contextMenus)
+    {   // extensions' own items (chrome.contextMenus): only extensions that see this tab add items
         NSInteger before = m.numberOfItems;
         [FExtHost.shared addMenuItemsTo:m context:c pageURL:page view:self];
         if (m.numberOfItems > before && ![m itemAtIndex:before].isSeparatorItem) [m insertItem:NSMenuItem.separatorItem atIndex:before];
@@ -4967,7 +4980,7 @@ static NSString *MenuURLLabel(NSString *u) {
         for (NSMenuItem *i in items) [menu insertItem:i atIndex:at++];
     }
     // extensions' own items (chrome.contextMenus)
-    if (!self.page.tab.owner.isPrivate) [FExtHost.shared addMenuItemsTo:menu context:c pageURL:self.URL.absoluteString view:self];
+    [FExtHost.shared addMenuItemsTo:menu context:c pageURL:self.URL.absoluteString view:self];   // only extensions that see this tab add items
     // tidy: no leading, trailing or doubled separators
     for (NSInteger k = menu.numberOfItems - 1; k > 0; k--)
         if ([menu itemAtIndex:k].isSeparatorItem && [menu itemAtIndex:k - 1].isSeparatorItem) [menu removeItemAtIndex:k];
@@ -6604,8 +6617,9 @@ static void ExtBadgesChanged(void) {   // a busy page blocks dozens at once: one
         for (VWindow *w in gWindows) for (NSView *b in [w.toolbar valueForKey:@"extBtns"]) b.needsDisplay = YES;
     });
 }
-static VTab *TabForID(NSInteger i) { for (VTab *t in AllTabs(NO)) if (TabID(t) == i) return t; return nil; }
-static VTab *TabForView(WKWebView *w) { for (VTab *t in AllTabs(NO)) if (t.web.web == w) return t; return nil; }
+static VTab *TabForID(NSInteger i) { for (VTab *t in AllTabs(YES)) if (TabID(t) == i) return t; return nil; }
+static VTab *TabForView(WKWebView *w) { for (VTab *t in AllTabs(YES)) if (t.web.web == w) return t; return nil; }
+static BOOL ExtSees(NSString *ident, VTab *t) { return t && (!t.owner.isPrivate || ExtAllowedPrivate(ident)); }
 static NSInteger WinID(VWindow *w) {
     static NSInteger next = 1;
     NSNumber *n = objc_getAssociatedObject(w, "irisWinId");
@@ -6622,7 +6636,7 @@ static NSDictionary *TabInfo(VTab *t) {
     VWindow *o = t.owner ?: gWin;
     return @{@"id": @(TabID(t)), @"index": @([o.tabs indexOfObject:t]), @"windowId": @(WinID(o)), @"active": @((BOOL)(t == o.current)), @"highlighted": @((BOOL)(t == o.current)),
              @"pinned": @(t.pinned), @"url": t.url ?: @"", @"title": t.title ?: @"", @"status": t.loading ? @"loading" : @"complete",
-             @"incognito": @NO, @"audible": @NO, @"discarded": @((BOOL)(t.web == nil)), @"autoDiscardable": @YES, @"groupId": @-1};
+             @"incognito": @(o.isPrivate), @"audible": @NO, @"discarded": @((BOOL)(t.web == nil)), @"autoDiscardable": @YES, @"groupId": @-1};
 }
 
 // Frames: Chrome gives every frame a number (0 = the page). WebKit's frames carry an id of their own; Iris
@@ -6673,6 +6687,7 @@ __attribute__((constructor)) static void IrisExtDebugInit(void) {   // a file na
     NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *_userScripts;      // extension → chrome.userScripts entries
     NSHashTable<WKUserScript *> *_dynScripts;   // the WebKit scripts made from those (swapped out when they change)
     WKUserContentController *_ucc;
+    __weak WKUserContentController *_privUcc;   // private windows' controller: only the extensions you allowed there
     BOOL _installed;
     NSString *_shim;
     NSPopover *_popover;
@@ -6820,7 +6835,23 @@ static WKUserScript *MatchedScript(NSString *src, WKUserScriptInjectionTime when
         for (NSDictionary *cs in e.manifest[@"content_scripts"] ?: @[]) for (WKUserScript *us in [self userScriptsFor:cs ext:e]) [ucc addUserScript:us];
     }
     _ucc = ucc;
-    [self addRegisteredScripts];
+    [self addRegisteredTo:ucc private:NO];
+}
+// Private windows: the same, for the extensions you allowed there (each private controller is built once and kept).
+- (void)installPrivate:(WKUserContentController *)ucc {
+    NSMutableArray<FExt *> *allowed = [NSMutableArray array];
+    for (FExt *e in _exts.allValues) if (ExtAllowedPrivate(e.ident)) [allowed addObject:e];
+    if (!allowed.count) return;
+    WKContentWorld *page = WKContentWorld.pageWorld;
+    [ucc addScriptMessageHandlerWithReply:self contentWorld:page name:@"irisExt"];
+    [ucc addUserScript:[[WKUserScript alloc] initWithSource:[self shimFor:@"page" ext:nil] injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:page]];
+    for (FExt *e in allowed) {
+        [ucc addScriptMessageHandlerWithReply:self contentWorld:e.world name:@"irisExt"];
+        [ucc addUserScript:[[WKUserScript alloc] initWithSource:[self shimFor:@"content" ext:e] injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO inContentWorld:e.world]];
+        for (NSDictionary *cs in e.manifest[@"content_scripts"] ?: @[]) for (WKUserScript *us in [self userScriptsFor:cs ext:e]) [ucc addUserScript:us];
+    }
+    _privUcc = ucc;
+    [self addRegisteredTo:ucc private:YES];
 }
 
 // One content-script entry (from the manifest, or registered at run time in manifest form) → WebKit user scripts.
@@ -6884,25 +6915,31 @@ static NSDictionary *ManifestFormOf(NSDictionary *r) {
     return cs;
 }
 - (void)addRegisteredScripts {
-    if (!_ucc) return;
+    if (_ucc) [self addRegisteredTo:_ucc private:NO];
+    if (_privUcc) [self addRegisteredTo:_privUcc private:YES];
+}
+- (void)addRegisteredTo:(WKUserContentController *)u private:(BOOL)priv {
     for (FExt *e in _exts.allValues) {
-        for (NSDictionary *r in _regScripts[e.ident] ?: @[]) for (WKUserScript *us in [self userScriptsFor:ManifestFormOf(r) ext:e]) { [_dynScripts addObject:us]; [_ucc addUserScript:us]; }
+        if (priv && !ExtAllowedPrivate(e.ident)) continue;
+        for (NSDictionary *r in _regScripts[e.ident] ?: @[]) for (WKUserScript *us in [self userScriptsFor:ManifestFormOf(r) ext:e]) { [_dynScripts addObject:us]; [u addUserScript:us]; }
         for (NSDictionary *r in _userScripts[e.ident] ?: @[]) {
             NSMutableDictionary *cs = [ManifestFormOf(r) mutableCopy]; [cs removeObjectForKey:@"js"];
             cs[@"pieces"] = [r[@"js"] isKindOfClass:NSArray.class] ? r[@"js"] : @[];
             cs[@"world"] = [r[@"world"] isEqual:@"MAIN"] ? @"MAIN" : @"USER_SCRIPT";
-            for (WKUserScript *us in [self userScriptsFor:cs ext:e]) { [_dynScripts addObject:us]; [_ucc addUserScript:us]; }
+            for (WKUserScript *us in [self userScriptsFor:cs ext:e]) { [_dynScripts addObject:us]; [u addUserScript:us]; }
         }
     }
 }
 // Swap the old set for the new: everything else in the controller stays exactly as it was. Pages pick it up as they load.
 - (void)resyncRegisteredScripts {
-    if (!_ucc) return;
-    NSMutableArray *keep = [NSMutableArray array];
-    for (WKUserScript *us in _ucc.userScripts) if (![_dynScripts containsObject:us]) [keep addObject:us];
-    [_ucc removeAllUserScripts];
+    for (WKUserContentController *u in @[_ucc ?: (id)NSNull.null, _privUcc ?: (id)NSNull.null]) {
+        if (![u isKindOfClass:WKUserContentController.class]) continue;
+        NSMutableArray *keep = [NSMutableArray array];
+        for (WKUserScript *us in u.userScripts) if (![_dynScripts containsObject:us]) [keep addObject:us];
+        [u removeAllUserScripts];
+        for (WKUserScript *us in keep) [u addUserScript:us];
+    }
     [_dynScripts removeAllObjects];
-    for (WKUserScript *us in keep) [_ucc addUserScript:us];
     [self addRegisteredScripts];
 }
 - (void)saveRegistered:(FExt *)e {
@@ -7006,6 +7043,7 @@ static BOOL MenuPatternsMatch(id patterns, NSString *url) {
     VTab *tab = TabForView(v);
     BOOL first = YES;
     for (FExt *e in self.extensions) {
+        if (tab && !ExtSees(e.ident, tab)) continue;
         NSArray *items = _menus[e.ident]; if (!items.count) continue;
         BOOL (^applies)(NSDictionary *) = ^BOOL(NSDictionary *x) {
             if ([x[@"visible"] isEqual:@NO]) return NO;
@@ -7140,7 +7178,7 @@ static double ProcessCPUSeconds(pid_t pid) {
 // (blockers such as AdGuard count their blocked requests from it).
 - (void)blocked:(NSURL *)u tab:(VTab *)t ext:(NSString *)ident {
     FExt *e = _exts[ident];
-    if (!e || !e.bgReady || !u.absoluteString.length || t.owner.isPrivate) return;
+    if (!e || !e.bgReady || !u.absoluteString.length || !ExtSees(ident, t)) return;
     static long long seq = 1000;
     NSString *ext = u.pathExtension.lowercaseString;
     NSString *type = [@[@"js", @"mjs"] containsObject:ext] ? @"script" : [@[@"png", @"jpg", @"jpeg", @"gif", @"webp", @"svg", @"avif", @"ico"] containsObject:ext] ? @"image"
@@ -7155,14 +7193,14 @@ static double ProcessCPUSeconds(pid_t pid) {
 }
 
 - (void)tab:(VTab *)t event:(NSString *)kind {
-    if (!t || !_exts.count || t.owner.isPrivate) return;
+    if (!t || !_exts.count) return;
     if ([kind isEqualToString:@"activated"]) ExtBadgesChanged();   // badges are per tab: show this tab's
     NSDictionary *info = TabInfo(t);
     // Chrome announces a tab before anything happens in it; extensions build their per-tab state from that
     static NSMutableSet<NSString *> *announced; if (!announced) announced = [NSMutableSet set];
     BOOL removed = [kind isEqualToString:@"removed"];
     for (FExt *e in _exts.allValues) {
-        if (!e.bgReady) continue;
+        if (!e.bgReady || !ExtSees(e.ident, t)) continue;
         NSString *key = [NSString stringWithFormat:@"%@:%ld", e.ident, (long)TabID(t)];
         BOOL fresh = !removed && ![announced containsObject:key];
         if (removed) [announced removeObject:key]; else [announced addObject:key];
@@ -7254,8 +7292,10 @@ static double ProcessCPUSeconds(pid_t pid) {
         NSDictionary *q = arg(0) ?: @{};
         NSMutableArray *out = [NSMutableArray array];
         BOOL thisWin = [q[@"currentWindow"] boolValue] || [q[@"lastFocusedWindow"] boolValue];
-        for (VTab *t in AllTabs(NO)) {
-            if (thisWin && t.owner != NormalWin()) continue;
+        VWindow *cur = ExtSees(e.ident, gWin.current) ? gWin : NormalWin();
+        for (VTab *t in AllTabs(YES)) {
+            if (!ExtSees(e.ident, t)) continue;
+            if (thisWin && t.owner != cur) continue;
             if ([q[@"windowId"] isKindOfClass:NSNumber.class] && [q[@"windowId"] integerValue] > 0 && WinID(t.owner) != [q[@"windowId"] integerValue]) continue;
             if ([q[@"active"] isKindOfClass:NSNumber.class] && [q[@"active"] boolValue] != (t == t.owner.current)) continue;
             if (q[@"url"]) { NSString *pat = [q[@"url"] isKindOfClass:NSString.class] ? q[@"url"] : nil; if (pat && ![pat isEqualToString:@"<all_urls>"] && ![t.url ?: @"" hasPrefix:[pat stringByReplacingOccurrencesOfString:@"*" withString:@""]]) continue; }
@@ -7366,7 +7406,7 @@ static double ProcessCPUSeconds(pid_t pid) {
     NSDictionary *a = @{@"c": changes, @"a": areaName};
     NSString *body = @"return globalThis.__irisStorageChanged ? __irisStorageChanged(c, a) : false";
     if (e.background) [self call:body args:a view:e.background world:WKContentWorld.pageWorld frame:nil done:nil];
-    for (VTab *t in AllTabs(NO)) if (t.web.web) {
+    for (VTab *t in AllTabs(YES)) if (t.web.web && ExtSees(e.ident, t)) {
         [self call:body args:a view:t.web.web world:e.world frame:nil done:nil];
         if ([t.url hasPrefix:@"chrome-extension://"]) [self call:body args:a view:t.web.web world:WKContentWorld.pageWorld frame:nil done:nil];
     }
@@ -7498,13 +7538,19 @@ static double ProcessCPUSeconds(pid_t pid) {
     NSMutableArray *out = [NSMutableArray array];
     for (NSDictionary *src in @[_exts, _disabled]) for (FExt *e in src.allValues)
         [out addObject:@{@"ident": e.ident, @"name": e.name ?: e.ident, @"version": e.manifest[@"version"] ?: @"", @"dir": e.dir,
-                         @"enabled": @(src == _exts), @"icon": [self iconFor:e] ?: [NSImage imageWithSystemSymbolName:@"puzzlepiece.extension" accessibilityDescription:nil]}];
+                         @"enabled": @(src == _exts), @"private": @(ExtAllowedPrivate(e.ident)), @"icon": [self iconFor:e] ?: [NSImage imageWithSystemSymbolName:@"puzzlepiece.extension" accessibilityDescription:nil]}];
     return [out sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) { return [a[@"name"] compare:b[@"name"]]; }];
 }
 - (void)setExtension:(NSString *)ident enabled:(BOOL)on {
     NSMutableArray *off = [[Defaults() arrayForKey:kExtDisabled] ?: @[] mutableCopy];
     if (on) [off removeObject:ident]; else if (![off containsObject:ident]) [off addObject:ident];
     [Defaults() setObject:off forKey:kExtDisabled];
+}
+- (void)setExtension:(NSString *)ident private:(BOOL)on {
+    NSMutableArray *a = [[Defaults() arrayForKey:kExtPrivate] ?: @[] mutableCopy];
+    if (on) { if (![a containsObject:ident]) [a addObject:ident]; } else [a removeObject:ident];
+    [Defaults() setObject:a forKey:kExtPrivate];
+    PrivateExtensionsChanged();
 }
 - (void)removeExtension:(NSString *)ident {
     FExt *e = _exts[ident] ?: _disabled[ident]; if (!e) return;
@@ -9905,7 +9951,9 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
         NSArray *exts = FExtHost.shared.extensions;
         VPItem *h = [self add:VPHeader rect:NSMakeRect(x, y, cw, 40) title:@"Extensions"];
         h.icon = Tinted(Symbol(@"puzzlepiece.extension", 16, NSFontWeightMedium), vText);
-        h.meta = w.isPrivate ? @"They don't run in private windows" : [NSString stringWithFormat:@"%lu installed", (unsigned long)exts.count];
+        NSUInteger inPriv = 0; for (id e in exts) if (ExtAllowedPrivate([e valueForKey:@"ident"])) inPriv++;
+        h.meta = !w.isPrivate ? [NSString stringWithFormat:@"%lu installed", (unsigned long)exts.count]
+               : inPriv ? [NSString stringWithFormat:@"%lu allowed in private windows", (unsigned long)inPriv] : @"None allowed in private windows · Settings › Extensions";
         y += 40 + 14;
         for (id e in exts) {
             NSString *ident = [e valueForKey:@"ident"];
@@ -9914,7 +9962,7 @@ static CGFloat ChipWidth(NSString *t, NSString *meta) {
             NSRange cut = [name rangeOfString:@" - "]; if (cut.location == NSNotFound) cut = [name rangeOfString:@": "];
             VPItem *row = [self add:VPRow rect:NSMakeRect(x - 8, y, cw - (opts ? 104 : 64), 36) title:cut.location != NSNotFound ? [name substringToIndex:cut.location] : name];
             row.icon = [FExtHost.shared iconFor:e];
-            if (!w.isPrivate) row.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [FExtHost.shared openPopup:e from:ww.toolbar.extMenuBtn]; };
+            if (!w.isPrivate || ExtAllowedPrivate(ident)) row.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [FExtHost.shared openPopup:e from:ww.toolbar.extMenuBtn]; };
             if (opts) { VPItem *o = [self add:VPPill rect:NSMakeRect(x + cw - 100, y + 5, 32, 26) title:@""]; o.symbol = @"gearshape";
                         o.act = ^(NSEvent *ev, NSRect r) { [ws.owner closePanels]; [FExtHost.shared openOptionsForID:ident]; }; }
             VPItem *pin = [self add:VPPill rect:NSMakeRect(x + cw - 64, y + 5, 64, 26) title:pinned ? @"Pinned" : @"Pin"]; pin.on = pinned; pin.symbol = pinned ? @"pin.fill" : @"pin";
@@ -13911,6 +13959,11 @@ static void CtlOut(NSString *s) {
             CtlOut([NSString stringWithFormat:@"helium info %@", [st valueForKeyPath:@"profile.info_cache"] ?: @"(none)"]);
             CtlOut([NSString stringWithFormat:@"ff ini %@", [NSString stringWithContentsOfFile:AppSupport(@"Firefox/profiles.ini") encoding:NSUTF8StringEncoding error:nil] ?: @"(none)"]);
         }
+        else if ([cmd isEqualToString:@"extpriv"]) {   // dev: "extpriv <id> on|off" allows an extension in private windows
+            NSArray *p = [arg componentsSeparatedByString:@" "];
+            if (p.count == 2) [FExtHost.shared setExtension:p[0] private:[p[1] isEqualToString:@"on"]];
+            CtlOut([NSString stringWithFormat:@"extpriv %@", arg]);
+        }
         else if ([cmd isEqualToString:@"extset"]) {   // dev: "extset <id> on|off" turns an installed extension on or off
             NSArray *w = [arg componentsSeparatedByString:@" "];
             if (w.count == 2) { [FExtHost.shared setExtension:w[0] enabled:[w[1] isEqualToString:@"on"]]; CtlOut([NSString stringWithFormat:@"extset %@ %@", w[0], w[1]]); }
@@ -14917,7 +14970,7 @@ static NSArray *SettingsSchema(VWindow *win) {
                     @[@"Never", @"When my Mac locks or sleeps", @"Also after 1 minute away from Iris", @"Also after 5 minutes away from Iris", @"Also after 15 minutes away from Iris"], [Defaults() integerForKey:kPrivLock],
                     ^(NSInteger i) { [Defaults() setInteger:i forKey:kPrivLock]; }),
             SKey(kPrivHide, @"Hide private windows from screenshots and screen sharing", @"They show up blank in screenshots, recordings and shared screens, including your own.", NO, ^{ PrivateApplyCaptureSetting(); }),
-            SNote(@"Always on in private windows", @"No history or site data kept, no extensions, tracking tags removed, HTTPS first, fingerprinting protection.") ]),
+            SNote(@"Always on in private windows", @"No history or site data kept, only the extensions you allow there, tracking tags removed, HTTPS first, fingerprinting protection.") ]),
         SGroup(@"Security", @[
             SKey(kHTTPSOnly, @"HTTPS-only mode", @"Tries every site over a secure connection and warns you before opening one that isn't.", NO, nil),
             SValue(@"Fraudulent website warnings", @"Off: it would send the addresses you visit to Google Safe Browsing.", @"Off") ]),
@@ -14977,6 +15030,10 @@ static NSArray *SettingsSchema(VWindow *win) {
         gSAct[[@"extrm." stringByAppendingString:ident]] = ^(NSDictionary *a, void (^done)(NSString *)) { [FExtHost.shared removeExtension:ident]; gSettingsNeedRelaunch = YES; done(@"Extension moved to the Trash"); };
         if ([FExtHost.shared hasOptionsForID:ident]) { r[@"options"] = @YES; gSAct[[@"extopt." stringByAppendingString:ident]] = ^(NSDictionary *a, void (^done)(NSString *)) { [FExtHost.shared openOptionsForID:ident]; done(nil); }; }
         [exts addObject:r];
+        NSMutableDictionary *pv = [SSwitch([@"extpriv." stringByAppendingString:ident], @"Allow in private windows", @"It can see and change pages in private windows too.",
+                                          [e[@"private"] boolValue], ^(id v) { [FExtHost.shared setExtension:ident private:[v boolValue]]; }) mutableCopy];
+        pv[@"sub"] = @YES;
+        [exts addObject:pv];
     }
     if (!exts.count) [exts addObject:SNote(@"No extensions yet", nil)];
     NSMutableDictionary *install = SButton(@"installExt", @"Install from the Chrome Web Store", @"Paste the extension's Web Store link.", @"Install…", ^(NSDictionary *a, void (^done)(NSString *)) {

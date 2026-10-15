@@ -68,6 +68,10 @@ main{flex:1;overflow:auto;position:relative;scroll-behavior:smooth}
 .row{display:flex;align-items:center;gap:14px;padding:13px 18px;min-height:54px;position:relative;transition:background .15s}
 .row+.row::before{content:"";position:absolute;top:0;left:18px;right:0;height:1px;background:var(--line)}
 .row.withic+.row::before,.row+.row.withic::before{left:64px}
+/* a setting that belongs to the row above it (an extension's "Allow in private windows"): tucked under its name, no line between */
+.row.sub{padding-left:64px;min-height:0;padding-top:2px;padding-bottom:13px}
+.row.sub::before{display:none}
+.row.sub .t{font-size:12.5px}
 .row:hover{background:color-mix(in srgb,var(--text) 2.2%,transparent)}
 .row .txt{flex:1;min-width:0}
 .row .t{font-size:13.2px;font-weight:500;letter-spacing:-.003em}
@@ -307,7 +311,7 @@ function hl(text) {
 }
 function rowHTML(r) {
   if (r.type === 'note') return `<div class="row note"><svg class="ni" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></svg><div class="txt"><div class="t">${hl(r.title)}</div>${r.detail ? `<div class="d">${hl(r.detail)}</div>` : ''}</div></div>`;
-  return `<div class="row${r.icon ? ' withic' : ''}" data-row="${esc(r.id)}">${r.icon ? `<img class="ic${r.logo ? ' logo' : ''}" src="${r.icon}" alt="">` : ''}<div class="txt"><div class="t">${hl(r.title)}</div>${r.detail ? `<div class="d">${hl(r.detail)}</div>` : ''}</div>${control(r)}</div>`;
+  return `<div class="row${r.icon ? ' withic' : ''}${r.sub ? ' sub' : ''}" data-row="${esc(r.id)}">${r.icon ? `<img class="ic${r.logo ? ' logo' : ''}" src="${r.icon}" alt="">` : ''}<div class="txt"><div class="t">${hl(r.title)}</div>${r.detail ? `<div class="d">${hl(r.detail)}</div>` : ''}</div>${control(r)}</div>`;
 }
 function navHTML() {
   const by = Object.fromEntries(S.map(s => [s.id, s]));
