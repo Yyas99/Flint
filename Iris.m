@@ -14858,6 +14858,28 @@ static NSDictionary *SGroup(NSString *title, NSArray *rows) { return title ? @{@
 static NSDictionary *SSection(NSString *ident, NSString *title, NSString *subtitle, NSString *icon, NSArray *groups) {
     return @{@"id": ident, @"title": title, @"subtitle": subtitle ?: @"", @"icon": icon, @"groups": groups};
 }
+// An icon's own colour: the average of its coloured pixels (greys and see-through parts left out), as #rrggbb.
+static NSString *IconTint(NSImage *im) {
+    const int N = 16;
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:N pixelsHigh:N bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                                                                colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:N * 4 bitsPerPixel:32];
+    if (!rep) return nil;
+    [NSGraphicsContext saveGraphicsState];
+    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+    [im drawInRect:NSMakeRect(0, 0, N, N) fromRect:NSZeroRect operation:NSCompositingOperationCopy fraction:1];
+    [NSGraphicsContext restoreGraphicsState];
+    double r = 0, g = 0, b = 0, w = 0;
+    unsigned char *px = rep.bitmapData;
+    for (int i = 0; i < N * N; i++) {
+        double a = px[i * 4 + 3] / 255.0; if (a < 0.5) continue;
+        double R = px[i * 4] / 255.0 / a, G = px[i * 4 + 1] / 255.0 / a, B = px[i * 4 + 2] / 255.0 / a;
+        double mx = MAX(R, MAX(G, B)), mn = MIN(R, MIN(G, B)), sat = mx > 0 ? (mx - mn) / mx : 0;
+        if (sat < 0.25 || mx < 0.2) continue;   // white, black and greys say nothing about the brand
+        double k = sat * a; r += R * k; g += G * k; b += B * k; w += k;
+    }
+    if (w < 1) return nil;
+    return [NSString stringWithFormat:@"#%02x%02x%02x", (int)MIN(255, r / w * 255), (int)MIN(255, g / w * 255), (int)MIN(255, b / w * 255)];
+}
 static NSString *PNGDataURL(NSImage *im, CGFloat size) {
     if (!im) return nil;
     NSImage *s = [NSImage imageWithSize:NSMakeSize(size, size) flipped:NO drawingHandler:^BOOL(NSRect r) { [im drawInRect:r]; return YES; }];
@@ -15019,23 +15041,33 @@ static NSArray *SettingsSchema(VWindow *win) {
             SKey(kLazyRestore, @"Don't load tabs at launch", @"Tabs load when clicked.", NO, nil) ])
     ])];
 
-    // ── Extensions
+    // ── Extensions: one row each, coloured by its own icon; the private-window switch rides along as a chip
     NSMutableArray *exts = [NSMutableArray array];
+    NSUInteger nOn = 0, nPriv = 0, nAll = 0;
+    if (gSettingsNeedRelaunch) [exts addObject:SButton(@"relaunch", @"Restart Iris to apply your changes", @"Your tabs come back.", @"Relaunch Now", ^(NSDictionary *a, void (^done)(NSString *)) {
+        for (VWindow *w in gWindows) if (!w.isPrivate) { [w saveSession]; break; }
+        [NSTask launchedTaskWithLaunchPath:@"/bin/sh" arguments:@[@"-c", [NSString stringWithFormat:@"sleep 1.2; open \"%@\"", NSBundle.mainBundle.bundlePath]]];
+        [NSApp terminate:nil]; })];
     for (NSDictionary *e in FExtHost.shared.allExtensionInfo) {
-        NSString *ident = e[@"ident"];
-        NSMutableDictionary *r = SRow(@"extension", [@"ext." stringByAppendingString:ident], e[@"name"], [NSString stringWithFormat:@"Version %@ · %@", e[@"version"], ident]);
+        NSString *ident = e[@"ident"], *full = e[@"name"] ?: ident;
+        // the name as people say it: "Proton Pass", not "Proton Pass: Free Password Manager"
+        NSString *name = full;
+        for (NSString *cut in @[@" - ", @" – ", @": ", @" | "]) { NSRange r = [name rangeOfString:cut]; if (r.location != NSNotFound && r.location > 2) name = [name substringToIndex:r.location]; }
+        NSMutableDictionary *r = SRow(@"extension", [@"ext." stringByAppendingString:ident], name, [NSString stringWithFormat:@"Version %@", e[@"version"]]);
+        r[@"full"] = full; r[@"ident"] = ident; r[@"version"] = e[@"version"] ?: @"";
         r[@"value"] = e[@"enabled"] ?: @NO;
-        NSString *icon = [e[@"icon"] isKindOfClass:NSImage.class] ? PNGDataURL(e[@"icon"], 56) : nil; if (icon) r[@"icon"] = icon;
+        r[@"private"] = e[@"private"] ?: @NO;
+        nAll++; if ([e[@"enabled"] boolValue]) nOn++; if ([e[@"private"] boolValue] && [e[@"enabled"] boolValue]) nPriv++;
+        NSImage *im = [e[@"icon"] isKindOfClass:NSImage.class] ? e[@"icon"] : nil;
+        NSString *icon = im ? PNGDataURL(im, 80) : nil; if (icon) r[@"icon"] = icon;
+        NSString *tint = im ? IconTint(im) : nil; if (tint) r[@"tint"] = tint;
         gSSet[r[@"id"]] = ^(id v) { [FExtHost.shared setExtension:ident enabled:[v boolValue]]; gSettingsNeedRelaunch = YES; };
+        gSSet[[@"extpriv." stringByAppendingString:ident]] = ^(id v) { [FExtHost.shared setExtension:ident private:[v boolValue]]; };
         gSAct[[@"extrm." stringByAppendingString:ident]] = ^(NSDictionary *a, void (^done)(NSString *)) { [FExtHost.shared removeExtension:ident]; gSettingsNeedRelaunch = YES; done(@"Extension moved to the Trash"); };
         if ([FExtHost.shared hasOptionsForID:ident]) { r[@"options"] = @YES; gSAct[[@"extopt." stringByAppendingString:ident]] = ^(NSDictionary *a, void (^done)(NSString *)) { [FExtHost.shared openOptionsForID:ident]; done(nil); }; }
         [exts addObject:r];
-        NSMutableDictionary *pv = [SSwitch([@"extpriv." stringByAppendingString:ident], @"Allow in private windows", @"It can see and change pages in private windows too.",
-                                          [e[@"private"] boolValue], ^(id v) { [FExtHost.shared setExtension:ident private:[v boolValue]]; }) mutableCopy];
-        pv[@"sub"] = @YES;
-        [exts addObject:pv];
     }
-    if (!exts.count) [exts addObject:SNote(@"No extensions yet", nil)];
+    if (!nAll) [exts addObject:SNote(@"No extensions yet", @"Install one from the Chrome Web Store below: a blocker such as uBlock Origin Lite, a password manager, anything built for Chrome.")];
     NSMutableDictionary *install = SButton(@"installExt", @"Install from the Chrome Web Store", @"Paste the extension's Web Store link.", @"Install…", ^(NSDictionary *a, void (^done)(NSString *)) {
         NSString *link = Trim([a[@"url"] description] ?: @""); if (!link.length) { done(nil); return; }
         [win showToast:@"Installing extension…"];
@@ -15046,13 +15078,12 @@ static NSArray *SettingsSchema(VWindow *win) {
     });
     install[@"prompt"] = @{@"title": @"Install from the Chrome Web Store", @"text": @"Paste the extension's page address from chromewebstore.google.com.", @"ok": @"Install",
                            @"fields": @[@{@"name": @"url", @"placeholder": @"https://chromewebstore.google.com/detail/…", @"value": @""}]};
-    NSMutableArray *add = [NSMutableArray arrayWithObjects:install,
-        SButton(@"extFolder", @"Extensions folder", @"Unpacked extensions placed here load at launch.", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:ExtRoot()]]; done(nil); }), nil];
-    if (gSettingsNeedRelaunch) [add addObject:SButton(@"relaunch", @"Restart Iris to apply extension changes", @"Your tabs come back.", @"Relaunch Now", ^(NSDictionary *a, void (^done)(NSString *)) {
-        for (VWindow *w in gWindows) if (!w.isPrivate) { [w saveSession]; break; }
-        [NSTask launchedTaskWithLaunchPath:@"/bin/sh" arguments:@[@"-c", [NSString stringWithFormat:@"sleep 1.2; open \"%@\"", NSBundle.mainBundle.bundlePath]]];
-        [NSApp terminate:nil]; })];
-    [S addObject:SSection(@"extensions", @"Extensions", @"Chrome extensions.", @"puzzle", @[ SGroup(@"Installed", exts), SGroup(@"Add", add) ])];
+    NSArray *add = @[install,
+        SButton(@"extFolder", @"Extensions folder", @"Unpacked extensions placed here load at launch.", @"Open", ^(NSDictionary *a, void (^done)(NSString *)) { [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:ExtRoot()]]; done(nil); })];
+    NSString *extSub = !nAll ? @"Chrome extensions run in Iris, from blockers to password managers."
+                     : [NSString stringWithFormat:@"%lu of %lu on%@.", (unsigned long)nOn, (unsigned long)nAll,
+                        nPriv ? [NSString stringWithFormat:@", %lu allowed in private windows", (unsigned long)nPriv] : @", none in private windows"];
+    [S addObject:SSection(@"extensions", @"Extensions", extSub, @"puzzle", @[ SGroup(@"Installed", exts), SGroup(@"Add", add) ])];
     NSMutableArray *apps = [NSMutableArray array];   // sites installed as apps
     for (NSDictionary *a in WebAppRegistry()) {
         if (![NSFileManager.defaultManager fileExistsAtPath:a[@"path"] ?: @""]) continue;
