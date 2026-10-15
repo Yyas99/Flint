@@ -9270,7 +9270,7 @@ static CGFloat ShelfDistance(NSView *root, NSPoint p) {
 }
 // Intent, not passing through: the tabs open once the pointer has been in the zone for 30 ms moving slowly.
 // A fast pass (travel toward the Dock or across the page) keeps restarting the clock and leaves before it runs out.
-static NSInteger gShelfGen; static BOOL gShelfIn; static CFTimeInterval gShelfSince, gShelfLastT; static NSPoint gShelfLastP;
+static NSInteger gShelfGen; static BOOL gShelfIn, gShelfPending; static CFTimeInterval gShelfSince, gShelfLastT; static NSPoint gShelfLastP;
 
 // While the pointer is over the tab strip or the tab map, the page underneath stops hearing mouse moves: otherwise it
 // keeps setting its own cursor (a hand, a text beam) for whatever lies hidden behind the widget.
@@ -9294,6 +9294,7 @@ static void ShelfMuteFor(VWindow *w) {   // w: the window whose widget is under 
     if (cur) PageHearsMouse(cur, YES);
     if (w) PageHearsMouse(w, NO);
 }
+static BOOL gShelfDebug;   // development: log how the hover decides (a ".shelfdebug" file beside Iris Dev)
 static void ShelfTrack(NSPoint screen) {
     // this runs on every mouse move anywhere on the Mac: plain arithmetic first, and the window server is only asked
     // "which window is on top here?" when the pointer is actually near an Iris window's bottom edge
@@ -9311,14 +9312,16 @@ static void ShelfTrack(NSPoint screen) {
     static BOOL leaning;
     if (!near) {
         ShelfMuteFor(nil);
-        if (gShelfIn) { gShelfIn = NO; gShelfGen++; }
+        if (gShelfIn) { gShelfIn = NO; gShelfGen++; gShelfPending = NO; }
         if (leaning) { leaning = NO; for (VWindow *w in gWindows) [(VShelfHandle *)w.shelfHandle setApproach:0]; }
         return;
     }
     VWindow *hit = nil, *over = nil;
     static NSInteger lastTop; static CFTimeInterval lastAsk; static NSPoint lastAt;
-    CFTimeInterval nowT = CACurrentMediaTime();
-    if (nowT - lastAsk > 0.12 || hypot(screen.x - lastAt.x, screen.y - lastAt.y) > 60) {   // the window server is only asked now and then
+    CFTimeInterval nowT = CACurrentMediaTime();   // (this only runs within ~100 pt of an Iris window's edge)
+    // the window server is asked fresh on every move this close to an edge (a cached answer from a moment ago could
+    // name another window and leave the pointer sitting on the line with nothing happening)
+    {
         lastTop = [NSWindow windowNumberAtPoint:screen belowWindowWithWindowNumber:0]; lastAsk = nowT; lastAt = screen;
     }
     NSInteger topNumber = lastTop;
@@ -9331,6 +9334,7 @@ static void ShelfTrack(NSPoint screen) {
         if (!s.shown) {
             BOOL ok = topNumber == win.windowNumber && ![Defaults() boolForKey:kShelfNoHover] && ![[w valueForKey:@"pageFull"] boolValue];
             if (!hit && ok && ShelfZone(root, p)) hit = w;
+            if (gShelfDebug && ShelfDistance(root, p) < 40) DLog(@"shelf: %.3f p=%.0f,%.0f top=%ld win=%ld ok=%d zone=%d lift=%.2f", fmod(CACurrentMediaTime(), 100), p.x, p.y, (long)topNumber, (long)win.windowNumber, ok, ShelfZone(root, p), ((VShelfHandle *)w.shelfHandle).lift);
             // the closer the pointer comes (within 100 pt of the tab map), the further the map leans up to meet it
             CGFloat a = ok ? MAX(0, 1 - ShelfDistance(root, p) / 100) : 0;
             [(VShelfHandle *)w.shelfHandle setApproach:a]; if (a > 0) leaning = YES;
@@ -9341,25 +9345,43 @@ static void ShelfTrack(NSPoint screen) {
             if ((s.shown && NSPointInRect(p, s.frame)) || (!hd.hidden && !s.shown && NSPointInRect(p, handleHit))) over = w;
         }
     }
+    CFTimeInterval tm = CACurrentMediaTime();
     ShelfMuteFor(over);
-    if (!hit) { if (gShelfIn) { gShelfIn = NO; gShelfGen++; } return; }
+    if (gShelfDebug && CACurrentMediaTime() - tm > 0.005) DLog(@"shelf: %.3f muting took %.0fms", fmod(tm, 100), (CACurrentMediaTime() - tm) * 1000);
+    if (!hit) { if (gShelfIn) { gShelfIn = NO; gShelfGen++; gShelfPending = NO; } return; }
     CFTimeInterval now = CACurrentMediaTime();
     double speed = gShelfIn ? hypot(screen.x - gShelfLastP.x, screen.y - gShelfLastP.y) / MAX(0.001, now - gShelfLastT) : 1e9;
-    if (!gShelfIn || speed > 450) gShelfSince = now;   // still travelling: the clock starts once it slows down
+    BOOL restart = !gShelfIn || speed > 450;   // still travelling: the clock starts once it slows down
+    if (restart) gShelfSince = now;
     gShelfIn = YES; gShelfLastP = screen; gShelfLastT = now;
+    // A hand still creeping in: its own moves carry the clock, and the tabs open on the move that finds 30 ms passed.
+    if (!restart && now - gShelfSince >= 0.03 && !((VTabShelf *)hit.shelf).shown) {
+        if (gShelfDebug) DLog(@"shelf: %.3f open on move, %.0fms in", fmod(now, 100), (now - gShelfSince) * 1000);
+        gShelfGen++; gShelfPending = NO; [hit showShelf:YES]; return;
+    }
+    if (!restart && gShelfPending) return;   // the timer below is already waiting for this visit
+    gShelfPending = YES;
     NSInteger gen = ++gShelfGen;
     __weak VWindow *ww = hit;
     double wait = MAX(0.02, gShelfSince + 0.03 - now);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    if (gShelfDebug) DLog(@"shelf: %.3f in zone speed=%.0f wait=%.0fms", fmod(now, 100), speed, wait * 1000);
+    // For a pointer that has stopped: a timer with no tolerance, in every run-loop mode (a plain dispatch_after could be
+    // held back by macOS's timer coalescing, most of all while Iris isn't the frontmost app)
+    NSTimer *fire = [NSTimer timerWithTimeInterval:wait repeats:NO block:^(NSTimer *t) {
+        if (gen == gShelfGen) gShelfPending = NO;
         VWindow *x = ww; if (!x || gen != gShelfGen || ((VTabShelf *)x.shelf).shown) return;
         NSView *rt = x.window.contentView;
         NSPoint q = [rt convertPoint:[x.window convertPointFromScreen:NSEvent.mouseLocation] fromView:nil];
-        if (ShelfZone(rt, q) && CACurrentMediaTime() - gShelfSince >= 0.02) [x showShelf:YES];
-    });
+        BOOL z = ShelfZone(rt, q); if (gShelfDebug) DLog(@"shelf: %.3f fire zone=%d since=%.0fms", fmod(CACurrentMediaTime(), 100), z, (CACurrentMediaTime() - gShelfSince) * 1000);
+        if (z && CACurrentMediaTime() - gShelfSince >= 0.02) [x showShelf:YES];
+    }];
+    fire.tolerance = 0;
+    [NSRunLoop.mainRunLoop addTimer:fire forMode:NSRunLoopCommonModes];
 }
 static void InstallShelfMonitor(void) {
     static id mon, outside;
     if (mon) return;
+    gShelfDebug = IrisIsDev() && [NSFileManager.defaultManager fileExistsAtPath:[NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".shelfdebug"]];
     outside = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskMouseMoved handler:^(NSEvent *e) { ShelfTrack(NSEvent.mouseLocation); }];
     mon = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMouseMoved | NSEventMaskKeyDown | NSEventMaskLeftMouseDown handler:^NSEvent *(NSEvent *e) {
         if (e.type == NSEventTypeMouseMoved) { ShelfTrack(NSEvent.mouseLocation); return e; }
@@ -9410,13 +9432,17 @@ static void InstallShelfMonitor(void) {
     VTabShelf *s = (VTabShelf *)self.shelf;
     if (!s || s.shown == on) return;
     if (on && [[self valueForKey:@"pageFull"] boolValue]) return;
+    CFTimeInterval t0 = CACurrentMediaTime();
     s.shown = on;
     NSRect f = [self shelfFrame];
     if (on) {
         if (s.superview) [s.superview addSubview:s positioned:NSWindowAbove relativeTo:nil];
         s.search.stringValue = @"";
+        CFTimeInterval ta = CACurrentMediaTime();
         CaptureThumb(self.current);
+        CFTimeInterval tb = CACurrentMediaTime();
         [s reload]; f = [self shelfFrame];
+        CFTimeInterval tc = CACurrentMediaTime();
         [CATransaction begin]; [CATransaction setDisableActions:YES];   // start from just below its place, not wherever it last was
         s.frame = [self shelfRestFrame]; s.alphaValue = 0; s.hidden = NO;
         ((VShelfStrip *)s.strip).kbd = -1;
@@ -9426,6 +9452,7 @@ static void InstallShelfMonitor(void) {
         [CATransaction flush];   // the start position reaches the screen now: after a fresh launch the layer still held its first,
                                  // full-height frame and the slide began from there (it seemed to drop in from above)
         self.shelfHandle.hidden = YES;
+        if (gShelfDebug) DLog(@"shelf: %.3f shown, built in %.0fms (thumb %.0f, cards %.0f, draw+flush %.0f)", fmod(CACurrentMediaTime(), 100), (CACurrentMediaTime() - t0) * 1000, (tb - ta) * 1000, (tc - tb) * 1000, (CACurrentMediaTime() - tc) * 1000);
         NSRect rest = s.frame;
         dispatch_async(dispatch_get_main_queue(), ^{   // next turn: the start position is on screen before it moves
             if (!s.shown) return;
